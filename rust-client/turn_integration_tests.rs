@@ -2359,7 +2359,7 @@ async fn nine_windows_workers_register_with_a_wsl_server_without_missing_or_dupl
                 allocation_ready: None,
                 scale_notify: None,
                 target_workers: None,
-                configured_workers: 0,
+                configured_workers: WORKERS, // ask for all of them: with 0 the server agrees 3 and the client scales the rest down
             },
         )));
     }
@@ -3225,7 +3225,7 @@ async fn streams_partial_death_keeps_tunnel_and_dataplane_alive() {
                 allocation_ready: None,
                 scale_notify: None,
                 target_workers: None,
-                configured_workers: 0,
+                configured_workers: WORKERS,
             },
         )));
     }
