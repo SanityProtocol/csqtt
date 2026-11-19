@@ -8833,6 +8833,11 @@ const PANEL_HTML: &str = r##"
             .routing-header { gap: 8px !important; margin-bottom: 16px !important; }
         }
 
+        @media(max-width: 420px) {
+            /* the version beside CSQTT needs the room: the API button keeps its icon and title, without the word */
+            .btn-api span { display: none; }
+        }
+
         @media(max-width: 768px) {
             header { height: 64px; }
             .header-container { padding: 0 16px; }
