@@ -4,8 +4,9 @@
 #   exactly those cores.
 # - The APKs are UNSIGNED: the signing key never leaves the laptop. This workflow publishes nothing to Releases; release
 #   assets are uploaded once, by hand, and never replaced.
-# - `ref` (manual runs) builds another source ref with this commit's recipe, e.g. release-2.5.3's 0188606 to compare with
-#   what was shipped.
+# - `ref` (manual runs) builds another source commit with this commit's recipe, e.g. 2.5.3's
+#   0188606a243c92a54440be09dc59a93848c463aa to compare with what was shipped. A commit is given as its FULL sha: checkout
+#   reads anything shorter as a branch or tag name.
 name: build
 
 on:
@@ -14,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Source commit or ref to build (empty = this commit); the recipe in ci/ is always this commit's"
+        description: "Source to build: a FULL commit sha, a branch or a tag (empty = this commit); the recipe in ci/ is always this commit's"
         required: false
         default: ""
         type: string
@@ -22,15 +23,19 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: build-${{ github.ref }}-${{ inputs.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
+      - name: Free disk space
+        # the Android image (SDK + NDK) and three Rust target dirs need more than a hosted runner has free; these
+        # preinstalled toolchains are never used here (every build runs in our own pinned images)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
       - name: Checkout the recipe
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
