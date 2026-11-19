@@ -79,9 +79,7 @@ import com.csqtt.client.ui.legacy.components.LocalCsqttHeaderActions
 import com.csqtt.client.ui.legacy.design.CsqttMotion
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.dialogs.VkAuthDialog
-import com.csqtt.client.ui.v2.dialogs.V2VkAuthDialog
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
-import com.csqtt.client.ui.v2.navigation.CsqttV2Root
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
@@ -137,7 +135,7 @@ class MainActivity : ComponentActivity() {
 
         checkAndRequestNotifications()
 
-        // Subscriptions refresh while the app is open, whichever design is shown (it lived in the V2 screen only)
+        // Subscriptions refresh while the app is open
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 while (isActive) {
@@ -151,21 +149,9 @@ class MainActivity : ComponentActivity() {
             val authContext = LocalContext.current.applicationContext
             val authScope = rememberCoroutineScope()
             val uiStateHolder = rememberSaveableStateHolder()
-            // The look the user chose in settings: classic (the default) or the V2 redesign; null until it is read.
-            val design by appSettingsStore.uiDesign.collectAsStateWithLifecycle<String?>(initialValue = null)
-            val v2Design = design == CsqttConstants.Theme.DESIGN_V2
             if (renderUi) {
-                uiStateHolder.SaveableStateProvider(if (v2Design) "main_ui_v2" else "main_ui") {
+                uiStateHolder.SaveableStateProvider("main_ui") {
             val settingsStore = remember { appSettingsStore }
-            if (design == null) {
-                // a few frames at start: drawing nothing beats flashing the other design
-            } else if (v2Design) {
-                LaunchedEffect(Unit) { com.csqtt.client.ui.v2.screens.settings.preloadAvatars(authContext) }
-                CsqttV2Root(
-                    settingsStore = settingsStore,
-                    onVkAuthRequested = { showVkAuthDialog = true },
-                )
-            } else {
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Theme.MODE_SYSTEM)
             val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
             val scope = rememberCoroutineScope()
@@ -216,7 +202,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
             }
-            }
                 }
             }
             if (showVkAuthDialog) {
@@ -229,23 +214,7 @@ class MainActivity : ComponentActivity() {
                         authContext.showRaisedToast(kind, Toast.LENGTH_SHORT)
                     }
                 }
-                if (v2Design) {
-                    V2VkAuthDialog(onToken = onToken, onDismiss = { showVkAuthDialog = false })
-                } else {
-                    VkAuthDialog(onToken = onToken, onDismiss = { showVkAuthDialog = false })
-                }
-            }
-            val pendingLink = pendingDeepLink
-            if (pendingLink != null && v2Design) {
-                com.csqtt.client.ui.v2.dialogs.V2BrowserImportDialog(
-                    rawLink = pendingLink,
-                    settingsStore = remember { appSettingsStore },
-                    onDismiss = { pendingDeepLink = null },
-                    onImported = { _, name ->
-                        pendingDeepLink = null
-                        showRaisedToast("Профиль «$name» успешно импортирован", Toast.LENGTH_SHORT)
-                    },
-                )
+                VkAuthDialog(onToken = onToken, onDismiss = { showVkAuthDialog = false })
             }
         }
     }
