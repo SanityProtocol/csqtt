@@ -200,12 +200,19 @@ struct WriterRuntime {
 
 pub const MAX_ROUTING_CHUNKS: usize = 8192;
 
-#[derive(Default)]
+/// Reassembles one chunked control family (`<PREFIX>:START/<i>/FINISH`, base64 of gzip JSON): ROUTING, and S8's HASHES.
 pub struct RoutingReassembler {
+    prefix: &'static str,
     total_chunks: usize,
     chunks: Vec<Option<String>>,
     received_count: usize,
     finished: bool,
+}
+
+impl Default for RoutingReassembler {
+    fn default() -> Self {
+        Self::with_prefix("ROUTING:")
+    }
 }
 
 impl RoutingReassembler {
@@ -213,9 +220,13 @@ impl RoutingReassembler {
         Self::default()
     }
 
+    pub fn with_prefix(prefix: &'static str) -> Self {
+        Self { prefix, total_chunks: 0, chunks: Vec::new(), received_count: 0, finished: false }
+    }
+
     pub fn feed(&mut self, payload: &[u8]) -> Option<String> {
         let text = std::str::from_utf8(payload).ok()?;
-        let rest = text.strip_prefix("ROUTING:")?;
+        let rest = text.strip_prefix(self.prefix)?;
         if let Some(total_str) = rest.strip_prefix("START:") {
             let total: usize = total_str.trim().parse().ok()?;
             if total == 0 || total > MAX_ROUTING_CHUNKS {
@@ -297,13 +308,56 @@ impl RoutingReassembler {
     }
 }
 
+/// A chunked control message, reassembled.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ControlMessage {
+    Routing(String),
+    /// S8: the hashes the participant's link carries, sent only to a client that announced `caps=h1`
+    Hashes(String),
+}
+
+/// The chunked control families a session reads: ROUTING, and HASHES (S8).
+#[derive(Default)]
+pub struct ControlReassembler {
+    routing: RoutingReassembler,
+    hashes: Option<RoutingReassembler>,
+}
+
+impl ControlReassembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_chunked(payload: &[u8]) -> bool {
+        payload.starts_with(b"ROUTING:") || payload.starts_with(b"HASHES:")
+    }
+
+    pub fn feed(&mut self, payload: &[u8]) -> Option<ControlMessage> {
+        if payload.starts_with(b"HASHES:") {
+            // built on the first HASHES: line, so a server without S8 costs nothing
+            let hashes = self.hashes.get_or_insert_with(|| RoutingReassembler::with_prefix("HASHES:"));
+            return hashes.feed(payload).map(ControlMessage::Hashes);
+        }
+        self.routing.feed(payload).map(ControlMessage::Routing)
+    }
+}
+
+impl Events {
+    fn control(&self, message: ControlMessage) {
+        match message {
+            ControlMessage::Routing(json) => self.routing(&json),
+            ControlMessage::Hashes(json) => self.hashes(&json),
+        }
+    }
+}
+
 struct ReaderRuntime {
     dispatcher: Arc<Dispatcher>,
     events: Events,
     repair: Arc<RepairState>,
     shutdown: Arc<ShutdownCoordinator>,
     config_tx: mpsc::Sender<String>,
-    routing_reassembler: RoutingReassembler,
+    routing_reassembler: ControlReassembler,
     scale_notify: Option<Arc<tokio::sync::Notify>>,
     target_workers: Option<Arc<AtomicUsize>>,
     configured_workers: usize,
@@ -1091,7 +1145,7 @@ async fn run_allocated_session(
     .context("инициализация SRTP")?;
     let incarnation_id = NEXT_INCARNATION_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let config_tx = config.get_config.then(|| runtime.config_tx.clone());
-    let mut routing_reassembler = RoutingReassembler::new();
+    let mut routing_reassembler = ControlReassembler::new();
     let config_delivered = match request_configuration(
         &mut writer_transport,
         &mut reader_transport,
@@ -1255,7 +1309,7 @@ async fn request_configuration(
     config: &SessionConfig,
     events: &Events,
     config_tx: Option<mpsc::Sender<String>>,
-    routing_reassembler: &mut RoutingReassembler,
+    routing_reassembler: &mut ControlReassembler,
     scale: WorkerScale<'_>,
 ) -> Result<bool> {
     let request = build_registration_payload(config);
@@ -1291,9 +1345,9 @@ async fn request_configuration(
                         events.panel_restart();
                         continue;
                     }
-                    if packet.as_slice().starts_with(b"ROUTING:") {
-                        if let Some(json) = routing_reassembler.feed(packet.as_slice()) {
-                            events.routing(&json);
+                    if ControlReassembler::is_chunked(packet.as_slice()) {
+                        if let Some(message) = routing_reassembler.feed(packet.as_slice()) {
+                            events.control(message);
                         }
                         continue;
                     }
@@ -1498,9 +1552,9 @@ async fn reader_loop(
             }
             continue;
         }
-        if packet.as_slice().starts_with(b"ROUTING:") {
-            if let Some(json) = routing_reassembler.feed(packet.as_slice()) {
-                events.routing(&json);
+        if ControlReassembler::is_chunked(packet.as_slice()) {
+            if let Some(message) = routing_reassembler.feed(packet.as_slice()) {
+                events.control(message);
             }
             continue;
         }
@@ -1665,7 +1719,7 @@ mod tests {
         };
         assert_eq!(
             build_registration_payload(&config).as_ref(),
-            b"GETCONF:9000|pass1234|7|generation-id|1|18"
+            b"GETCONF:9000|pass1234|7|generation-id|1|18|caps=h1"
         );
     }
 
@@ -2356,6 +2410,54 @@ mod tests {
         );
         let res = reassembler.feed(format!("ROUTING:1:3:{}", part1).as_bytes());
         assert_eq!(res, Some(original.to_string()));
+    }
+
+    #[test]
+    fn hashes_reassembled() {
+        use base64::Engine;
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let gz_b64 = |text: &str| {
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(text.as_bytes()).unwrap();
+            base64::engine::general_purpose::STANDARD.encode(enc.finish().unwrap())
+        };
+        let hashes = r#"{"hashes":["hash-a","hash-b"],"version":1}"#;
+        let routing = r#"{"mode":"blacklist","packages":["com.vk"]}"#;
+        let (h, r) = (gz_b64(hashes), gz_b64(routing));
+        let (h1, h2) = h.split_at(h.len() / 2);
+        let mut control = ControlReassembler::new();
+        // the server sends ROUTING, then HASHES; both are control, neither is tunnel data, and they never mix
+        for line in [
+            "ROUTING:START:1".to_owned(),
+            format!("ROUTING:1:1:{r}"),
+        ] {
+            assert!(ControlReassembler::is_chunked(line.as_bytes()));
+            assert_eq!(control.feed(line.as_bytes()), None);
+        }
+        assert_eq!(control.feed(b"HASHES:START:2"), None);
+        assert_eq!(control.feed(format!("HASHES:2:2:{h2}").as_bytes()), None);
+        assert_eq!(
+            control.feed(b"ROUTING:FINISH:1"),
+            Some(ControlMessage::Routing(routing.to_owned()))
+        );
+        assert_eq!(control.feed(format!("HASHES:1:2:{h1}").as_bytes()), None);
+        assert_eq!(control.feed(b"HASHES:FINISH:2"), Some(ControlMessage::Hashes(hashes.to_owned())));
+        // a client that never sees HASHES: (any stock server) builds nothing for it
+        let mut quiet = ControlReassembler::new();
+        assert_eq!(quiet.feed(b"ROUTING:START:1"), None);
+        assert!(quiet.hashes.is_none());
+        assert!(crate::protocol::is_control_response(b"HASHES:START:1"));
+    }
+
+    #[test]
+    fn config_request_announces_h1() {
+        // the capability is field 6, after the six fields every 2.5 server reads (fields 0-5)
+        let request = crate::protocol::config_request("9000", "pw", 7, "salt", 1, None);
+        let fields: Vec<&str> = request.strip_prefix("GETCONF:").unwrap().split('|').collect();
+        assert_eq!(fields.len(), 7);
+        assert_eq!(fields[6], "caps=h1");
     }
 
     #[test]

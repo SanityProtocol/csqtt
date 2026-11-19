@@ -452,13 +452,7 @@ fn make_client_link(
     // A link never carries a VK token (M-169): the sealed link is obfuscation only, so a token in it is readable by every
     // participant. A token-mode entry without its own hashes gets the owner's hashes (its group's, else the server's
     // default) instead.
-    let split = |list: &str| -> Vec<String> {
-        list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
-    };
-    let mut hashes = split(vk_hashes);
-    if hashes.is_empty() && vk_token {
-        hashes = split(owner_hashes);
-    }
+    let hashes = model::link_hashes(vk_hashes, vk_token, owner_hashes);
     if !hashes.is_empty() {
         payload.push_str("&hashes=");
         payload.push_str(
@@ -474,28 +468,13 @@ fn make_client_link(
 
 #[inline]
 fn make_main_link(host: &str, port: u16, db: &model::Database) -> String {
-    let vk_hashes = if db.main_vk_hashes.is_empty() {
-        &db.vk_hashes
-    } else {
-        &db.main_vk_hashes
-    };
-    make_client_link(
-        host,
-        port,
-        &db.main_password,
-        vk_hashes,
-        db.main_vk_token_enabled,
-        &db.vk_hashes,
-    )
+    let (own, token_mode, owner) = db.main_link_inputs();
+    make_client_link(host, port, &db.main_password, own, token_mode, owner)
 }
 
 /// The owner's hashes a token-mode participant of `group_id` gets: the group's own, else the server's default.
 fn owner_hashes<'a>(db: &'a model::Database, group_id: &str) -> &'a str {
-    db.groups
-        .get(group_id)
-        .and_then(|g| g.vk_hashes.as_deref())
-        .filter(|h| !h.trim().is_empty())
-        .unwrap_or(&db.vk_hashes)
+    db.owner_hashes(group_id)
 }
 
 #[inline]
@@ -506,14 +485,8 @@ fn make_entry_link(
     entry: &model::PasswordEntry,
     db: &model::Database,
 ) -> String {
-    make_client_link(
-        host,
-        port,
-        password,
-        &entry.vk_hashes,
-        entry.vk_token_enabled,
-        owner_hashes(db, &entry.group_id),
-    )
+    let (own, token_mode, owner) = db.entry_link_inputs(entry);
+    make_client_link(host, port, password, own, token_mode, owner)
 }
 
 const CAESAR_SHIFT: u8 = 47;

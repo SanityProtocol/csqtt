@@ -397,7 +397,37 @@ impl TrafficSnapshot {
     }
 }
 
+/// The hashes a participant's link carries, and S8 sends over its connection: its own, else, in token mode, the owner's
+/// (`owner`: its group's, else the server's default). Never a token (M-169). One function for both, so they never differ.
+pub fn link_hashes(own: &str, token_mode: bool, owner: &str) -> Vec<String> {
+    let split = |list: &str| -> Vec<String> {
+        list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
+    };
+    let hashes = split(own);
+    if hashes.is_empty() && token_mode { split(owner) } else { hashes }
+}
+
 impl Database {
+    /// The owner's hashes a token-mode participant of `group_id` gets: the group's own, else the server's default.
+    pub fn owner_hashes(&self, group_id: &str) -> &str {
+        self.groups
+            .get(group_id)
+            .and_then(|g| g.vk_hashes.as_deref())
+            .filter(|h| !h.trim().is_empty())
+            .unwrap_or(&self.vk_hashes)
+    }
+
+    /// `link_hashes`'s inputs for the main password: its own hashes, else the server's default.
+    pub fn main_link_inputs(&self) -> (&str, bool, &str) {
+        let own = if self.main_vk_hashes.is_empty() { &self.vk_hashes } else { &self.main_vk_hashes };
+        (own, self.main_vk_token_enabled, &self.vk_hashes)
+    }
+
+    /// `link_hashes`'s inputs for a participant's entry.
+    pub fn entry_link_inputs<'a>(&'a self, entry: &'a PasswordEntry) -> (&'a str, bool, &'a str) {
+        (&entry.vk_hashes, entry.vk_token_enabled, self.owner_hashes(&entry.group_id))
+    }
+
     pub fn auto_restart_interval_hours(&self) -> u8 {
         self.auto_restart_interval_hours
             .unwrap_or(DEFAULT_AUTO_RESTART_INTERVAL_HOURS)

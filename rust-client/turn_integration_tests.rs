@@ -2211,7 +2211,8 @@ async fn running_client_receives_hot_dns_configuration_without_reconnect() {
         .expect("the local TURN relay panicked");
 }
 
-fn apply_e2e_dns(web_url: &str, provider: &str) {
+/// Posts `body` to the panel's /api/settings as the e2e web user; returns the response body.
+fn post_e2e_settings(web_url: &str, body: &str) -> String {
     let login = std::process::Command::new("curl")
         .args([
             "-kfsS",
@@ -2225,42 +2226,167 @@ fn apply_e2e_dns(web_url: &str, provider: &str) {
         ])
         .output()
         .expect("could not invoke curl for CSQTT panel login");
-    assert!(
-        login.status.success(),
-        "CSQTT panel login failed: {}",
-        String::from_utf8_lossy(&login.stderr)
-    );
+    assert!(login.status.success(), "CSQTT panel login failed: {}", String::from_utf8_lossy(&login.stderr));
     let session_cookie = String::from_utf8_lossy(&login.stdout)
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("set-cookie")
-                .then_some(value.trim().split(';').next()?.trim())
+            name.eq_ignore_ascii_case("set-cookie").then_some(value.trim().split(';').next()?.trim())
         })
         .filter(|value| value.starts_with("csqtt_session="))
         .expect("CSQTT panel login did not return csqtt_session")
         .to_owned();
-    let cookie_header = format!("cookie: {session_cookie}");
     let update = std::process::Command::new("curl")
         .args([
             "-kfsS",
             "-H",
-            &cookie_header,
+            &format!("cookie: {session_cookie}"),
             "-H",
             "content-type: application/json",
             "-d",
-            &format!(r#"{{"dns_provider":"{provider}"}}"#),
+            body,
             &format!("{web_url}/api/settings"),
         ])
         .output()
-        .expect("could not invoke curl for CSQTT DNS update");
-    assert!(
-        update.status.success(),
-        "CSQTT hot DNS update failed: {}",
-        String::from_utf8_lossy(&update.stderr)
+        .expect("could not invoke curl for CSQTT settings");
+    assert!(update.status.success(), "CSQTT settings update failed: {}", String::from_utf8_lossy(&update.stderr));
+    String::from_utf8_lossy(&update.stdout).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a separately started CSQTT WSL server, CSQTT_E2E_PEER, and CSQTT_E2E_WEB"]
+async fn owner_hashes_arrive_after_tunconf() {
+    let peer: SocketAddr = std::env::var("CSQTT_E2E_PEER")
+        .expect("CSQTT_E2E_PEER is required")
+        .parse()
+        .expect("CSQTT_E2E_PEER must be an IP:port socket address");
+    let web_url = std::env::var("CSQTT_E2E_WEB").expect("CSQTT_E2E_WEB is required");
+    let relay = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
+    let endpoint = format!(
+        "turn:127.0.0.1:{}?transport=udp",
+        relay.local_addr().unwrap().port()
     );
+    let relay_stop = CancellationToken::new();
+    let relay_task = tokio::spawn(relay_bound_turn_channel_to_peer(
+        relay,
+        peer,
+        relay_stop.clone(),
+    ));
+    // S8: the server's default hashes are what the main password's link carries, so they are what HASHES brings
+    const OWNER_HASHES: &str = "e2eownerhash00000001,e2eownerhash00000002";
+    post_e2e_settings(&web_url, &format!(r#"{{"vk_hashes":"{OWNER_HASHES}"}}"#));
+    let events = Events::new(true);
+    let cancel = CancellationToken::new();
+    let pool = PacketPool::new(96);
+    let stats = Arc::new(Stats::default());
+    let (dispatcher, local_port) = Dispatcher::start(
+        "127.0.0.1:0",
+        None,
+        pool.clone(),
+        stats.clone(),
+        [0u8; 32],
+        crate::obfs::ObfsMode::Audio,
+        cancel.clone(),
+    )
+    .await
+    .unwrap();
+    let password: Arc<str> = Arc::from("e2e-local-password-20260830");
+    let (config_tx, mut config_rx) = tokio::sync::mpsc::channel(4);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let session = tokio::spawn(run_session(
+        SessionConfig {
+            id: 1,
+            peer,
+            turn_host: None,
+            turn_port: None,
+            turn_transport: TurnTransportMode::Udp,
+            srtp_mode: SrtpMode::Auto,
+            local_port: Arc::from(local_port),
+            password: password.clone(),
+            generation: 20_261_120,
+            turn_endpoint_cursor: 0,
+            salt: Arc::from("e2e-hashes-generation"),
+            mode: ObfsMode::Audio,
+            wrap_key: derive_wrap_key(&password).unwrap(),
+            client_wrap_key: derive_wrap_key(&password).unwrap(),
+            get_config: true,
+            server_stream_repair: Arc::new(AtomicBool::new(false)),
+            repair: RepairState::new(1),
+            configured_workers: 1,
+        },
+        TurnCredentials {
+            username: Arc::from(USERNAME),
+            password: Arc::from(PASSWORD),
+            server_addresses: vec![Arc::from(endpoint)].into(),
+        },
+        SessionRuntime {
+            dispatcher: dispatcher.clone(),
+            pool,
+            stats,
+            events: events.clone(),
+            config_tx,
+            config_delivery: Some(ConfigDeliveryState {
+                sent: Arc::new(AtomicBool::new(false)),
+                in_flight: Arc::new(AtomicBool::new(true)),
+            }),
+            cancel: cancel.clone(),
+            shutdown: Arc::new(ShutdownCoordinator::new()),
+            ready_tx: Some(ready_tx),
+            allocation_started: None,
+            allocation_ready: None,
+            scale_notify: None,
+            target_workers: None,
+            configured_workers: 0,
+        },
+    ));
+
+    let initial = tokio::time::timeout(Duration::from_secs(12), config_rx.recv())
+        .await
+        .expect("the client did not receive its initial TUNCONF")
+        .expect("the configuration channel was closed");
+    assert!(initial.starts_with("TUNCONF:"), "{initial}");
+    tokio::time::timeout(Duration::from_secs(3), ready_rx)
+        .await
+        .expect("the dispatcher was not registered")
+        .expect("the ready signal was dropped");
+    // the HASHES message follows TUNCONF on worker 1; the client hands it to the app as one HASHES event
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let hashes = loop {
+        if let Some((_, json)) = events.captured().into_iter().find(|(kind, _)| kind == "HASHES") {
+            break json;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no HASHES event after TUNCONF: {:?}", events.captured());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    post_e2e_settings(&web_url, r#"{"vk_hashes":""}"#);
+    let event: serde_json::Value = serde_json::from_str(&hashes).unwrap();
+    let message: serde_json::Value = serde_json::from_str(event["hashes"].as_str().unwrap()).unwrap();
+    assert_eq!(message["version"], 1);
+    assert_eq!(message["hashes"], serde_json::json!(OWNER_HASHES.split(',').collect::<Vec<_>>()));
+    // HASHES is control: the tunnel stays up and nothing of it reached the TUN as data
+    assert_eq!(dispatcher.active_count(), 1);
+    println!("CSQTT_E2E_HASHES received={message}");
+
+    cancel.cancel();
     assert!(
-        String::from_utf8_lossy(&update.stdout).contains("\"restart_required\":false"),
+        tokio::time::timeout(Duration::from_secs(6), session)
+            .await
+            .expect("the client session did not stop")
+            .expect("the client session panicked")
+            .expect("the client session returned an error")
+    );
+    dispatcher.shutdown().await;
+    relay_stop.cancel();
+    tokio::time::timeout(Duration::from_secs(3), relay_task)
+        .await
+        .expect("the local TURN relay did not stop")
+        .expect("the local TURN relay panicked");
+}
+
+fn apply_e2e_dns(web_url: &str, provider: &str) {
+    let response = post_e2e_settings(web_url, &format!(r#"{{"dns_provider":"{provider}"}}"#));
+    assert!(
+        response.contains("\"restart_required\":false"),
         "CSQTT hot DNS update unexpectedly requires restart"
     );
 }

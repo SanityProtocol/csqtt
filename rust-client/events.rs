@@ -19,6 +19,9 @@ pub struct Events {
     network_timeouts: Arc<AtomicUsize>,
     network_timeout_window_started: Arc<Mutex<Option<Instant>>>,
     unavailable_hashes: Arc<Mutex<HashSet<String>>>,
+    /// tests: every emitted event (kind, JSON), so an end-to-end case can assert what the app would have received
+    #[cfg(test)]
+    captured: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Events {
@@ -34,6 +37,8 @@ impl Events {
             network_timeouts: Arc::new(AtomicUsize::new(0)),
             network_timeout_window_started: Arc::new(Mutex::new(None)),
             unavailable_hashes: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(test)]
+            captured: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -45,9 +50,19 @@ impl Events {
         if !self.enabled {
             return;
         }
-        if let Some(line) = encode_event(kind, &payload()) {
+        let payload = payload();
+        #[cfg(test)]
+        if let Ok(json) = serde_json::to_string(&payload) {
+            self.captured.lock().unwrap_or_else(|e| e.into_inner()).push((kind.to_owned(), json));
+        }
+        if let Some(line) = encode_event(kind, &payload) {
             crate::log_output!("{line}");
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn captured(&self) -> Vec<(String, String)> {
+        self.captured.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn ready(&self, worker: usize) {
@@ -68,6 +83,11 @@ impl Events {
 
     pub fn routing(&self, routing_json: &str) {
         self.emit("ROUTING", || serde_json::json!({"routing": routing_json}));
+    }
+
+    /// S8: the hashes the server sent for this password (JSON `{"version":1,"hashes":[…]}`); the app stores them (B5e)
+    pub fn hashes(&self, hashes_json: &str) {
+        self.emit("HASHES", || serde_json::json!({"hashes": hashes_json}));
     }
 
     pub fn workers(&self, workers: u32) {

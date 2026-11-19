@@ -153,6 +153,7 @@ fn is_dpi_control(plain: &[u8]) -> bool {
     plain.starts_with(b"GETCONF:")
         || plain.starts_with(b"TUNCONF:")
         || plain.starts_with(b"ROUTING:")
+        || plain.starts_with(b"HASHES:")
         || plain.starts_with(b"WORKERS:")
         || plain.starts_with(b"GETWORKERS:")
         || plain.starts_with(b"TUNWORKERS:")
@@ -245,6 +246,7 @@ pub fn record_packet_dpi(
         b"GETCONF:".as_slice(),
         b"TUNCONF:".as_slice(),
         b"ROUTING:".as_slice(),
+        b"HASHES:".as_slice(),
         b"WORKERS:".as_slice(),
         b"GETWORKERS:".as_slice(),
         b"TUNWORKERS:".as_slice(),
@@ -3985,6 +3987,7 @@ fn should_flush_udp_immediately(payload: &[u8]) -> bool {
     payload.starts_with(b"GETCONF:")
         || payload.starts_with(b"TUNCONF:")
         || payload.starts_with(b"ROUTING:")
+        || payload.starts_with(b"HASHES:")
         || payload.starts_with(b"WORKERS:")
         || payload.starts_with(b"GETWORKERS:")
         || payload.starts_with(b"TUNWORKERS:")
@@ -4644,6 +4647,82 @@ fn purge_replaced_worker_sessions(
     }
 }
 
+/// What a client announced in GETCONF: a field `caps=<name>,<name>…` after the six fields every 2.5 client sends. A
+/// stock 2.5 server never reads past field 5, so the field is invisible to it (tested on the shipped 2.5.3 and the stock
+/// 2.5.0 core, B3).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ClientCaps {
+    /// `h1`: reads `HASHES:` (S8)
+    hashes: bool,
+}
+
+impl ClientCaps {
+    fn from_getconf(parts: &[&str]) -> Self {
+        let mut caps = Self::default();
+        for name in parts
+            .iter()
+            .skip(6)
+            .filter_map(|field| field.trim().strip_prefix("caps="))
+            .flat_map(|list| list.split(','))
+        {
+            if name.trim() == "h1" {
+                caps.hashes = true;
+            }
+        }
+        caps
+    }
+}
+
+/// S8: the hashes this credential's link carries (web_panel's link builders take the same inputs).
+fn link_hashes_for_access(db: &Database, access: &CredentialAccess) -> Vec<String> {
+    let (own, token_mode, owner) = match access {
+        CredentialAccess::Main => db.main_link_inputs(),
+        CredentialAccess::Slot(key) => match db.passwords.get(key) {
+            Some(entry) => db.entry_link_inputs(entry),
+            None => return Vec::new(),
+        },
+    };
+    crate::model::link_hashes(own, token_mode, owner)
+}
+
+/// S8: the HASHES message for this GETCONF, if one goes out: only to a client that announced `h1` (an old client takes
+/// any unknown message for tunnel data), only on worker ≤ 1 of an accepted session, as ROUTING, and never an empty set
+/// (an empty set never replaces a working one).
+fn hashes_message(caps: &ClientCaps, worker_id: u16, rejected: bool, hashes: &[String]) -> Option<String> {
+    if !caps.hashes || rejected || worker_id > 1 || hashes.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&serde_json::json!({ "version": 1, "hashes": hashes })).ok()
+}
+
+/// Sends `json` as `<PREFIX>:START:<n>`, `<PREFIX>:<i>:<n>:<base64 gzip>` in 650-byte chunks, `<PREFIX>:FINISH:<n>`:
+/// ROUTING's framing, which S8's HASHES shares.
+async fn send_chunked(writer: &ControlWriter<'_>, prefix: &str, json: &str) {
+    use base64::Engine;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let payload_bytes = if encoder.write_all(json.as_bytes()).is_ok()
+        && let Ok(finish) = encoder.finish()
+    {
+        finish
+    } else {
+        json.as_bytes().to_vec()
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&payload_bytes);
+    let chunk_size = 650;
+    let total_chunks = encoded.len().div_ceil(chunk_size).max(1);
+    let _ = writer.write(format!("{prefix}:START:{total_chunks}").as_bytes()).await;
+    for i in 1..=total_chunks {
+        let start = (i - 1) * chunk_size;
+        let end = std::cmp::min(i * chunk_size, encoded.len());
+        let chunk = if start < encoded.len() { &encoded[start..end] } else { "" };
+        let _ = writer.write(format!("{prefix}:{i}:{total_chunks}:{chunk}").as_bytes()).await;
+    }
+    let _ = writer.write(format!("{prefix}:FINISH:{total_chunks}").as_bytes()).await;
+}
+
 /// Whether this rule's cleaning is new to this process: the warning is logged once per rule, not once per session.
 fn note_cleaned_rule(id: &str) -> bool {
     static NOTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
@@ -4659,6 +4738,7 @@ async fn handle_getconf(
     let content = text.strip_prefix("GETCONF:").unwrap_or_default().trim();
     let parts: Vec<&str> = content.split('|').collect();
     let client_port = parts.first().copied().unwrap_or("9000").trim();
+    let caps = ClientCaps::from_getconf(&parts);
 
     let (password, generation_text, session_salt, worker_text, desired_text) = if parts
         .get(2)
@@ -4856,6 +4936,7 @@ async fn handle_getconf(
         tunnel_ip,
         changed,
         routing_rule,
+        link_hashes,
         server_worker_limit,
     ) = {
         let mut db = db_write(app).await?;
@@ -4910,6 +4991,7 @@ async fn handle_getconf(
         let authorization_rejected = access.is_err();
         let mut tunnel_ip = None;
         let mut routing_rule = None;
+        let mut link_hashes = Vec::new();
         let response = match access {
             Err(response) => {
                 reject_session = true;
@@ -4959,6 +5041,10 @@ async fn handle_getconf(
                     if !ip_str.is_empty() {
                         tunnel_ip = crate::tun_device::parse_ipv4(&ip_str);
                         routing_rule = resolve_routing_rule_access(&db, &access).cloned();
+                        // S8: only a client that announced it reads HASHES:, so the work is done only for one
+                        if caps.hashes {
+                            link_hashes = link_hashes_for_access(&db, &access);
+                        }
                         pad_tunconf(&format!(
                             "TUNCONF:{}:{}:{}:stream-v1:workers={effective_desired_count}",
                             ip_str, dns, client_port
@@ -4979,6 +5065,7 @@ async fn handle_getconf(
             tunnel_ip,
             changed,
             routing_rule,
+            link_hashes,
             server_worker_limit,
         )
     };
@@ -5084,42 +5171,11 @@ async fn handle_getconf(
             "ip_is_whitelist": rule.ip_is_whitelist,
             "ips": &rule.ips
         });
-        let raw_json = serde_json::to_string(&json_val).unwrap_or_default();
-        use flate2::Compression;
-        use flate2::write::GzEncoder;
-        use std::io::Write;
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        let payload_bytes = if encoder.write_all(raw_json.as_bytes()).is_ok()
-            && let Ok(finish) = encoder.finish()
-        {
-            finish
-        } else {
-            raw_json.into_bytes()
-        };
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload_bytes);
-        let chunk_size = 650;
-        let total_chunks = encoded.len().div_ceil(chunk_size);
-        let total_chunks = if total_chunks == 0 { 1 } else { total_chunks };
-
-        let _ = writer
-            .write(format!("ROUTING:START:{total_chunks}").as_bytes())
-            .await;
-        for i in 1..=total_chunks {
-            let start = (i - 1) * chunk_size;
-            let end = std::cmp::min(i * chunk_size, encoded.len());
-            let chunk = if start < encoded.len() {
-                &encoded[start..end]
-            } else {
-                ""
-            };
-            let _ = writer
-                .write(format!("ROUTING:{i}:{total_chunks}:{chunk}").as_bytes())
-                .await;
-        }
-        let _ = writer
-            .write(format!("ROUTING:FINISH:{total_chunks}").as_bytes())
-            .await;
+        send_chunked(writer, "ROUTING", &serde_json::to_string(&json_val).unwrap_or_default()).await;
+    }
+    // S8: the hashes the participant's link carries, to a client that reads HASHES:, after the rule, worker ≤ 1 as it
+    if let Some(json) = hashes_message(&caps, worker_id, reject_session, &link_hashes) {
+        send_chunked(writer, "HASHES", &json).await;
     }
     drop(epoch);
     if reject_session {
@@ -5448,6 +5504,78 @@ pub async fn password_janitor(app: Arc<App>) {
 mod tests {
     use super::*;
     use crate::model::PasswordEntry;
+
+    #[test]
+    fn caps_field_parsed() {
+        let parts = |request: &'static str| -> Vec<&'static str> { request.split('|').collect() };
+        // our client: field 6, after an empty desired count or a number
+        assert!(ClientCaps::from_getconf(&parts("9000|pw|7|salt|1||caps=h1")).hashes);
+        assert!(ClientCaps::from_getconf(&parts("9000|pw|7|salt|4|36|caps=x9, h1")).hashes);
+        // every 2.5 client: six fields, no capability
+        assert_eq!(ClientCaps::from_getconf(&parts("9000|pw|7|salt|1|")), ClientCaps::default());
+        // a password, salt or the desired count that happen to read "caps=h1" are not a capability (fields 0-5)
+        assert!(!ClientCaps::from_getconf(&parts("9000|caps=h1|7|caps=h1|1|caps=h1")).hashes);
+        // an unknown capability alone
+        assert!(!ClientCaps::from_getconf(&parts("9000|pw|7|salt|1||caps=n1")).hashes);
+    }
+
+    #[test]
+    fn hashes_sent_only_with_capability() {
+        let set = vec!["hash-a".to_owned(), "hash-b".to_owned()];
+        let h1 = ClientCaps { hashes: true };
+        let json = hashes_message(&h1, 1, false, &set).expect("a client with h1, worker 1, accepted");
+        assert_eq!(json, r#"{"hashes":["hash-a","hash-b"],"version":1}"#);
+        assert!(hashes_message(&ClientCaps::default(), 1, false, &set).is_none(), "an old client takes it for tunnel data");
+        assert!(hashes_message(&h1, 2, false, &set).is_none(), "worker <= 1 only, as ROUTING");
+        assert!(hashes_message(&h1, 1, true, &set).is_none(), "a rejected session");
+        assert!(hashes_message(&h1, 1, false, &[]).is_none(), "an empty set never replaces a working one");
+    }
+
+    #[test]
+    fn hashes_precedence() {
+        // S8 sends exactly what the participant's link carries: own, else (token mode) the group's, else the default
+        let mut db = Database::default();
+        db.vk_hashes = "default1,default2".to_owned();
+        db.main_password = "main-password-0001".to_owned();
+        db.groups.insert(
+            "g1".to_owned(),
+            crate::model::ClientGroup { id: "g1".to_owned(), vk_hashes: Some("group1".to_owned()), ..Default::default() },
+        );
+        let entry = |hashes: &str, token: bool, group: &str| PasswordEntry {
+            vk_hashes: hashes.to_owned(),
+            vk_token_enabled: token,
+            group_id: group.to_owned(),
+            ..Default::default()
+        };
+        db.passwords.insert("own".to_owned(), entry("own1", true, "g1"));
+        db.passwords.insert("grouped".to_owned(), entry("", true, "g1"));
+        db.passwords.insert("ungrouped".to_owned(), entry("", true, ""));
+        db.passwords.insert("plain".to_owned(), entry("", false, "g1"));
+        let of = |key: &str| link_hashes_for_access(&db, &CredentialAccess::Slot(key.to_owned()));
+        assert_eq!(of("own"), ["own1"]);
+        assert_eq!(of("grouped"), ["group1"]);
+        assert_eq!(of("ungrouped"), ["default1", "default2"]);
+        assert!(of("plain").is_empty(), "not token mode, no own hashes: the link carries none, so S8 sends none");
+        assert!(of("missing").is_empty());
+        // the link builder takes the same inputs
+        let (own, token, owner) = db.entry_link_inputs(&db.passwords["grouped"]);
+        assert_eq!(crate::model::link_hashes(own, token, owner), of("grouped"));
+        // the main password: its own, else the default (make_main_link's choice)
+        assert_eq!(link_hashes_for_access(&db, &CredentialAccess::Main), ["default1", "default2"]);
+        db.main_vk_hashes = "main1".to_owned();
+        assert_eq!(link_hashes_for_access(&db, &CredentialAccess::Main), ["main1"]);
+    }
+
+    #[test]
+    fn hashes_never_carry_token() {
+        // the message holds the hash list and its version, nothing else: no field can carry a VK token (M-169)
+        let h1 = ClientCaps { hashes: true };
+        let json = hashes_message(&h1, 0, false, &["x".to_owned()]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["hashes", "version"]);
+    }
 
     #[test]
     fn hot_tunnel_configuration_preserves_client_ip_and_replaces_dns() {

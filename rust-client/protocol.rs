@@ -20,6 +20,9 @@ pub struct StreamRepairCommand {
     pub worker_ids: Vec<u16>,
 }
 
+/// What this client announces in GETCONF (the server's ClientCaps): `h1` = it reads `HASHES:`.
+pub const CLIENT_CAPS: &str = "h1";
+
 pub fn config_request(
     local_port: &str,
     password: &str,
@@ -29,7 +32,8 @@ pub fn config_request(
     desired_count: Option<usize>,
 ) -> String {
     let desired_count = desired_count.map_or_else(String::new, |value| value.to_string());
-    format!("GETCONF:{local_port}|{password}|{generation_id}|{salt}|{worker_id}|{desired_count}")
+    // `caps=h1`: this client reads HASHES: (S8). A stock 2.5 server reads fields 0-5 only, so it never sees it.
+    format!("GETCONF:{local_port}|{password}|{generation_id}|{salt}|{worker_id}|{desired_count}|caps={CLIENT_CAPS}")
 }
 
 pub fn parse_config_response(response: &[u8]) -> Result<ConfigResponse> {
@@ -76,6 +80,7 @@ pub fn is_control_response(response: &[u8]) -> bool {
         b"READY_OK".as_slice(),
         b"OK:disconnected".as_slice(),
         b"ROUTING:".as_slice(),
+        b"HASHES:".as_slice(),
         b"TUNWORKERS:".as_slice(),
         b"WORKERS:".as_slice(),
         STREAM_REPAIR_PREFIX,
@@ -162,10 +167,10 @@ mod tests {
     #[test]
     fn request_matches_go_contract() {
         let req1 = config_request("9000", "pass1234567890ab", 7, "salt", 4, None);
-        assert_eq!(req1, "GETCONF:9000|pass1234567890ab|7|salt|4|");
+        assert_eq!(req1, "GETCONF:9000|pass1234567890ab|7|salt|4||caps=h1");
 
         let req2 = config_request("9000", "pass1234567890ab", 7, "salt", 4, Some(36));
-        assert_eq!(req2, "GETCONF:9000|pass1234567890ab|7|salt|4|36");
+        assert_eq!(req2, "GETCONF:9000|pass1234567890ab|7|salt|4|36|caps=h1");
     }
 
     #[test]
@@ -300,7 +305,7 @@ mod tests {
     #[test]
     fn test_two_stage_handshake_requests_and_responses() {
         let req1 = config_request("45000", "pass123", 789, "salt99", 1, None);
-        assert_eq!(req1, "GETCONF:45000|pass123|789|salt99|1|");
+        assert_eq!(req1, "GETCONF:45000|pass123|789|salt99|1||caps=h1");
 
         let req2 = workers_request("pass123", 25);
         assert_eq!(req2, "GETWORKERS:pass123|25");
