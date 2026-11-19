@@ -7953,7 +7953,7 @@ const PANEL_HTML: &str = r##"
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
         body { background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; flex-direction: column; overflow-x: hidden; width: 100%; }
 
-        body, header, .header-container, .brand, .brand-logo, .version-logo, .support-card, .header-actions, .btn, main, .glass-panel,
+        body, header, .header-container, .brand, .brand-logo, .brand-version, .version-logo, .support-card, .header-actions, .btn, main, .glass-panel,
         .stat-card, .stat-icon, .stat-value, .stat-sub, .progress-bar, .progress-fill,
         .section-header, .section-title, .table-wrapper, table, th, td, tr,
         .client-name, .client-pw, .client-hash, .traffic-flex, .badge, .actions,
@@ -7967,10 +7967,11 @@ const PANEL_HTML: &str = r##"
 
         header { position: sticky; top: 0; z-index: 40; height: 72px; background: var(--header-glass); backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); width: 100%; }
         .header-container { max-width: 1300px; width: 100%; margin: 0 auto; padding: 0 24px; height: 100%; display: flex; align-items: center; justify-content: space-between; }
-        .brand { display: flex; align-items: center; flex: 0 1 auto; min-width: 0; }
-        .brand-logo { display: block; width: 165px; height: auto; }
+        .brand { display: flex; align-items: flex-end; gap: 10px; flex: 0 1 auto; min-width: 0; }
+        .brand-logo { display: block; width: 165px; height: auto; flex: 0 1 auto; min-width: 0; }
+        .brand-version { display: block; width: 86px; height: auto; margin-bottom: 3.3px; flex: 0 1 auto; min-width: 0; }
         .version-badge { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: 0 1 auto; min-width: 0; }
-        .version-logo { display: block; width: 240px; height: auto; flex: 0 1 auto; }
+        .version-logo { display: block; width: 168px; height: auto; flex: 0 1 auto; }
         .version-build { font-size: 10px; line-height: 1; letter-spacing: 0.02em; color: var(--text-muted); white-space: nowrap; }
         .crypto-button {
             display: inline-flex; align-items: center; justify-content: center; width: 100%;
@@ -8820,8 +8821,10 @@ const PANEL_HTML: &str = r##"
 
             .header-container { padding: 0 10px !important; }
             .brand-logo { width: 92px !important; }
+            .brand { gap: 6px; }
+            .brand-version { width: 48px !important; margin-bottom: 1.9px !important; }
             .header-actions { gap: 6px !important; }
-            .version-logo { width: 112px !important; }
+            .version-logo { width: 79px !important; }
             .version-build { font-size: 8px; }
             .header-actions .btn:not(.btn-icon) { padding: 6px 8px !important; font-size: 12px !important; white-space: nowrap !important; }
             .header-actions .btn-icon { padding: 6px !important; }
@@ -8834,7 +8837,8 @@ const PANEL_HTML: &str = r##"
             header { height: 64px; }
             .header-container { padding: 0 16px; }
             .brand-logo { width: 128px; }
-            .version-logo { width: 176px; }
+            .brand-version { width: 67px; margin-bottom: 2.5px; }
+            .version-logo { width: 123px; }
             main { padding: 20px 12px 80px; gap: 20px; }
 
             .tabs-container { width: 100%; margin-bottom: 4px; }
@@ -9126,6 +9130,10 @@ const PANEL_HTML: &str = r##"
                     </defs>
                     <path fill="url(#csqttLogoGradient)" fill-rule="evenodd" d="M79,11 L66,15 L48,25 L40,32 L27,49 L21,62 L17,78 L17,98 L19,108 L22,117 L33,136 L40,144 L56,156 L66,161 L84,166 L108,166 L118,164 L127,161 L143,152 L157,139 L160,135 L160,133 L137,116 L135,116 L123,128 L113,133 L106,135 L100,135 L99,136 L87,135 L73,130 L67,126 L57,116 L51,105 L48,93 L48,83 L51,71 L58,59 L67,50 L83,42 L105,41 L115,44 L129,53 L136,61 L160,44 L160,42 L155,35 L144,25 L135,19 L124,14 L108,10 Z M219,13 L208,18 L201,23 L191,35 L186,49 L186,66 L188,73 L193,82 L200,89 L208,94 L219,98 L248,103 L264,108 L270,113 L272,117 L272,125 L267,132 L260,136 L255,137 L234,137 L220,133 L212,129 L199,119 L181,141 L199,155 L212,161 L222,164 L232,165 L233,166 L257,166 L276,161 L285,156 L292,150 L298,142 L302,132 L303,112 L297,97 L287,87 L276,81 L258,76 L234,72 L224,68 L218,63 L216,58 L217,50 L222,44 L228,41 L237,39 L248,39 L258,41 L268,45 L279,53 L281,53 L299,32 L285,21 L270,14 L259,11 L233,10 Z M354,25 L344,34 L333,49 L328,60 L324,74 L324,79 L323,80 L324,103 L329,119 L336,132 L349,147 L360,155 L372,161 L391,166 L414,166 L430,162 L442,156 L460,174 L478,156 L462,140 L469,131 L474,122 L479,109 L481,99 L481,77 L479,68 L474,54 L466,41 L453,27 L441,19 L430,14 L414,10 L385,11 L372,15 Z M389,42 L411,41 L427,47 L442,61 L449,76 L450,96 L447,106 L444,112 L439,118 L421,100 L404,116 L405,119 L418,132 L416,134 L399,136 L385,133 L377,129 L363,116 L355,99 L354,83 L357,71 L361,63 L373,50 L379,46 Z M496,13 L496,44 L536,44 L537,45 L537,163 L568,163 L568,45 L569,44 L609,44 L610,43 L610,13 Z M628,13 L627,14 L627,37 L628,38 L627,43 L628,44 L666,44 L667,45 L667,163 L698,163 L699,162 L699,45 L700,44 L738,44 L738,13 Z"></path>
                 </svg>
+                <svg class="brand-version" viewBox="4 10 146 42" aria-hidden="true" fill="none" stroke="url(#brandVersionGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+                    <defs><linearGradient id="brandVersionGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="516" y2="64"><stop offset="0" stop-color="#45B7FF"></stop><stop offset="0.45" stop-color="#2087FF"></stop><stop offset="1" stop-color="#075BFF"></stop></linearGradient></defs>
+                    <path d="M8,24 L18,48 L28,24 M34,20 Q38,14 46,14 H50 Q58,14 58,22 Q58,28 52,33 L36,48 H58 M67,47 L67.8,47 M101,19 Q97,14 90,14 Q78,14 78,31 Q78,48 90,48 Q102,48 102,38 Q102,28 90,28 Q80,28 78,35 M110,47 L110.8,47 M134,14 Q122,14 122,31 Q122,48 134,48 Q146,48 146,31 Q146,14 134,14 Z"></path>
+                </svg>
             </div>
             <div class="header-actions">
                 <button class="btn btn-api" onclick="openApiDocsDlg()" title="API Документация">
@@ -9144,9 +9152,9 @@ const PANEL_HTML: &str = r##"
                     <svg id="themeIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
                 </button>
                 <div class="version-badge">
-                    <svg class="version-logo" viewBox="0 0 516 64" role="img" aria-label="v2.6.0 by amurcanov" fill="none" stroke="url(#versionLogoGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+                    <svg class="version-logo" viewBox="152 0 362 64" role="img" aria-label="v2.6.0 by amurcanov" fill="none" stroke="url(#versionLogoGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
                         <defs><linearGradient id="versionLogoGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="516" y2="64"><stop offset="0" stop-color="#45B7FF"></stop><stop offset="0.45" stop-color="#2087FF"></stop><stop offset="1" stop-color="#075BFF"></stop></linearGradient></defs>
-                        <path d="M8,24 L18,48 L28,24 M34,20 Q38,14 46,14 H50 Q58,14 58,22 Q58,28 52,33 L36,48 H58 M67,47 L67.8,47 M101,19 Q97,14 90,14 Q78,14 78,31 Q78,48 90,48 Q102,48 102,38 Q102,28 90,28 Q80,28 78,35 M110,47 L110.8,47 M134,14 Q122,14 122,31 Q122,48 134,48 Q146,48 146,31 Q146,14 134,14 Z M158,12 V48 M158,31 Q163,24 170,24 Q180,24 180,36 Q180,48 170,48 Q163,48 158,41 M190,24 L200,47 M210,24 L200,47 L196,57 Q194,60 189,58 M250,30 Q246,24 239,24 Q228,24 228,36 Q228,48 239,48 Q246,48 250,42 M250,24 V48 M260,48 V24 M260,31 Q264,24 270,24 Q277,24 277,32 V48 M277,31 Q281,24 287,24 Q294,24 294,32 V48 M304,24 V39 Q304,48 314,48 Q324,48 324,39 V24 M334,48 V24 M334,32 Q338,24 348,24 M382,29 Q378,24 370,24 Q360,24 360,36 Q360,48 370,48 Q378,48 382,43 M414,30 Q410,24 403,24 Q392,24 392,36 Q392,48 403,48 Q410,48 414,42 M414,24 V48 M424,48 V24 M424,32 Q429,24 436,24 Q446,24 446,35 V48 M467,24 Q456,24 456,36 Q456,48 467,48 Q478,48 478,36 Q478,24 467,24 Z M488,24 L498,48 L508,24"></path>
+                        <path d="M158,12 V48 M158,31 Q163,24 170,24 Q180,24 180,36 Q180,48 170,48 Q163,48 158,41 M190,24 L200,47 M210,24 L200,47 L196,57 Q194,60 189,58 M250,30 Q246,24 239,24 Q228,24 228,36 Q228,48 239,48 Q246,48 250,42 M250,24 V48 M260,48 V24 M260,31 Q264,24 270,24 Q277,24 277,32 V48 M277,31 Q281,24 287,24 Q294,24 294,32 V48 M304,24 V39 Q304,48 314,48 Q324,48 324,39 V24 M334,48 V24 M334,32 Q338,24 348,24 M382,29 Q378,24 370,24 Q360,24 360,36 Q360,48 370,48 Q378,48 382,43 M414,30 Q410,24 403,24 Q392,24 392,36 Q392,48 403,48 Q410,48 414,42 M414,24 V48 M424,48 V24 M424,32 Q429,24 436,24 Q446,24 446,35 V48 M467,24 Q456,24 456,36 Q456,48 467,48 Q478,48 478,36 Q478,24 467,24 Z M488,24 L498,48 L508,24"></path>
                     </svg>
                     <span class="version-build">сборка SanityProtocol</span>
                 </div>
