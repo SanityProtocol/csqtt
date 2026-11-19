@@ -1,0 +1,105 @@
+# Build the csqtt server cores and the APKs from source (CSQTT-APP-PLAN §3, M-158, M-161, M-162).
+# - Toolchains are pinned in ci/Dockerfile.server and ci/Dockerfile.android; actions are pinned by commit.
+# - The cores' manifest (csqtt.server-provenance.json) is generated here from the cores this run built, and the APK carries
+#   exactly those cores.
+# - The APKs are UNSIGNED: the signing key never leaves the laptop. This workflow publishes nothing to Releases; release
+#   assets are uploaded once, by hand, and never replaced.
+# - `ref` (manual runs) builds another source ref with this commit's recipe, e.g. release-2.5.3's 0188606 to compare with
+#   what was shipped.
+name: build
+
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or ref to build (empty = this commit); the recipe in ci/ is always this commit's"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout the recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: recipe
+          persist-credentials: false
+
+      - name: Checkout the source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Source commit
+        id: src
+        run: |
+          echo "sha=$(git -C src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git -C src rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Server build image
+        run: docker build -t csqtt-ci-server -f recipe/ci/Dockerfile.server recipe/ci
+
+      - name: Server cores (amd64, arm64, armv7)
+        run: for a in amd64 arm64 armv7; do recipe/ci/build-server.sh src "$a" out/cores; done
+
+      - name: Cores manifest
+        run: python3 recipe/ci/provenance.py src out/cores "${{ steps.src.outputs.sha }}"
+
+      - name: Android build image
+        run: docker build -t csqtt-ci-android -f recipe/ci/Dockerfile.android recipe/ci
+
+      - name: APKs (unsigned)
+        run: recipe/ci/build-apk.sh src out/cores out/apk
+
+      - name: Upload the server cores
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: csqtt-server-cores-${{ steps.src.outputs.short }}
+          path: |
+            out/cores/csqtt-linux-amd64
+            out/cores/csqtt-linux-arm64
+            out/cores/csqtt-linux-armv7
+            out/cores/csqtt.server-provenance.json
+            out/cores/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the APKs (unsigned)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: csqtt-apk-unsigned-${{ steps.src.outputs.short }}
+          path: |
+            out/apk/*.apk
+            out/apk/SHA256SUMS.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          {
+            echo "### csqtt from ${{ steps.src.outputs.sha }}"
+            echo
+            echo "| file | bytes | sha256 |"
+            echo "|---|---|---|"
+            for f in out/cores/csqtt-linux-* out/apk/*.apk; do
+              echo "| $(basename "$f") | $(stat -c%s "$f") | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"
+            done
+            echo
+            echo '```json'
+            cat out/cores/csqtt.server-provenance.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
