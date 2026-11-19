@@ -103,6 +103,10 @@ pub fn headless() -> bool {
 pub fn host_tuning() -> HostTuning {
     get().host_tuning
 }
+// S5: whether this server writes host-wide sysctls at all — at start and when an exit comes up. --no-nat implies off.
+pub fn tunes_host_for(tuning: HostTuning, no_nat: bool) -> bool {
+    tuning == HostTuning::Auto && !no_nat
+}
 pub fn desired_path() -> Option<&'static PathBuf> {
     get().desired_path.as_ref()
 }

@@ -94,13 +94,26 @@ struct Notify {
 
 impl Notify {
     fn from_env() -> Self {
-        let socket = std::env::var_os("NOTIFY_SOCKET").filter(|s| !s.is_empty());
-        let ours = std::env::var("WATCHDOG_PID")
-            .ok()
-            .is_none_or(|pid| pid.trim().parse::<u32>().ok() == Some(std::process::id()));
-        let watchdog_usec =
-            std::env::var("WATCHDOG_USEC").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&u| u > 0 && ours);
-        let watchdog_usec = if socket.is_some() { watchdog_usec } else { None };
+        Self::from_vars(
+            std::env::var_os("NOTIFY_SOCKET"),
+            std::env::var("WATCHDOG_USEC").ok(),
+            std::env::var("WATCHDOG_PID").ok(),
+            std::process::id(),
+        )
+    }
+
+    /// The environment's reading, apart from the process environment so it can be tested.
+    fn from_vars(
+        socket: Option<std::ffi::OsString>,
+        watchdog_usec: Option<String>,
+        watchdog_pid: Option<String>,
+        own_pid: u32,
+    ) -> Self {
+        let socket = socket.filter(|s| !s.is_empty());
+        let ours = watchdog_pid.is_none_or(|pid| pid.trim().parse::<u32>().ok() == Some(own_pid));
+        let watchdog_usec = watchdog_usec
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&u| u > 0 && ours && socket.is_some());
         Self { socket, watchdog_usec }
     }
 
@@ -186,6 +199,7 @@ mod tests {
 
     #[test]
     fn watchdog_exits_on_stalled_loop() {
+        // the verdict; the exit it leads to (write(2) + _exit(70) in spawn) is proven on the bench, card gate watchdog-live
         let mut watch = Watch::new(DEFAULT_PERIOD);
         assert_eq!(watch.stall_checks, 6);
         assert_eq!(watch.check([1, 1]), Verdict::Alive { first: true });
@@ -275,6 +289,22 @@ mod tests {
         // a named socket nobody listens on: the send fails, nothing else happens
         assert!(!notify_to(Some(dir.join("absent").as_os_str()), "READY=1"));
         let _ = std::fs::remove_dir_all(&dir);
+        // the environment: no socket → nothing to send, and WATCHDOG_USEC alone is ignored; another process's
+        // WATCHDOG_PID turns the watchdog pings off but keeps READY=1
+        let v = |s: &str| Some(s.to_owned());
+        let none = Notify::from_vars(None, v("20000000"), None, 7);
+        assert!(none.socket.is_none() && none.watchdog_usec.is_none());
+        let empty = Notify::from_vars(Some("".into()), v("20000000"), None, 7);
+        assert!(empty.socket.is_none() && empty.watchdog_usec.is_none());
+        let ours = Notify::from_vars(Some("/run/n".into()), v("20000000"), v("7"), 7);
+        assert_eq!((ours.socket.is_some(), ours.watchdog_usec), (true, Some(20_000_000)));
+        let unpinned = Notify::from_vars(Some("/run/n".into()), v("20000000"), None, 7);
+        assert_eq!(unpinned.watchdog_usec, Some(20_000_000));
+        let other = Notify::from_vars(Some("/run/n".into()), v("20000000"), v("8"), 7);
+        assert_eq!((other.socket.is_some(), other.watchdog_usec), (true, None));
+        let notify_only = Notify::from_vars(Some("@sd".into()), None, None, 7);
+        assert_eq!((notify_only.socket.is_some(), notify_only.watchdog_usec), (true, None));
+        assert!(Notify::from_vars(Some("/run/n".into()), v("junk"), None, 7).watchdog_usec.is_none());
         // the watchdog's period follows WATCHDOG_USEC only with a socket
         let with = Notify { socket: Some("x".into()), watchdog_usec: Some(4_000_000) };
         assert_eq!(with.period(), Duration::from_secs(2));

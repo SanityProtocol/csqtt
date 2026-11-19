@@ -1299,7 +1299,7 @@ fn host_sysctls(
     tun_iface: &str,
 ) -> (Vec<(String, &'static str)>, bool) {
     let own_tun = (format!("/proc/sys/net/ipv4/conf/{tun_iface}/rp_filter"), "2");
-    if no_nat || tuning == crate::swgpanel::HostTuning::Off {
+    if !crate::swgpanel::tunes_host_for(tuning, no_nat) {
         return (vec![own_tun], false);
     }
     let mut plan: Vec<(String, &'static str)> =
@@ -1559,6 +1559,16 @@ mod tests {
         // --no-nat implies off, whatever --host-tuning says (2.5.3's --no-nat behaviour)
         assert_eq!(host_sysctls(HostTuning::Auto, true, "sqc4"), (own.clone(), false));
         assert_eq!(host_sysctls(HostTuning::Off, true, "sqc4"), (own, false));
+        // an exit coming up writes the same: host-wide only under auto without --no-nat (review F1)
+        let own_exit = vec!["net.ipv4.conf.sqc4.rp_filter=2".to_owned()];
+        for (tuning, no_nat) in [(HostTuning::Off, false), (HostTuning::Auto, true), (HostTuning::Off, true)] {
+            assert_eq!(crate::proxy_route::tproxy_sysctls(tuning, no_nat, "sqc4"), own_exit, "{tuning:?} {no_nat}");
+        }
+        let auto = crate::proxy_route::tproxy_sysctls(HostTuning::Auto, false, "sqc4");
+        assert_eq!(
+            auto,
+            ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.default.rp_filter=2", "net.ipv4.conf.sqc4.rp_filter=2"]
+        );
     }
 
     #[test]

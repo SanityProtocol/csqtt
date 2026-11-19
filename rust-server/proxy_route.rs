@@ -515,17 +515,37 @@ pub(crate) fn socks_udp_response(packet: &[u8]) -> Result<(SocketAddr, &[u8])> {
     Ok((SocketAddr::new(ip, port), &packet[header_end..]))
 }
 
+/// What an exit coming up writes. The host-wide three only when the server tunes the host (S5: `--host-tuning=auto`
+/// without `--no-nat`); the TUN's own reverse-path filter always (stock: csqtt1), which is the one the TPROXY path needs:
+/// the kernel takes the larger of `all` and the interface's value.
+pub(crate) fn tproxy_sysctls(
+    tuning: crate::swgpanel::HostTuning,
+    no_nat: bool,
+    iface: &str,
+) -> Vec<String> {
+    let mut settings = Vec::new();
+    if crate::swgpanel::tunes_host_for(tuning, no_nat) {
+        settings.extend(
+            ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.default.rp_filter=2"]
+                .map(str::to_owned),
+        );
+    }
+    settings.push(format!("net.ipv4.conf.{iface}.rp_filter=2"));
+    settings
+}
+
 async fn activate_tproxy(runtime_id: u64, port: u16) -> Result<()> {
     let _guard = POLICY_LOCK.lock().await;
     if crate::swgpanel::is_default_instance() {
         cleanup_legacy_proxy_policy().await; // stock's legacy 1066/0x422 — not a side instance's to touch (see startup)
     }
-    let _ = command_output("sysctl", &["-w", "net.ipv4.ip_forward=1"]).await;
-    let _ = command_output("sysctl", &["-w", "net.ipv4.conf.all.rp_filter=2"]).await;
-    let _ = command_output("sysctl", &["-w", "net.ipv4.conf.default.rp_filter=2"]).await;
-    // swg-panel: the instance's own TUN (stock: csqtt1).
-    let iface_rp_filter = format!("net.ipv4.conf.{}.rp_filter=2", crate::swgpanel::iface());
-    let _ = command_output("sysctl", &["-w", &iface_rp_filter]).await;
+    for setting in tproxy_sysctls(
+        crate::swgpanel::host_tuning(),
+        crate::swgpanel::no_nat(),
+        crate::swgpanel::iface(),
+    ) {
+        let _ = command_output("sysctl", &["-w", &setting]).await;
+    }
     add_tproxy_shared_rules().await?;
     add_tproxy_rules(port).await?;
     let _ = command_output("ip", &["route", "flush", "cache"]).await;
