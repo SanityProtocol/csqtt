@@ -982,6 +982,11 @@ fn print_cli_help() {
 }
 
 fn main() -> Result<()> {
+    // M-176: whatever the server creates (database, logs, keys) is its owner's alone
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -850,6 +850,23 @@ CREATE TABLE IF NOT EXISTS routing_rules (
 );
 ";
 
+/// M-176: the database and its WAL files hold every client password; they are the owner's alone (0600), also when an
+/// older version created them with the default mode. The process umask (main) covers files created later.
+fn restrict_database_files(config_dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let file = config_dir.join(format!("{DATABASE_FILE}{suffix}"));
+            if file.exists() {
+                let _ = fs::set_permissions(&file, fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = config_dir;
+}
+
 fn open_database_connection(config_dir: &Path) -> Result<Connection> {
     fs::create_dir_all(config_dir)?;
     #[cfg(unix)]
@@ -862,6 +879,7 @@ fn open_database_connection(config_dir: &Path) -> Result<Connection> {
     connection
         .pragma_update(None, "journal_mode", "WAL")
         .context("enable WAL journal mode")?;
+    restrict_database_files(config_dir);
     connection
         .pragma_update(None, "synchronous", "FULL")
         .context("set synchronous FULL")?;
@@ -1897,6 +1915,33 @@ mod tests {
 
         assert_eq!(restored.dns, database.dns);
         assert_eq!(restored.dns_provider, database.dns_provider);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn state_files_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("csqtt-mode-test-{unique}"));
+        save_database(&directory, &Database::default()).expect("save database");
+        // as an older server left them: world-readable
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::set_permissions(
+                directory.join(format!("{}{suffix}", super::DATABASE_FILE)),
+                std::fs::Permissions::from_mode(0o644),
+            );
+        }
+        save_database(&directory, &Database::default()).expect("save database again");
+        for suffix in ["", "-wal", "-shm"] {
+            let file = directory.join(format!("{}{suffix}", super::DATABASE_FILE));
+            if let Ok(meta) = std::fs::metadata(&file) {
+                assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{}", file.display());
+            }
+        }
         let _ = std::fs::remove_dir_all(directory);
     }
 
