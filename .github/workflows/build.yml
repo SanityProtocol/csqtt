@@ -1,5 +1,6 @@
 # Build the csqtt server cores and the APKs from source (CSQTT-APP-PLAN §3, M-158, M-161, M-162), and run every test suite
-# (job `test`, M-159: ci/test.sh server | client | app).
+# (job `test`, M-159: ci/test.sh server | client | app) and, in `build`, the client's end-to-end cases against the core it
+# built (ci/e2e-server.sh + ci/test.sh e2e).
 # - Toolchains are pinned in ci/Dockerfile.server and ci/Dockerfile.android; actions are pinned by commit.
 # - The cores' manifest (csqtt.server-provenance.json) is generated here from the cores this run built, and the APK carries
 #   exactly those cores.
@@ -152,3 +153,19 @@ jobs:
             cat out/cores/csqtt.server-provenance.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Server end-to-end tests
+        # The client's #[ignore] end-to-end cases against the amd64 core this run built, started in its own network
+        # namespace (ci/e2e-server.sh). The throughput case runs at its fixed 128 Mbit/s target with its floors halved: a
+        # hosted runner carries the client, the relay and the server at once. Skipped on manual `ref` runs: an older tree
+        # (2.5.3) carries the cases before their 2.6.0 fixes.
+        if: ${{ !inputs.ref }}
+        run: |
+          sudo recipe/ci/e2e-server.sh up out/cores/csqtt-linux-amd64 "$RUNNER_TEMP/e2e"
+          set -a; . "$RUNNER_TEMP/e2e/env"; set +a
+          rc=0
+          CSQTT_E2E_PEER=$PEER CSQTT_E2E_WEB=$WEB CSQTT_E2E_MIN_MBIT=64 CSQTT_E2E_MIN_STREAM_KBIT=800 \
+            recipe/ci/test.sh src e2e || rc=$?
+          [ "$rc" = 0 ] || { echo "--- server log (tail)"; sudo tail -60 "$RUNNER_TEMP/e2e/server.log"; }
+          sudo recipe/ci/e2e-server.sh down "$RUNNER_TEMP/e2e"
+          exit "$rc"
