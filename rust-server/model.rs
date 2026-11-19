@@ -32,7 +32,8 @@ pub struct ClientGroup {
     pub sub_uuid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Read from older stores and exports only, and dropped at load (M-169); never written out again.
+    #[serde(default, skip_serializing)]
     pub vk_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vk_hashes: Option<String>,

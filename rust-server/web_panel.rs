@@ -1927,12 +1927,19 @@ async fn client_update(
 
     let revision = {
         let mut db = state.app.db.write().await;
+        // only a request that turns token mode ON needs owner hashes: the panel resends a token-mode client's flag on
+        // every edit, and a 2.5 owner whose token was erased must still be able to rename, extend or move such a client
+        let token_mode_now = if secret_eq(&password, &db.main_password) {
+            db.main_vk_token_enabled
+        } else {
+            db.passwords.get(&password).is_some_and(|entry| entry.vk_token_enabled)
+        };
         let group_of_entry = request
             .group_id
             .clone()
             .or_else(|| db.passwords.get(&password).map(|entry| entry.group_id.clone()))
             .unwrap_or_default();
-        if request.vk_token && owner_hashes(&db, &group_of_entry).trim().is_empty() {
+        if request.vk_token && !token_mode_now && owner_hashes(&db, &group_of_entry).trim().is_empty() {
             return (StatusCode::BAD_REQUEST, OWNER_HASHES_FIRST).into_response();
         }
         if secret_eq(&password, &db.main_password) {
@@ -2687,7 +2694,8 @@ async fn api_import_post(
                     added_clients += 1;
                 }
             }
-            for (gid, g) in export.groups {
+            for (gid, mut g) in export.groups {
+                g.vk_token = None; // a 2.5 export carries group tokens; the server keeps none (M-169)
                 db.groups.entry(gid).or_insert(g);
             }
             for (rid, r) in export.routing_rules {
@@ -7400,7 +7408,6 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 
         let hubSelectedPasswords = new Set();
         let currentHubFilterQuery = '';
-        let groupVkToken = '';
         let groupVkHashes = '';
 
         function openLinksAndTokensDlg() {
@@ -7411,11 +7418,8 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             const clearBtn = document.getElementById('hubSearchClearBtn');
             if (clearBtn) clearBtn.style.display = 'none';
 
-            groupVkToken = currentData?.group?.vk_token || '';
             groupVkHashes = currentData?.group?.vk_hashes || '';
 
-            const tokenInput = document.getElementById('hubVkTokenInput');
-            if (tokenInput) tokenInput.value = groupVkToken;
             const hashesInput = document.getElementById('hubVkHashesInput');
             if (hashesInput) hashesInput.value = groupVkHashes;
             const workersInput = document.getElementById('hubWorkersInput');
@@ -7426,30 +7430,6 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             renderHubClientsList();
             updateHubSelectedCount();
             document.getElementById('linksAndTokensDlg').showModal();
-        }
-
-        async function autoSaveHubVkToken() {
-            const input = document.getElementById('hubVkTokenInput');
-            const token = input ? input.value.trim() : '';
-            if (token && (/\s/.test(token) || token.length > 4096)) return false;
-            if (token === groupVkToken) return true;
-            try {
-                const r = await fetch('/' + encodeURIComponent(adminUuid) + '/api' + '/settings', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ vk_token: token })
-                });
-                if (r.ok) {
-                    groupVkToken = token;
-                    if (currentData && currentData.group) {
-                        currentData.group.vk_token = token;
-                    }
-                    await loadData();
-                    renderHubClientsList();
-                    return true;
-                }
-            } catch (e) {}
-            return false;
         }
 
         async function autoSaveHubVkHashes() {
@@ -7476,17 +7456,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         }
 
         async function applyHubVkTokenDirect() {
-            const input = document.getElementById('hubVkTokenInput');
-            const token = input ? input.value.trim() : '';
-            if (!token) {
-                showToast("Введите VK токен", true);
-                return;
-            }
-            if (/\s/.test(token) || token.length > 4096) {
-                showToast("VK токен не должен содержать пробелы и должен быть короче 4097 символов", true);
-                return;
-            }
-            await autoSaveHubVkToken();
+            // the server keeps no VK token (M-169): token mode hands out the owner's hashes, which the action checks
             promptBatchAction('token');
         }
 
@@ -10848,7 +10818,6 @@ const PANEL_HTML: &str = r##"
         let savedDnsProvider = 'yandex';
         let savedManualDns = '';
         let savedAutoRestartInterval = 0;
-        let sharedVkToken = '';
         let sharedVkHashes = '';
 
         function setRestartRequired(required) {
@@ -10888,7 +10857,6 @@ const PANEL_HTML: &str = r##"
             savedAutoRestartInterval = [0, 12, 24, 48, 72].includes(Number(x.auto_restart_interval_hours))
                 ? Number(x.auto_restart_interval_hours)
                 : 0;
-            sharedVkToken = x.vk_token || '';
             sharedVkHashes = x.vk_hashes || '';
             document.getElementById('mainpass').value = savedMainPassword;
             document.getElementById('dns_provider').value = savedDnsProvider;
@@ -10902,30 +10870,6 @@ const PANEL_HTML: &str = r##"
 
         function openVkTokenSettingsDlg() {
             document.getElementById('vkTokenSettingsDlg').showModal();
-        }
-
-        async function saveVkTokenSettings(clear = false) {
-            const input = document.getElementById('vkTokenSettingsInput');
-            const token = clear ? '' : input.value.trim();
-            if (token && (/\s/.test(token) || token.length > 4096)) {
-                showToast('VK токен не должен содержать пробелы и должен быть короче 4097 символов', 'error');
-                return;
-            }
-            const response = await api('/api/settings', {
-                method: 'POST', body: JSON.stringify({ vk_token: token })
-            });
-            if (!response.ok) {
-                showToast(await response.text(), 'error');
-                return;
-            }
-            sharedVkToken = token;
-            input.value = token;
-            document.getElementById('vkTokenSettingsDlg').close();
-            showToast(token ? 'Общий VK токен сохранён' : 'Общий VK токен очищен');
-        }
-
-        function clearVkTokenSettings() {
-            saveVkTokenSettings(true);
         }
 
         let localProxyData = { active_profile_id: '', profiles: [], route_active: false, port_listening: true, health_error: null, tcp_sessions: 0, udp_flows: 0 };
@@ -12432,8 +12376,6 @@ const PANEL_HTML: &str = r##"
             const clearBtn = document.getElementById('hubSearchClearBtn');
             if (clearBtn) clearBtn.style.display = 'none';
 
-            const tokenInput = document.getElementById('hubVkTokenInput');
-            if (tokenInput) tokenInput.value = sharedVkToken || '';
             const hashesInput = document.getElementById('hubVkHashesInput');
             if (hashesInput) hashesInput.value = sharedVkHashes || '';
             const workersInput = document.getElementById('hubWorkersInput');
@@ -12443,23 +12385,6 @@ const PANEL_HTML: &str = r##"
             renderHubClientsList();
             updateHubSelectedCount();
             document.getElementById('linksAndTokensDlg').showModal();
-        }
-
-        async function autoSaveHubVkToken() {
-            const input = document.getElementById('hubVkTokenInput');
-            const token = input ? input.value.trim() : '';
-            if (token && (/\s/.test(token) || token.length > 4096)) return false;
-            if (token === sharedVkToken) return true;
-            const r = await api('/api/settings', {
-                method: 'POST',
-                body: JSON.stringify({ vk_token: token })
-            });
-            if (r.ok) {
-                sharedVkToken = token;
-                renderHubClientsList();
-                return true;
-            }
-            return false;
         }
 
         async function autoSaveHubVkHashes() {
@@ -12479,17 +12404,7 @@ const PANEL_HTML: &str = r##"
         }
 
         async function applyHubVkTokenDirect() {
-            const input = document.getElementById('hubVkTokenInput');
-            const token = input ? input.value.trim() : '';
-            if (!token) {
-                showToast("Введите VK токен", "error");
-                return;
-            }
-            if (/\s/.test(token) || token.length > 4096) {
-                showToast("VK токен не должен содержать пробелы и должен быть короче 4097 символов", "error");
-                return;
-            }
-            await autoSaveHubVkToken();
+            // the server keeps no VK token (M-169): token mode hands out the owner's hashes, which the action checks
             promptBatchAction('token');
         }
 

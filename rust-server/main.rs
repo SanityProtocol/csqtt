@@ -1428,6 +1428,8 @@ async fn async_main() -> Result<()> {
         if let Some(route) = proxy_route {
             route.deactivate().await;
         }
+        // the TUN goes with the process; a rule keyed on its name must not outlive it (a downgrade, another server)
+        let _ = proxy_route::apply_egress(None, false).await;
     };
     if tokio::time::timeout(Duration::from_secs(6), proxy_cleanup)
         .await
@@ -1926,11 +1928,12 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                         Some(format!("Порт {} не отвечает", profile.port));
                     app.proxy_port_listening
                         .store(false, std::sync::atomic::Ordering::Release);
+                    // block first: deactivate removes the TPROXY rules, and a packet between the two would leave direct
+                    note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
                     let failed = app.proxy_route.write().await.take();
                     if let Some(failed) = failed {
                         failed.deactivate().await;
                     }
-                    note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
                     log_event(
                         &app,
                         "WARNING",
@@ -1956,6 +1959,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                 continue;
             }
 
+            // a profile edit or a dead TPROXY child: block before the old route goes, until the new one is up
+            note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
             let stale = app.proxy_route.write().await.take();
             if let Some(stale) = stale {
                 stale.deactivate().await;
@@ -1998,6 +2003,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
 
         port_failures = 0;
         pause_round = 0;
+        // also at start with the port up: nothing carries the clients until the route is ready
+        note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
         log_event(
             &app,
             "INFO",

@@ -144,6 +144,10 @@ impl ProxyRoute {
         let _guard = POLICY_LOCK.lock().await;
         ACTIVE_RUNTIME.store(0, Ordering::Release);
         cleanup_shared_policy().await;
+        // a block a previous process left (it stopped, crashed or was killed while the exit was down): this process
+        // starts unblocked and installs its own when its profile calls for it
+        let _ = egress_block_locked(false).await;
+        EGRESS_BLOCKED.store(false, Ordering::Release);
         // 1066 / 0x422 / CSQTT_LOCAL_SOCKS*: stock's own legacy, never installed by 2.1.9 or 2.5 — a side instance
         // leaves it to stock (its ip rule / table deletes are not subnet-scoped)
         if crate::swgpanel::is_default_instance() {
@@ -539,21 +543,37 @@ pub fn egress_blocked(profile: Option<&LocalProxyProfile>, route_up: bool) -> bo
 /// blackhole route (a rule into an empty table would fall through to main, i.e. direct).
 async fn set_egress_block(on: bool) -> Result<()> {
     let _guard = POLICY_LOCK.lock().await;
+    egress_block_locked(on).await
+}
+
+/// The caller holds POLICY_LOCK. While on, nothing is deleted: the blackhole route is replaced in place and the rule is
+/// added only when missing, so a re-assert never opens a moment in which client packets fall through to main.
+async fn egress_block_locked(on: bool) -> Result<()> {
     let table = crate::swgpanel::egress_block_table();
     let iface = crate::swgpanel::iface();
     for family in ["-4", "-6"] {
-        while command_success("ip", &[family, "rule", "del", "iif", iface, "priority", table, "table", table]).await {}
+        if !on {
+            while command_success("ip", &[family, "rule", "del", "iif", iface, "priority", table, "table", table]).await {}
+            let _ = command_output("ip", &[family, "route", "flush", "table", table]).await;
+            continue;
+        }
         let route = [family, "route", "replace", "blackhole", "default", "table", table];
         let rule = [family, "rule", "add", "iif", iface, "priority", table, "table", table];
-        if on && family == "-4" {
+        let present = command_output("ip", &[family, "rule", "list", "pref", table])
+            .await
+            .map(|rules| rules.contains(&format!("iif {iface} ")) && rules.contains(&format!("lookup {table}")))
+            .unwrap_or(false);
+        if family == "-4" {
             command_required("ip", &route).await?;
-            command_required("ip", &rule).await?;
-        } else if on {
+            if !present {
+                command_required("ip", &rule).await?;
+            }
+        } else {
             // a host without IPv6 refuses these; its clients have no IPv6 to leak
             let _ = command_output("ip", &route).await;
-            let _ = command_output("ip", &rule).await;
-        } else {
-            let _ = command_output("ip", &[family, "route", "flush", "table", table]).await;
+            if !present {
+                let _ = command_output("ip", &rule).await;
+            }
         }
     }
     let _ = command_output("ip", &["route", "flush", "cache"]).await;
