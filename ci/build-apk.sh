@@ -5,6 +5,8 @@
 #                they become the APK's assets (deploy installs them on the user's VPS).
 #   Unsigned by default (CI): ci/unsigned.init.gradle.kts switches off the app's signing gate → *-release-unsigned.apk.
 #   Signed (the laptop only): CSQTT_SIGNING_DIR=<dir with csqtt-app-signing.env and the keystore>, mounted read-only.
+#   CSQTT_DOCKER_ARGS: extra `docker run` arguments, e.g. "--network host" on a laptop whose Gradle reaches Maven only through
+#   a local proxy (with systemProp.https.proxyHost/Port in the CSQTT_GRADLE_HOME gradle.properties).
 # The in-container paths (/w/src, /w/t-<abi>, CARGO_HOME=/tmp/ch, GRADLE_USER_HOME=/tmp/gh) are those 2.5.3 was built with.
 set -euo pipefail
 CI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -23,7 +25,8 @@ grep -q '^distributionUrl=.*gradle-9\.4\.1-bin\.zip$' "$P" || { echo "the tree w
 sed -i '/^distributionSha256Sum=/d' "$P"; echo "distributionSha256Sum=$GRADLE_SHA256" >> "$P"
 SIGN=(); MODE=unsigned
 if [ -n "${CSQTT_SIGNING_DIR:-}" ]; then SIGN=(-v "$(cd "$CSQTT_SIGNING_DIR" && pwd):/s:ro"); MODE=signed; fi
-docker run --rm -v "$W:/w" -v "$REG:/tmp/ch/registry" -v "$GH:/tmp/gh" -v "$CI:/ci:ro" ${SIGN[@]+"${SIGN[@]}"} \
+read -r -a XARGS <<< "${CSQTT_DOCKER_ARGS:-}"
+docker run --rm ${XARGS[@]+"${XARGS[@]}"} -v "$W:/w" -v "$REG:/tmp/ch/registry" -v "$GH:/tmp/gh" -v "$CI:/ci:ro" ${SIGN[@]+"${SIGN[@]}"} \
   -e CARGO_HOME=/tmp/ch -e GRADLE_USER_HOME=/tmp/gh -e MODE=$MODE -u "$(id -u):$(id -g)" -e HOME=/tmp "$IMAGE" bash -c '
 set -euo pipefail
 cp -a /usr/local/cargo/bin /tmp/ch/ 2>/dev/null || true; export PATH=/tmp/ch/bin:/usr/local/cargo/bin:$PATH

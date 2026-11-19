@@ -1,6 +1,7 @@
 # csqtt Android build image (CSQTT-APP-PLAN §3, M-158): the server image (Rust 1.97.1) plus a JDK, the Android SDK and NDK,
 # the Android Rust targets and cargo-ndk. Pinned: the JDK and cmdline-tools by sha256, SDK packages by exact version (sdkmanager
-# checks their own checksums), cargo-ndk by version (--locked). The SDK/NDK/cargo-ndk versions are those 2.5.3 was built with.
+# checks their own checksums), cargo-ndk by version (--locked). The SDK/NDK/cargo-ndk versions are those 2.5.3 was built with;
+# Build-Tools 36 is AGP 9.2's default, which Gradle would otherwise fetch by itself mid-build.
 ARG BASE=csqtt-ci-server
 FROM ${BASE}
 ARG JDK_URL=https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_linux_hotspot_17.0.21.1_2.tar.gz
@@ -16,7 +17,7 @@ RUN curl -fsSLo /tmp/clt.zip "$CLT_URL" && echo "$CLT_SHA256  /tmp/clt.zip" | sh
  && mkdir -p $ANDROID_HOME/cmdline-tools && unzip -q /tmp/clt.zip -d $ANDROID_HOME/cmdline-tools \
  && mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest && rm /tmp/clt.zip \
  && yes | sdkmanager --licenses >/dev/null \
- && sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "ndk;28.2.13676358" >/dev/null \
+ && sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "build-tools;36.0.0" "ndk;28.2.13676358" >/dev/null \
  && chmod -R a+rwX $ANDROID_HOME
 ENV ANDROID_NDK_HOME=/opt/android-sdk/ndk/28.2.13676358
 RUN rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android --toolchain 1.97.1 \
