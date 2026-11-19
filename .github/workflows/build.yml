@@ -1,4 +1,5 @@
-# Build the csqtt server cores and the APKs from source (CSQTT-APP-PLAN §3, M-158, M-161, M-162).
+# Build the csqtt server cores and the APKs from source (CSQTT-APP-PLAN §3, M-158, M-161, M-162), and run every test suite
+# (job `test`, M-159: ci/test.sh server | client | app).
 # - Toolchains are pinned in ci/Dockerfile.server and ci/Dockerfile.android; actions are pinned by commit.
 # - The cores' manifest (csqtt.server-provenance.json) is generated here from the cores this run built, and the APK carries
 #   exactly those cores.
@@ -24,6 +25,46 @@ permissions:
   contents: read
 
 jobs:
+  # Every crate and the app's unit tests on every push (M-159). A failing or non-compiling test fails the run; tests marked
+  # #[ignore] (a TUN device, a separately started server) are left out here. It runs beside `build`, in the same pinned images.
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: Checkout the recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: recipe
+          persist-credentials: false
+
+      - name: Checkout the source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Server build image
+        run: docker build -t csqtt-ci-server -f recipe/ci/Dockerfile.server recipe/ci
+
+      - name: Server tests
+        run: recipe/ci/test.sh src server
+
+      - name: Client tests
+        run: recipe/ci/test.sh src client
+
+      - name: Android build image
+        run: docker build -t csqtt-ci-android -f recipe/ci/Dockerfile.android recipe/ci
+
+      - name: App unit tests
+        run: recipe/ci/test.sh src app
+
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
