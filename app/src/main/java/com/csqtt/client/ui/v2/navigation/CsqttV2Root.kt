@@ -33,6 +33,7 @@ import com.csqtt.client.AppReleaseInfo
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
+import com.csqtt.client.updateCheckDelayMs
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.UPDATE_CHECK_NEVER
@@ -124,7 +125,7 @@ fun CsqttV2Root(
 
             val intervalMillis = updateIntervalHoursToMillis(intervalHours)
                 ?: updateIntervalHoursToMillis(DEFAULT_UPDATE_CHECK_INTERVAL_HOURS)
-                ?: 12L * 60L * 60L * 1000L
+                ?: 60L * 60L * 1000L
 
             suspend fun runUpdateCheck(reason: String) {
                 val checkedAt = System.currentTimeMillis()
@@ -146,13 +147,10 @@ fun CsqttV2Root(
                 }
             }
 
-            runUpdateCheck("startup")
             while (isActive) {
-                val now = System.currentTimeMillis()
-                val lastCheck = settingsStore.updateLastCheckAt.first()
-                val waitMs = (lastCheck + intervalMillis - now).coerceAtLeast(intervalMillis)
-                delay(waitMs)
-                if (isActive) runUpdateCheck("periodic")
+                val waitMs = updateCheckDelayMs(System.currentTimeMillis(), settingsStore.updateLastCheckAt.first(), intervalMillis)
+                if (waitMs > 0) delay(waitMs)
+                if (isActive) runUpdateCheck(if (waitMs > 0) "periodic" else "startup")
             }
         }
 

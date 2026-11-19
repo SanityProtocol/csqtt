@@ -82,7 +82,7 @@ object CsqttConstants {
     }
 
     object Update {
-        const val DEFAULT_CHECK_INTERVAL_HOURS = 12
+        const val DEFAULT_CHECK_INTERVAL_HOURS = 1   // the operator, 2026-11-19: hourly
         const val CHECK_NEVER = -1
         const val ACTION_POSTPONED = "postponed"
         const val ACTION_UPDATE = "update"
@@ -100,8 +100,9 @@ object CsqttConstants {
         const val GITHUB_TAG_TREE_URL_PREFIX =
             "https://github.com/SanityProtocol/csqtt/tree/"
         // The update channel is our own releases (SanityProtocol/csqtt): the only APKs with this app ID and our key.
-        // The automatic check stays off until it is rebuilt (M-91, D13); the manual button asks our releases.
-        val CHECK_DISABLED = true   // not const: the check's code stays reachable (its null checks smart-cast)
+        // The automatic check runs every DEFAULT_CHECK_INTERVAL_HOURS, counted from the last check (updateCheckDelayMs),
+        // so a UI rebuilt on every return to the foreground does not check each time.
+        val CHECK_DISABLED = false   // not const: the check's code stays reachable (its null checks smart-cast)
     }
 
     object Notifications {
@@ -185,7 +186,7 @@ object CsqttConstants {
 
     object Links {
         const val RELEASES = "https://github.com/SanityProtocol/csqtt/releases"
-        const val ISSUES = "https://github.com/SanityProtocol/swg-panel/issues"
+        const val ISSUES = "https://github.com/SanityProtocol/csqtt/issues"
         const val DEVELOPER_PROFILE = "https://github.com/amurcanov"
         const val REPOSITORY = "https://github.com/SanityProtocol/csqtt"
         const val TELEGRAM = "https://t.me/amurcanov_telegram"

@@ -31,6 +31,16 @@ fun updateIntervalHoursToMillis(hours: Int): Long? = when {
     else -> hours * 60L * 60L * 1000L
 }
 
+/**
+ * How long to wait before the next automatic update check: 0 when one is due. Counted from the last check, so the UI
+ * (rebuilt on every return to the foreground) does not check each time it starts. A last check in the future (the clock
+ * was set back) counts as due, so a wrong clock cannot stop the checks for days.
+ */
+fun updateCheckDelayMs(nowMs: Long, lastCheckMs: Long, intervalMs: Long): Long = when {
+    lastCheckMs <= 0L || lastCheckMs > nowMs -> 0L
+    else -> (lastCheckMs + intervalMs - nowMs).coerceAtLeast(0L)
+}
+
 data class AppReleaseInfo(
     val versionTag: String,
     val releaseUrl: String,

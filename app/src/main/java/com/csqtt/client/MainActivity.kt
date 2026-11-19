@@ -436,7 +436,7 @@ fun MainScreen(
 
         val intervalMillis = updateIntervalHoursToMillis(updateCheckIntervalHours)
             ?: updateIntervalHoursToMillis(DEFAULT_UPDATE_CHECK_INTERVAL_HOURS)
-            ?: 12L * 60L * 60L * 1000L
+            ?: 60L * 60L * 1000L
 
         suspend fun runUpdateCheck(reason: String) {
             val checkedAt = System.currentTimeMillis()
@@ -467,17 +467,10 @@ fun MainScreen(
             }
         }
 
-        runUpdateCheck("startup")
-
         while (isActive) {
-            val now = System.currentTimeMillis()
-            val lastCheck = settingsStore.updateLastCheckAt.first()
-            val nextCheckAt = lastCheck + intervalMillis
-            val waitMs = (nextCheckAt - now).coerceAtLeast(intervalMillis)
-            delay(waitMs)
-            if (isActive) {
-                runUpdateCheck("periodic")
-            }
+            val waitMs = updateCheckDelayMs(System.currentTimeMillis(), settingsStore.updateLastCheckAt.first(), intervalMillis)
+            if (waitMs > 0) delay(waitMs)
+            if (isActive) runUpdateCheck(if (waitMs > 0) "periodic" else "startup")
         }
     }
 
