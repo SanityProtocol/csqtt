@@ -88,21 +88,19 @@ object CsqttConstants {
         const val ACTION_UPDATE = "update"
 
         const val GITHUB_RELEASES_URL =
-            "https://api.github.com/repos/Afteroid/csqttr/releases?per_page=30"
+            "https://api.github.com/repos/SanityProtocol/csqtt/releases?per_page=30"
         const val GITHUB_LATEST_RELEASE_URL =
-            "https://api.github.com/repos/Afteroid/csqttr/releases/latest"
+            "https://api.github.com/repos/SanityProtocol/csqtt/releases/latest"
         const val GITHUB_LATEST_RELEASE_WEB_URL =
-            "https://github.com/Afteroid/csqttr/releases/latest"
+            "https://github.com/SanityProtocol/csqtt/releases/latest"
         const val GITHUB_RELEASE_TAG_URL_PREFIX =
-            "https://github.com/Afteroid/csqttr/releases/tag/"
+            "https://github.com/SanityProtocol/csqtt/releases/tag/"
         const val GITHUB_TAGS_URL =
-            "https://api.github.com/repos/Afteroid/csqttr/tags?per_page=100"
+            "https://api.github.com/repos/SanityProtocol/csqtt/tags?per_page=100"
         const val GITHUB_TAG_TREE_URL_PREFIX =
-            "https://github.com/Afteroid/csqttr/tree/"
-        // SanityProtocol build: new versions are published with the swg-panel csqtt releases and handed out by the
-        // panel's subscription page. The check against Afteroid/csqttr is off: that APK is another app (another ID and
-        // signing key) and cannot install over this one.
-        const val SANITY_RELEASES_URL = "https://github.com/SanityProtocol/swg-panel/releases?q=csqtt"
+            "https://github.com/SanityProtocol/csqtt/tree/"
+        // The update channel is our own releases (SanityProtocol/csqtt): the only APKs with this app ID and our key.
+        // The automatic check stays off until it is rebuilt (M-91, D13); the manual button asks our releases.
         val CHECK_DISABLED = true   // not const: the check's code stays reachable (its null checks smart-cast)
     }
 
@@ -186,10 +184,10 @@ object CsqttConstants {
     }
 
     object Links {
-        const val RELEASES = "https://github.com/Afteroid/csqttr/releases"
+        const val RELEASES = "https://github.com/SanityProtocol/csqtt/releases"
         const val ISSUES = "https://github.com/SanityProtocol/swg-panel/issues"
         const val DEVELOPER_PROFILE = "https://github.com/amurcanov"
-        const val REPOSITORY = "https://github.com/Afteroid/csqttr"
+        const val REPOSITORY = "https://github.com/SanityProtocol/csqtt"
         const val TELEGRAM = "https://t.me/amurcanov_telegram"
         const val TELEGRAM_HANDLE = "t.me/amurcanov_telegram"
     }

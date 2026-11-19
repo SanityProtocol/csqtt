@@ -312,7 +312,7 @@ fun V2VersionSheet(
                         V2PillButton(
                             text = "Открыть существующие задачи",
                             onClick = {
-                                runCatching { uriHandler.openUri("https://github.com/Afteroid/csqttr/issues") }
+                                runCatching { uriHandler.openUri(CsqttConstants.Links.ISSUES) }
                             },
                             style = V2PillStyle.Outline,
                             modifier = Modifier.fillMaxWidth(),
