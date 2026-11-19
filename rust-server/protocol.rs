@@ -3984,6 +3984,8 @@ fn is_idle_keepalive(payload: &[u8]) -> bool {
 
 #[inline(always)]
 fn should_flush_udp_immediately(payload: &[u8]) -> bool {
+    // control messages only (send_plain); tunnel data goes through send_data_client. A non-priority control packet is
+    // dropped when the TX headroom is gone, and HASHES has no retry, so it is priority like ROUTING
     payload.starts_with(b"GETCONF:")
         || payload.starts_with(b"TUNCONF:")
         || payload.starts_with(b"ROUTING:")

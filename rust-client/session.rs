@@ -328,8 +328,15 @@ impl ControlReassembler {
         Self::default()
     }
 
+    /// Runs for every packet the reader gets: the first byte settles it for tunnel data (an IPv4 packet starts 0x45, an
+    /// IPv6 one 0x6_; 'R' never starts an IP packet), so ordinary traffic pays one compare, less than before S8.
+    #[inline]
     pub fn is_chunked(payload: &[u8]) -> bool {
-        payload.starts_with(b"ROUTING:") || payload.starts_with(b"HASHES:")
+        match payload.first() {
+            Some(b'R') => payload.starts_with(b"ROUTING:"),
+            Some(b'H') => payload.starts_with(b"HASHES:"),
+            _ => false,
+        }
     }
 
     pub fn feed(&mut self, payload: &[u8]) -> Option<ControlMessage> {

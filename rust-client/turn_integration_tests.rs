@@ -2322,7 +2322,7 @@ async fn owner_hashes_arrive_after_tunconf() {
         SessionRuntime {
             dispatcher: dispatcher.clone(),
             pool,
-            stats,
+            stats: stats.clone(),
             events: events.clone(),
             config_tx,
             config_delivery: Some(ConfigDeliveryState {
@@ -2363,8 +2363,10 @@ async fn owner_hashes_arrive_after_tunconf() {
     let message: serde_json::Value = serde_json::from_str(event["hashes"].as_str().unwrap()).unwrap();
     assert_eq!(message["version"], 1);
     assert_eq!(message["hashes"], serde_json::json!(OWNER_HASHES.split(',').collect::<Vec<_>>()));
-    // HASHES is control: the tunnel stays up and nothing of it reached the TUN as data
+    // HASHES is control: the tunnel stays up and nothing of it reached the TUN as data (nothing else comes down in this
+    // case, so the TUN write counter stays at zero)
     assert_eq!(dispatcher.active_count(), 1);
+    assert_eq!(stats.total_bytes_down.load(Ordering::Relaxed), 0, "a control message was written to the TUN");
     println!("CSQTT_E2E_HASHES received={message}");
 
     cancel.cancel();
