@@ -143,11 +143,12 @@ impl ProxyRoute {
     pub async fn cleanup_orphaned_policy() -> Result<()> {
         let _guard = POLICY_LOCK.lock().await;
         ACTIVE_RUNTIME.store(0, Ordering::Release);
-        cleanup_shared_policy().await;
-        // a block a previous process left (it stopped, crashed or was killed while the exit was down): this process
+        // first (before the iptables work, which can wait on a busy xtables lock past the caller's timeout at boot): a
+        // block a previous process left (it stopped, crashed or was killed while the exit was down). This process
         // starts unblocked and installs its own when its profile calls for it
         let _ = egress_block_locked(false).await;
         EGRESS_BLOCKED.store(false, Ordering::Release);
+        cleanup_shared_policy().await;
         // 1066 / 0x422 / CSQTT_LOCAL_SOCKS*: stock's own legacy, never installed by 2.1.9 or 2.5 — a side instance
         // leaves it to stock (its ip rule / table deletes are not subnet-scoped)
         if crate::swgpanel::is_default_instance() {
