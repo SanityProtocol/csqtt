@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run one test suite of a source tree inside the pinned CI images (M-159: every crate tested on every push).
-# Usage: ci/test.sh <source tree> <server|client|app|e2e> [test name filter, e2e only]
+# Usage: ci/test.sh <source tree> <server|client|app|e2e> [e2e only: a substring of the case names to run]
 #   server: cargo test of rust-server for the target it ships on (x86_64 musl, built through zig like ci/build-server.sh)
 #   client: cargo test of rust-client on the host target (its sni.rs includes the tree's root domains.txt)
 #   app:    the Gradle unit tests (testDebugUnitTest; AGP 9 has no release unit-test task)
@@ -47,7 +47,7 @@ client)
 e2e)
   # one at a time: the cases share the server, and the throughput case measures it
   run "${CSQTT_SERVER_IMAGE:-csqtt-ci-server}" 'set -euo pipefail; unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
-cd /w/src/rust-client && cargo +1.97.1 test --locked --release -- --ignored --test-threads=1 ${E2E_FILTER:+--exact "$E2E_FILTER"}'
+cd /w/src/rust-client && cargo +1.97.1 test --locked --release -- --ignored --test-threads=1 ${E2E_FILTER:+"$E2E_FILTER"}'
   ;;
 app)
   P="$W/src/gradle/wrapper/gradle-wrapper.properties"

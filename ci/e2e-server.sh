@@ -15,6 +15,7 @@ CI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 up() {
   local bin st; bin=$(readlink -f "$1"); st=$2
+  down "$st"   # leftovers of a run that failed half-way would make `ip netns add` refuse
   mkdir -p "$st"; st=$(cd "$st" && pwd); rm -rf "$st/cfg"; mkdir -m 0700 "$st/cfg"
   ip netns add $NS
   ip link add ${NS}h type veth peer name ${NS}n

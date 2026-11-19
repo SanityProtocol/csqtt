@@ -160,12 +160,15 @@ jobs:
         # hosted runner carries the client, the relay and the server at once. Skipped on manual `ref` runs: an older tree
         # (2.5.3) carries the cases before their 2.6.0 fixes.
         if: ${{ !inputs.ref }}
+        timeout-minutes: 20
         run: |
           sudo recipe/ci/e2e-server.sh up out/cores/csqtt-linux-amd64 "$RUNNER_TEMP/e2e"
           set -a; . "$RUNNER_TEMP/e2e/env"; set +a
           rc=0
           CSQTT_E2E_PEER=$PEER CSQTT_E2E_WEB=$WEB CSQTT_E2E_MIN_MBIT=64 CSQTT_E2E_MIN_STREAM_KBIT=800 \
             recipe/ci/test.sh src e2e || rc=$?
+          # the wrong-password case ends in a timeout either way; the server must still be running after every case
+          sudo kill -0 "$PID" || { echo "the server process $PID is gone"; rc=1; }
           [ "$rc" = 0 ] || { echo "--- server log (tail)"; sudo tail -60 "$RUNNER_TEMP/e2e/server.log"; }
           sudo recipe/ci/e2e-server.sh down "$RUNNER_TEMP/e2e"
           exit "$rc"
