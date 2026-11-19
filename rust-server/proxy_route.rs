@@ -528,6 +528,52 @@ async fn activate_tproxy(runtime_id: u64, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// D7 / M-179: whether the clients' traffic must be blackholed. Only one state leaves from the VPS's own address: no exit
+/// configured, or an exit whose owner chose «напрямую». A configured fail-closed exit that is not up blocks.
+pub fn egress_blocked(profile: Option<&LocalProxyProfile>, route_up: bool) -> bool {
+    matches!(profile, Some(p) if p.fail_closed) && !route_up
+}
+
+/// Installs (or removes) the block: `iif <tun> → table T`, T holding only `blackhole default`, IPv4 and IPv6. Packets to
+/// the server's own addresses still match the local table first. Installing is idempotent and also repairs a missing
+/// blackhole route (a rule into an empty table would fall through to main, i.e. direct).
+async fn set_egress_block(on: bool) -> Result<()> {
+    let _guard = POLICY_LOCK.lock().await;
+    let table = crate::swgpanel::egress_block_table();
+    let iface = crate::swgpanel::iface();
+    for family in ["-4", "-6"] {
+        while command_success("ip", &[family, "rule", "del", "iif", iface, "priority", table, "table", table]).await {}
+        let route = [family, "route", "replace", "blackhole", "default", "table", table];
+        let rule = [family, "rule", "add", "iif", iface, "priority", table, "table", table];
+        if on && family == "-4" {
+            command_required("ip", &route).await?;
+            command_required("ip", &rule).await?;
+        } else if on {
+            // a host without IPv6 refuses these; its clients have no IPv6 to leak
+            let _ = command_output("ip", &route).await;
+            let _ = command_output("ip", &rule).await;
+        } else {
+            let _ = command_output("ip", &[family, "route", "flush", "table", table]).await;
+        }
+    }
+    let _ = command_output("ip", &["route", "flush", "cache"]).await;
+    Ok(())
+}
+
+static EGRESS_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Brings the block to the state `profile` and `route_up` call for. While blocked it is re-asserted on every call (the
+/// proxy loop's pass), which repairs a route or rule someone removed. Returns the new state when it changed.
+pub async fn apply_egress(profile: Option<&LocalProxyProfile>, route_up: bool) -> Result<Option<bool>> {
+    let on = egress_blocked(profile, route_up);
+    let was = EGRESS_BLOCKED.load(Ordering::Acquire);
+    if on || was {
+        set_egress_block(on).await?;
+    }
+    EGRESS_BLOCKED.store(on, Ordering::Release);
+    Ok((on != was).then_some(on))
+}
+
 async fn add_tproxy_shared_rules() -> Result<()> {
     while command_success(
         "ip",
@@ -1077,7 +1123,24 @@ mod tests {
             port: 45000,
             username: String::new(),
             password: String::new(),
+            fail_closed: true,
         }
+    }
+
+    #[test]
+    fn egress_blocks_when_proxy_down() {
+        // D7 / M-179: a configured fail-closed exit that is not up blocks — whatever made it go down (no route yet,
+        // the port stopped answering, the forwarder failed to connect): all of them reach apply_egress with route_up false
+        let profile = config();
+        assert!(super::egress_blocked(Some(&profile), false));
+        assert!(!super::egress_blocked(Some(&profile), true), "unlocked only once the TPROXY route is up");
+    }
+
+    #[test]
+    fn egress_direct_only_when_chosen() {
+        let direct = LocalProxyProfile { fail_closed: false, ..config() };
+        assert!(!super::egress_blocked(Some(&direct), false), "the owner chose «напрямую»");
+        assert!(!super::egress_blocked(None, false), "no exit configured: the VPS's own route, as always");
     }
 
     #[test]

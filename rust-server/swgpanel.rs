@@ -113,6 +113,11 @@ pub fn tproxy_table() -> &'static str {
 pub fn tproxy_mark() -> &'static str {
     if is_default_instance() { "0x7531/0x7531" } else { "0x7532/0x7532" }
 }
+// D7 / M-179: the fail-closed egress block's table and rule priority (one number, as tproxy_table). It sits after the
+// local table, so the clients still reach the server itself, and before main, where their traffic would leave directly.
+pub fn egress_block_table() -> &'static str {
+    if is_default_instance() { "30011" } else { "30012" }
+}
 pub fn tproxy_base_port() -> u16 {
     if is_default_instance() { 10666 } else { 10766 }
 }

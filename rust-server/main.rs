@@ -1896,6 +1896,7 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
         };
 
         let Some(profile) = profile else {
+            note_egress(&app, proxy_route::apply_egress(None, false).await);
             *write_unpoison(&app.proxy_health_error) = None;
             let old = app.proxy_route.write().await.take();
             if let Some(route) = old {
@@ -1929,13 +1930,15 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                     if let Some(failed) = failed {
                         failed.deactivate().await;
                     }
+                    note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
                     log_event(
                         &app,
                         "WARNING",
                         "PROXY",
                         &format!(
-                            "SOCKS5 port {} is no longer listening; clients switched to the direct route",
-                            profile.port
+                            "SOCKS5 port {} is no longer listening; {}",
+                            profile.port,
+                            egress_words(&profile)
                         ),
                     );
                     schedule_proxy_shutdown_compaction(&app);
@@ -1968,14 +1971,16 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
         if !listening {
             *write_unpoison(&app.proxy_health_error) =
                 Some(format!("Порт {} не отвечает", profile.port));
+            note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
             if port_failures == 0 {
                 log_event(
                     &app,
                     "WARNING",
                     "PROXY",
                     &format!(
-                        "SOCKS5 port {} is not listening; traffic goes direct, port re-check every 3s",
-                        profile.port
+                        "SOCKS5 port {} is not listening; {}, port re-check every 3s",
+                        profile.port,
+                        egress_words(&profile)
                     ),
                 );
             }
@@ -2010,6 +2015,7 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
             Ok(route) => {
                 *write_unpoison(&app.proxy_health_error) = None;
                 app.proxy_route.write().await.replace(route);
+                note_egress(&app, proxy_route::apply_egress(Some(&profile), true).await);
                 log_event(
                     &app,
                     "INFO",
@@ -2023,17 +2029,37 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
             }
             Err(error) => {
                 *write_unpoison(&app.proxy_health_error) = Some(format!("{error:#}"));
+                note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
                 log_event(
                     &app,
                     "ERROR",
                     "PROXY",
                     &format!(
-                        "Local SOCKS5 is not ready: {error:#}. Direct VPS route is active; retry in 3s"
+                        "Local SOCKS5 is not ready: {error:#}. {}; retry in 3s",
+                        egress_words(&profile)
                     ),
                 );
                 wait = Some(PORT_CHECK);
             }
         }
+    }
+}
+
+/// The log's words for what the clients' traffic does while `profile`'s exit is down (D7).
+fn egress_words(profile: &model::LocalProxyProfile) -> &'static str {
+    if profile.fail_closed {
+        "client traffic is blocked until it is up (fail-closed)"
+    } else {
+        "client traffic goes direct from the VPS (the profile allows it)"
+    }
+}
+
+fn note_egress(app: &Arc<App>, result: Result<Option<bool>>) {
+    match result {
+        Ok(Some(true)) => log_event(app, "WARNING", "PROXY", "Egress block ON: client traffic is dropped, not sent direct"),
+        Ok(Some(false)) => log_event(app, "INFO", "PROXY", "Egress block OFF"),
+        Ok(None) => {}
+        Err(error) => log_event(app, "ERROR", "PROXY", &format!("Egress block could not be applied: {error:#}")),
     }
 }
 

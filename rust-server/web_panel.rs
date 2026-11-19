@@ -5042,6 +5042,9 @@ struct ProfileRequest {
     username: String,
     #[serde(default)]
     password: String,
+    /// D7: absent = keep (update) / on (create)
+    #[serde(default)]
+    fail_closed: Option<bool>,
 }
 
 async fn local_proxy_get(State(state): State<WebState>) -> impl IntoResponse {
@@ -5063,6 +5066,7 @@ async fn local_proxy_get(State(state): State<WebState>) -> impl IntoResponse {
                 "port": p.port,
                 "username": p.username,
                 "password": p.password,
+                "fail_closed": p.fail_closed,
             })
         })
         .collect();
@@ -5097,6 +5101,7 @@ async fn local_proxy_create(
             request.name
         },
         port,
+        fail_closed: request.fail_closed.unwrap_or(true),
         username: request.username,
         password: request.password,
     };
@@ -5144,6 +5149,7 @@ async fn local_proxy_update(
         port,
         username: request.username.clone(),
         password: request.password.clone(),
+        fail_closed: request.fail_closed.unwrap_or(true),
     };
     if let Err(error) = crate::proxy_route::validate_config(&temp_profile) {
         return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
@@ -5160,6 +5166,9 @@ async fn local_proxy_update(
         profile.port = port;
         profile.username = request.username;
         profile.password = request.password;
+        if let Some(fail_closed) = request.fail_closed {
+            profile.fail_closed = fail_closed;
+        }
         (was_active, state.app.db_persistence.submit(db.clone()))
     };
     if let Err(response) = wait_for_persistence(&state, revision).await {
@@ -9446,7 +9455,8 @@ const PANEL_HTML: &str = r##"
         <div class="input-group"><label for="profileDlgName">Имя</label><input id="profileDlgName" maxlength="64" placeholder="3x-ui VLESS"></div>
         <div class="input-group"><label for="profileDlgPort">Порт SOCKS5</label><input type="number" id="profileDlgPort" min="1" max="65535" value="45000" inputmode="numeric"></div>
         <div class="input-group"><label for="profileDlgUser">Логин (необязательно)</label><input id="profileDlgUser" maxlength="255" autocomplete="off"></div>
-        <div class="input-group" style="margin-bottom: 0;"><label for="profileDlgPass">Пароль (необязательно)</label><input type="password" id="profileDlgPass" maxlength="255" autocomplete="new-password"></div>
+        <div class="input-group"><label for="profileDlgPass">Пароль (необязательно)</label><input type="password" id="profileDlgPass" maxlength="255" autocomplete="new-password"></div>
+        <div class="input-group" style="margin-bottom: 0;"><label for="profileDlgFailClosed">Если SOCKS5 недоступен</label><select id="profileDlgFailClosed"><option value="1">Блокировать трафик клиентов</option><option value="0">Пускать напрямую с сервера</option></select></div>
         <div class="dlg-actions" style="margin-top: 20px;">
             <button class="btn btn-ghost" onclick="document.getElementById('profileDlg').close()">Отмена</button>
             <button class="btn btn-primary" id="profileDlgSave" onclick="saveProfileDlg()">Создать</button>
@@ -11018,6 +11028,7 @@ const PANEL_HTML: &str = r##"
                 document.getElementById('profileDlgPort').value = p.port;
                 document.getElementById('profileDlgUser').value = p.username || '';
                 document.getElementById('profileDlgPass').value = p.password || '';
+                document.getElementById('profileDlgFailClosed').value = p.fail_closed === false ? '0' : '1';
             } else {
                 title.textContent = 'Новый профиль';
                 saveBtn.textContent = 'Создать';
@@ -11025,6 +11036,7 @@ const PANEL_HTML: &str = r##"
                 document.getElementById('profileDlgPort').value = '45000';
                 document.getElementById('profileDlgUser').value = '';
                 document.getElementById('profileDlgPass').value = '';
+                document.getElementById('profileDlgFailClosed').value = '1';
             }
             dlg.showModal();
         }
@@ -11041,7 +11053,8 @@ const PANEL_HTML: &str = r##"
             if (password && !username) {
                 showToast('Для пароля SOCKS5 укажите логин', 'error'); return;
             }
-            const body = JSON.stringify({ name, port, username, password });
+            const fail_closed = document.getElementById('profileDlgFailClosed').value !== '0';
+            const body = JSON.stringify({ name, port, username, password, fail_closed });
             const btn = document.getElementById('profileDlgSave');
             profileDlgSaving = true;
             btn.disabled = true;

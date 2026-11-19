@@ -96,6 +96,14 @@ pub struct LocalProxyProfile {
     pub username: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub password: String,
+    /// D7 / M-179: while this exit is configured but not up, the clients' traffic is blocked (true, the default) instead
+    /// of leaving from the VPS's own address.
+    #[serde(default = "default_fail_closed")]
+    pub fail_closed: bool,
+}
+
+fn default_fail_closed() -> bool {
+    true
 }
 
 impl LocalProxyProfile {
@@ -199,6 +207,7 @@ impl<'de> serde::Deserialize<'de> for LocalProxyState {
                 },
                 username,
                 password,
+                fail_closed: true,
             };
             Ok(Self {
                 active_profile_id: if enabled { id } else { String::new() },
@@ -821,7 +830,8 @@ CREATE TABLE IF NOT EXISTS local_proxy_profiles (
     name       TEXT    NOT NULL,
     port       INTEGER NOT NULL,
     username   TEXT    NOT NULL DEFAULT '',
-    password   TEXT    NOT NULL DEFAULT ''
+    password   TEXT    NOT NULL DEFAULT '',
+    fail_closed INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS local_proxy_state (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -887,6 +897,7 @@ fn open_database_connection(config_dir: &Path) -> Result<Connection> {
         .execute_batch(DATABASE_SCHEMA)
         .with_context(|| format!("schema {}", path.display()))?;
     ensure_password_columns(&connection)?;
+    ensure_local_proxy_columns(&connection)?;
     ensure_routing_rule_columns(&connection)?;
     ensure_client_group_columns(&connection)?;
     Ok(connection)
@@ -970,6 +981,27 @@ fn ensure_routing_rule_columns(connection: &Connection) -> Result<()> {
                 [],
             )
             .context("add ips_json column")?;
+    }
+    Ok(())
+}
+
+/// 2.6.0: `fail_closed` (D7), on for every existing profile.
+fn ensure_local_proxy_columns(connection: &Connection) -> Result<()> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(local_proxy_profiles)")
+        .context("prepare local proxy schema check")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("read local proxy schema")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect local proxy schema")?;
+    if !columns.iter().any(|column| column == "fail_closed") {
+        connection
+            .execute(
+                "ALTER TABLE local_proxy_profiles ADD COLUMN fail_closed INTEGER NOT NULL DEFAULT 1",
+                [],
+            )
+            .context("add fail_closed column")?;
     }
     Ok(())
 }
@@ -1279,14 +1311,15 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password, fail_closed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET
                     sort_order = excluded.sort_order,
                     name = excluded.name,
                     port = excluded.port,
                     username = excluded.username,
-                    password = excluded.password",
+                    password = excluded.password,
+                    fail_closed = excluded.fail_closed",
             )
             .context("prepare local proxy profiles insert")?;
         for (sort_order, profile) in db.local_proxy.profiles.iter().enumerate() {
@@ -1298,6 +1331,7 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     profile.port,
                     profile.username,
                     profile.password,
+                    i64::from(profile.fail_closed),
                 ])
                 .context("write local proxy profile")?;
         }
@@ -1510,7 +1544,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
     {
         let mut select = connection
             .prepare(
-                "SELECT id, name, port, username, password
+                "SELECT id, name, port, username, password, fail_closed
                  FROM local_proxy_profiles ORDER BY sort_order",
             )
             .context("prepare local proxy profiles select")?;
@@ -1522,6 +1556,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                 port: row.get(2).context("read profile port")?,
                 username: row.get(3).context("read profile username")?,
                 password: row.get(4).context("read profile password")?,
+                fail_closed: row.get::<_, i64>(5).context("read profile fail_closed")? != 0,
             });
         }
     }
@@ -1915,6 +1950,35 @@ mod tests {
 
         assert_eq!(restored.dns, database.dns);
         assert_eq!(restored.dns_provider, database.dns_provider);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn proxy_fail_closed_persists_and_defaults_on() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("csqtt-failclosed-test-{unique}"));
+        let mut database = Database::default();
+        for (id, fail_closed) in [("a", true), ("b", false)] {
+            database.local_proxy.profiles.push(super::LocalProxyProfile {
+                id: id.to_owned(),
+                name: id.to_owned(),
+                port: 45000,
+                username: String::new(),
+                password: String::new(),
+                fail_closed,
+            });
+        }
+        save_database(&directory, &database).expect("save database");
+        let restored = load_database(&directory).expect("load database");
+        let by_id = |id: &str| restored.local_proxy.profiles.iter().find(|p| p.id == id).unwrap().fail_closed;
+        assert!(by_id("a"));
+        assert!(!by_id("b"));
+        // an older profile (no field in its JSON) comes in fail-closed
+        let old: super::LocalProxyProfile = serde_json::from_str(r#"{"id":"x","name":"x","port":1}"#).unwrap();
+        assert!(old.fail_closed);
         let _ = std::fs::remove_dir_all(directory);
     }
 
