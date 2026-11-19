@@ -18,3 +18,4 @@ rust-server/target/
 scratch/
 assets-files/
 docs/
+app/src/main/assets/csqtt.server-provenance.json
