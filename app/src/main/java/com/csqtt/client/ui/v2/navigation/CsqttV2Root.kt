@@ -34,6 +34,7 @@ import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
 import com.csqtt.client.updateCheckDelayMs
+import com.csqtt.client.RemoteVersionSource
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.UPDATE_CHECK_NEVER
@@ -137,7 +138,10 @@ fun CsqttV2Root(
                 )
                 if (release == null) return
 
-                val hasUpdate = isNewerVersion(currentVersion, release.versionTag)
+                // only a published release: a tag is pushed before its release exists (CI builds it first), and its tree page
+                // has no APK to update with. The manual button still reports tags.
+                val hasUpdate = release.source == RemoteVersionSource.Release &&
+                    isNewerVersion(currentVersion, release.versionTag)
                 val postponeVersion = settingsStore.updatePostponeVersion.first()
                 val postponeUntil = settingsStore.updatePostponeUntil.first()
                 val isPostponed = postponeVersion == release.versionTag && checkedAt < postponeUntil

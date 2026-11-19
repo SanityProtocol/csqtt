@@ -452,7 +452,10 @@ fun MainScreen(
                 return
             }
 
-            val hasUpdate = isNewerVersion(currentVersion, release.versionTag)
+            // only a published release: a tag is pushed before its release exists (CI builds it first), and its tree page
+            // has no APK to update with. The manual button still reports tags.
+            val hasUpdate = release.source == RemoteVersionSource.Release &&
+                isNewerVersion(currentVersion, release.versionTag)
             val postponeVer = settingsStore.updatePostponeVersion.first()
             val postponeUntil = settingsStore.updatePostponeUntil.first()
             val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil
