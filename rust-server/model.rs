@@ -1583,13 +1583,41 @@ pub fn load_database(config_dir: &Path) -> Result<Database> {
     Ok(db)
 }
 
+impl Database {
+    /// M-169: a VK token stored by an older server (the server's own and any group's) is dropped. Links used to carry it
+    /// to participants; since 2.6.0 they carry the owner's hashes instead. Returns how many were dropped.
+    pub fn forget_vk_tokens(&mut self) -> usize {
+        let mut forgotten = 0;
+        if !self.vk_access_token.is_empty() {
+            self.vk_access_token.clear();
+            forgotten += 1;
+        }
+        for group in self.groups.values_mut() {
+            if group.vk_token.take().is_some_and(|token| !token.is_empty()) {
+                forgotten += 1;
+            }
+        }
+        forgotten
+    }
+}
+
 fn repair_loaded_database(config_dir: &Path, db: &mut Database) -> Result<()> {
     let repairs = db.repair_stale_password_bindings();
-    if repairs.is_empty() {
+    let forgotten = db.forget_vk_tokens();
+    if repairs.is_empty() && forgotten == 0 {
         return Ok(());
     }
     let mut connection = open_database_connection(config_dir)?;
     write_database_snapshot(&mut connection, db)?;
+    if forgotten > 0 {
+        eprintln!(
+            "[DB] removed {forgotten} stored VK token(s): since 2.6.0 the server never stores or hands out a VK token; \
+             token-mode participants get the owner's VK hashes"
+        );
+    }
+    if repairs.is_empty() {
+        return Ok(());
+    }
     const LOG_LIMIT: usize = 16;
     let shown = repairs
         .iter()
@@ -1873,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn vk_token_settings_and_access_flag_survive_database_restart() {
+    fn stored_vk_tokens_are_forgotten_at_load_and_the_access_flag_survives() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1894,8 +1922,11 @@ mod tests {
         save_database(&directory, &database).expect("save database");
         let restored = load_database(&directory).expect("load database");
 
-        assert_eq!(restored.vk_access_token, "vk1.shared-token");
+        // M-169: the token is gone from memory and from the store, the client keeps its token-mode flag
+        assert_eq!(restored.vk_access_token, "");
         assert!(restored.passwords["client-password1"].vk_token_enabled);
+        let reloaded = load_database(&directory).expect("load database again");
+        assert_eq!(reloaded.vk_access_token, "");
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -2361,10 +2392,8 @@ mod tests {
         assert_eq!(restored_group.name, "Test Group");
         assert_eq!(restored_group.admin_uuid, "admin-uuid-456");
         assert_eq!(restored_group.workers, Some(99));
-        assert_eq!(
-            restored_group.vk_token.as_deref(),
-            Some("vk1.a.group_custom_token")
-        );
+        // M-169: a group's stored token is dropped at load; its hashes stay
+        assert_eq!(restored_group.vk_token, None);
         assert_eq!(
             restored_group.vk_hashes.as_deref(),
             Some("group_hash_1,group_hash_2")

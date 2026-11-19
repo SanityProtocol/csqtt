@@ -438,7 +438,7 @@ fn make_client_link(
     password: &str,
     vk_hashes: &str,
     vk_token: bool,
-    shared_token: &str,
+    owner_hashes: &str,
 ) -> String {
     let mut payload = format!(
         "connect?v=2&host={}&peer={}",
@@ -449,11 +449,16 @@ fn make_client_link(
         payload.push_str("&password=");
         payload.push_str(&url_encode(password));
     }
-    let hashes: Vec<&str> = vk_hashes
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    // A link never carries a VK token (M-169): the sealed link is obfuscation only, so a token in it is readable by every
+    // participant. A token-mode entry without its own hashes gets the owner's hashes (its group's, else the server's
+    // default) instead.
+    let split = |list: &str| -> Vec<String> {
+        list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
+    };
+    let mut hashes = split(vk_hashes);
+    if hashes.is_empty() && vk_token {
+        hashes = split(owner_hashes);
+    }
     if !hashes.is_empty() {
         payload.push_str("&hashes=");
         payload.push_str(
@@ -463,9 +468,6 @@ fn make_client_link(
                 .collect::<Vec<_>>()
                 .join("+"),
         );
-    } else if vk_token && !shared_token.is_empty() {
-        payload.push_str("&token=");
-        payload.push_str(&url_encode(shared_token));
     }
     encrypt_csqtt_link(&payload)
 }
@@ -483,8 +485,17 @@ fn make_main_link(host: &str, port: u16, db: &model::Database) -> String {
         &db.main_password,
         vk_hashes,
         db.main_vk_token_enabled,
-        &db.vk_access_token,
+        &db.vk_hashes,
     )
+}
+
+/// The owner's hashes a token-mode participant of `group_id` gets: the group's own, else the server's default.
+fn owner_hashes<'a>(db: &'a model::Database, group_id: &str) -> &'a str {
+    db.groups
+        .get(group_id)
+        .and_then(|g| g.vk_hashes.as_deref())
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or(&db.vk_hashes)
 }
 
 #[inline]
@@ -493,7 +504,7 @@ fn make_entry_link(
     port: u16,
     password: &str,
     entry: &model::PasswordEntry,
-    shared_token: &str,
+    db: &model::Database,
 ) -> String {
     make_client_link(
         host,
@@ -501,7 +512,7 @@ fn make_entry_link(
         password,
         &entry.vk_hashes,
         entry.vk_token_enabled,
-        shared_token,
+        owner_hashes(db, &entry.group_id),
     )
 }
 
@@ -1297,7 +1308,6 @@ async fn settings_get(State(state): State<WebState>) -> impl IntoResponse {
         "dns_primary": primary,
         "dns_secondary": secondary,
         "auto_restart_interval_hours": db.auto_restart_interval_hours(),
-        "vk_token": db.vk_access_token,
         "vk_hashes": vk_hashes,
         "peer_port": state.app.listen.port(),
         "restart_required": db.main_password != state.app.startup_main_password
@@ -1350,13 +1360,9 @@ async fn settings_post(
         )
             .into_response();
     }
-    let requested_vk_access_token = match request.vk_token {
-        Some(token) => match normalize_vk_access_token(&token) {
-            Ok(token) => Some(token),
-            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
-        },
-        None => None,
-    };
+    if let Some(response) = refuse_vk_token(request.vk_token.as_deref()) {
+        return response;
+    }
     let requested_vk_hashes = match request.vk_hashes {
         Some(raw) => match normalize_client_vk_hashes(&raw) {
             Ok(hashes) => Some(hashes),
@@ -1389,9 +1395,6 @@ async fn settings_post(
         }
         if let Some(hours) = requested_auto_restart_interval {
             db.set_auto_restart_interval_hours(hours);
-        }
-        if let Some(token) = requested_vk_access_token {
-            db.vk_access_token = token;
         }
         if let Some(hashes) = requested_vk_hashes {
             db.vk_hashes = hashes;
@@ -1599,7 +1602,7 @@ async fn clients_get(
                     client_peer_port,
                     password,
                     entry,
-                    &db.vk_access_token,
+                    &db,
                 ),
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
@@ -1682,11 +1685,6 @@ async fn group_clients_get(
             .into_response();
     }
     let host = resolve_client_host(&headers, &state).await;
-    let effective_vk_token = db
-        .groups
-        .get(&id)
-        .and_then(|g| g.vk_token.as_deref())
-        .unwrap_or(&db.vk_access_token);
     let list: Vec<ClientInfo> = db
         .passwords
         .iter()
@@ -1718,7 +1716,7 @@ async fn group_clients_get(
                 local_port: entry.local_port,
                 group_id: entry.group_id.clone(),
                 routing_rule_id: entry.routing_rule_id.clone(),
-                link: make_entry_link(&host, client_peer_port, password, entry, effective_vk_token),
+                link: make_entry_link(&host, client_peer_port, password, entry, &db),
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
             }
@@ -1745,15 +1743,22 @@ fn normalize_client_vk_hashes(raw: &str) -> Result<String, &'static str> {
     Ok(hashes.join(","))
 }
 
-fn normalize_vk_access_token(raw: &str) -> Result<String, &'static str> {
-    let token = raw.trim();
-    if token.is_empty() {
-        return Ok(String::new());
+const OWNER_HASHES_FIRST: &str =
+    "set the owner's VK hashes first: the server no longer stores a VK token, token-mode clients get the owner's hashes";
+
+/// M-169: the server never stores a VK token. A request that still carries one (an older panel page) is refused; an
+/// empty value is accepted, because older pages send it to switch token mode off.
+fn refuse_vk_token(token: Option<&str>) -> Option<Response> {
+    match token.map(str::trim) {
+        Some(token) if !token.is_empty() => Some(
+            (
+                StatusCode::BAD_REQUEST,
+                "VK tokens are no longer stored on the server: participants get the owner's VK hashes instead",
+            )
+                .into_response(),
+        ),
+        _ => None,
     }
-    if token.len() > 4096 || token.chars().any(char::is_whitespace) {
-        return Err("VK token is too long or contains whitespace");
-    }
-    Ok(token.to_owned())
 }
 
 async fn clients_create(
@@ -1789,8 +1794,8 @@ async fn clients_create(
 
     let (password, expires, revision, link, sub_uuid) = {
         let mut db = state.app.db.write().await;
-        if request.vk_token && db.vk_access_token.is_empty() {
-            return (StatusCode::BAD_REQUEST, "configure a VK token first").into_response();
+        if request.vk_token && owner_hashes(&db, &group_id).trim().is_empty() {
+            return (StatusCode::BAD_REQUEST, OWNER_HASHES_FIRST).into_response();
         }
         db.passwords.retain(|_, entry| !is_expired(entry));
 
@@ -1871,7 +1876,7 @@ async fn clients_create(
             &password,
             &vk_hashes,
             request.vk_token,
-            &db.vk_access_token,
+            owner_hashes(&db, &group_id),
         );
         let revision = state.app.db_persistence.submit(db.clone());
         (password, expires, revision, link, sub_uuid)
@@ -1922,8 +1927,13 @@ async fn client_update(
 
     let revision = {
         let mut db = state.app.db.write().await;
-        if request.vk_token && db.vk_access_token.is_empty() {
-            return (StatusCode::BAD_REQUEST, "configure a VK token first").into_response();
+        let group_of_entry = request
+            .group_id
+            .clone()
+            .or_else(|| db.passwords.get(&password).map(|entry| entry.group_id.clone()))
+            .unwrap_or_default();
+        if request.vk_token && owner_hashes(&db, &group_of_entry).trim().is_empty() {
+            return (StatusCode::BAD_REQUEST, OWNER_HASHES_FIRST).into_response();
         }
         if secret_eq(&password, &db.main_password) {
             db.main_vk_hashes = vk_hashes;
@@ -2126,7 +2136,7 @@ async fn client_get(
                 client_peer_port,
                 &password,
                 entry,
-                &db.vk_access_token,
+                &db,
             ),
             sub_uuid: entry.sub_uuid.clone(),
             workers: entry.workers,
@@ -2249,7 +2259,7 @@ async fn api_links_get(State(state): State<WebState>, headers: HeaderMap) -> imp
                     client_peer_port,
                     password,
                     entry,
-                    &db.vk_access_token,
+                    &db,
                 ),
                 expires: entry.expires_at,
                 peer_port: client_peer_port,
@@ -2287,13 +2297,11 @@ async fn api_links_batch_vk(
     State(state): State<WebState>,
     Json(request): Json<BatchVkRequest>,
 ) -> Response {
-    let token = match request.vk_token {
-        Some(t) => match normalize_vk_access_token(&t) {
-            Ok(v) => Some(v),
-            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-        },
-        None => None,
-    };
+    if let Some(response) = refuse_vk_token(request.vk_token.as_deref()) {
+        return response;
+    }
+    // only an empty token can reach here: it switches token mode off, as it always did
+    let token = request.vk_token;
     let hashes = match request.vk_hashes {
         Some(h) => match normalize_client_vk_hashes(&h) {
             Ok(v) => Some(v),
@@ -2305,9 +2313,6 @@ async fn api_links_batch_vk(
     let mut updated_count = 0usize;
     let revision = {
         let mut db = state.app.db.write().await;
-        if let Some(ref t) = token {
-            db.vk_access_token = t.clone();
-        }
         if let Some(ref h) = hashes {
             db.vk_hashes = h.clone();
         }
@@ -2598,7 +2603,7 @@ async fn api_export_get(State(state): State<WebState>) -> impl IntoResponse {
         dns: db.dns.clone(),
         dns_provider: db.dns_provider.clone(),
         auto_restart_interval_hours: db.auto_restart_interval_hours,
-        vk_access_token: db.vk_access_token.clone(),
+        vk_access_token: String::new(), // never exported: the server holds no VK token (M-169)
         vk_hashes: db.vk_hashes.clone(),
         groups: db.groups.clone(),
         routing_rules: db.routing_rules.clone(),
@@ -2702,9 +2707,6 @@ async fn api_import_post(
             if let Some(hours) = export.auto_restart_interval_hours {
                 db.set_auto_restart_interval_hours(hours);
                 applied_interval = Some(hours);
-            }
-            if !export.vk_access_token.is_empty() {
-                db.vk_access_token = export.vk_access_token;
             }
             if !export.vk_hashes.is_empty() {
                 db.vk_hashes = export.vk_hashes;
@@ -3038,15 +3040,7 @@ async fn client_sub_page(
     } else {
         entry.dtls_port
     };
-    let effective_vk_token = if !entry.group_id.is_empty() {
-        db.groups
-            .get(&entry.group_id)
-            .and_then(|g| g.vk_token.as_deref())
-            .unwrap_or(&db.vk_access_token)
-    } else {
-        &db.vk_access_token
-    };
-    let link = make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+    let link = make_entry_link(&host, client_peer_port, password, entry, &db);
     let client_name = if entry.name.is_empty() {
         "Клиент".to_string()
     } else {
@@ -3102,15 +3096,7 @@ async fn client_sub_json(
     } else {
         entry.dtls_port
     };
-    let effective_vk_token = if !entry.group_id.is_empty() {
-        db.groups
-            .get(&entry.group_id)
-            .and_then(|g| g.vk_token.as_deref())
-            .unwrap_or(&db.vk_access_token)
-    } else {
-        &db.vk_access_token
-    };
-    let link = make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+    let link = make_entry_link(&host, client_peer_port, password, entry, &db);
     let client_name = if entry.name.is_empty() {
         "Клиент".to_string()
     } else {
@@ -3161,7 +3147,6 @@ async fn group_sub_page(
     };
 
     let host = resolve_client_host(&headers, &state).await;
-    let effective_vk_token = group.vk_token.as_deref().unwrap_or(&db.vk_access_token);
     let mut items = Vec::new();
     for (password, entry) in &db.passwords {
         if entry.group_id == group.id {
@@ -3171,7 +3156,7 @@ async fn group_sub_page(
                 entry.dtls_port
             };
             let link =
-                make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+                make_entry_link(&host, client_peer_port, password, entry, &db);
             let name = if entry.name.is_empty() {
                 "Клиент".to_string()
             } else {
@@ -3216,7 +3201,6 @@ async fn group_sub_json(
     };
 
     let host = resolve_client_host(&headers, &state).await;
-    let effective_vk_token = group.vk_token.as_deref().unwrap_or(&db.vk_access_token);
     let mut items = Vec::new();
     for (password, entry) in &db.passwords {
         if entry.group_id == group.id {
@@ -3226,7 +3210,7 @@ async fn group_sub_json(
                 entry.dtls_port
             };
             let link =
-                make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+                make_entry_link(&host, client_peer_port, password, entry, &db);
             let name = if entry.name.is_empty() {
                 "Клиент".to_string()
             } else {
@@ -3607,12 +3591,11 @@ async fn group_admin_data_get(
         server_ip.clone()
     };
     let peer_port = state.app.listen.port();
-    let effective_vk_token = group.vk_token.as_deref().unwrap_or(&db.vk_access_token);
     let effective_vk_hashes = group.vk_hashes.as_deref().unwrap_or(&db.vk_hashes);
     let mut clients = Vec::new();
     for (_pass, p_entry) in &db.passwords {
         if p_entry.group_id == group.id {
-            let link = make_entry_link(&host, peer_port, _pass, p_entry, effective_vk_token);
+            let link = make_entry_link(&host, peer_port, _pass, p_entry, &db);
             clients.push(serde_json::json!({
                 "password": _pass,
                 "name": p_entry.name,
@@ -3642,7 +3625,6 @@ async fn group_admin_data_get(
                 "id": group.id,
                 "name": group.name,
                 "workers": group.workers.unwrap_or(0),
-                "vk_token": effective_vk_token,
                 "vk_hashes": effective_vk_hashes,
             },
             "clients": clients,
@@ -3676,12 +3658,8 @@ async fn group_admin_settings_post(
     else {
         return stealth_abort_response();
     };
-    if let Some(token) = payload.vk_token {
-        let normalized = match normalize_vk_access_token(&token) {
-            Ok(t) => t,
-            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-        };
-        group.vk_token = Some(normalized);
+    if let Some(response) = refuse_vk_token(payload.vk_token.as_deref()) {
+        return response;
     }
     if let Some(hashes) = payload.vk_hashes {
         let normalized = match normalize_client_vk_hashes(&hashes) {
@@ -6994,10 +6972,10 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             <div class="hub-field-block">
                 <label class="hub-field-label">VK токен группы</label>
                 <div class="hub-field-row">
-                    <input id="hubVkTokenInput" class="hub-field-input" placeholder="Введите VK токен..." onchange="autoSaveHubVkToken()" onblur="autoSaveHubVkToken()">
+                    <span class="hub-field-input" style="display:flex;align-items:center;color:var(--text-muted);font-size:13px;line-height:1.4;">VK-токен на сервере больше не хранится: клиенты в режиме «токен» получают VK хеши владельца (поле ниже).</span>
                     <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Применить VK токен</span><span class="show-mobile">Применить токен</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Очистить токен</span><span class="show-mobile">Очистить</span></button>
+                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Выдать хеши владельца</span><span class="show-mobile">Хеши владельца</span></button>
+                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Выключить режим «токен»</span><span class="show-mobile">Выключить</span></button>
                     </div>
                 </div>
             </div>
@@ -7765,13 +7743,13 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             const submitBtn = document.getElementById('batchConfirmSubmitBtn');
 
             if (action === 'token') {
-                const tokenVal = (document.getElementById('hubVkTokenInput')?.value || groupVkToken || '').trim();
-                if (!tokenVal) {
-                    showToast("Укажите VK токен", true);
+                const ownerHashes = (document.getElementById('hubVkHashesInput')?.value || groupVkHashes || '').trim();
+                if (!ownerHashes) {
+                    showToast("Сначала укажите VK хеши владельца", true);
                     return;
                 }
-                titleEl.textContent = "Применить VK токен";
-                msgEl.textContent = `Включить общий VK токен для выбранных клиентов (${count} шт.)? Индивидуальные VK хеши будут очищены.`;
+                titleEl.textContent = "Выдать хеши владельца";
+                msgEl.textContent = `Выбранные клиенты (${count} шт.) получат VK хеши владельца? Их индивидуальные VK хеши будут очищены.`;
                 submitBtn.textContent = "Применить токен";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-token') {
@@ -9456,15 +9434,10 @@ const PANEL_HTML: &str = r##"
     </dialog>
 
     <dialog id="vkTokenSettingsDlg">
-        <h2 style="font-size: 20px; margin-bottom: 16px;">Настройка VK токенов</h2>
-        <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin: 0 0 18px;">Если сохранить VK токен здесь, все CSQTT-ссылки с включённой функцией VK токена будут автоматически использовать этот общий токен.</p>
-        <div class="input-group" style="margin-bottom: 0;">
-            <label for="vkTokenSettingsInput">Бессрочный VK токен</label>
-            <input id="vkTokenSettingsInput" type="password" maxlength="4096" autocomplete="off" spellcheck="false">
-        </div>
+        <h2 style="font-size: 20px; margin-bottom: 16px;">VK токен</h2>
+        <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin: 0 0 18px;">Сервер больше не хранит VK токен: ссылка расшифровывается любым участником, и токен владельца в ней был бы виден. Клиенты в режиме «токен» получают VK хеши владельца — хеши группы, иначе хеши сервера по умолчанию.</p>
         <div class="dlg-actions" style="margin-top: 20px;">
-            <button class="btn btn-ghost" style="color: #ef4444;" onclick="clearVkTokenSettings()">Очистить</button>
-            <button class="btn btn-primary" onclick="saveVkTokenSettings()">Сохранить</button>
+            <button class="btn btn-primary" onclick="document.getElementById('vkTokenSettingsDlg').close()">Понятно</button>
         </div>
     </dialog>
 
@@ -9729,10 +9702,10 @@ const PANEL_HTML: &str = r##"
             <div class="hub-field-block">
                 <label class="hub-field-label">Общий VK токен</label>
                 <div class="hub-field-row">
-                    <input id="hubVkTokenInput" class="hub-field-input" placeholder="Введите VK токен..." onchange="autoSaveHubVkToken()" onblur="autoSaveHubVkToken()">
+                    <span class="hub-field-input" style="display:flex;align-items:center;color:var(--text-muted);font-size:13px;line-height:1.4;">VK-токен на сервере больше не хранится: клиенты в режиме «токен» получают VK хеши владельца (поле ниже).</span>
                     <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Применить VK токен</span><span class="show-mobile">Применить токен</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Очистить токен</span><span class="show-mobile">Очистить</span></button>
+                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Выдать хеши владельца</span><span class="show-mobile">Хеши владельца</span></button>
+                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Выключить режим «токен»</span><span class="show-mobile">Выключить</span></button>
                     </div>
                 </div>
             </div>
@@ -10918,7 +10891,6 @@ const PANEL_HTML: &str = r##"
         }
 
         function openVkTokenSettingsDlg() {
-            document.getElementById('vkTokenSettingsInput').value = sharedVkToken;
             document.getElementById('vkTokenSettingsDlg').showModal();
         }
 
@@ -12748,13 +12720,13 @@ const PANEL_HTML: &str = r##"
             const submitBtn = document.getElementById('batchConfirmSubmitBtn');
 
             if (action === 'token') {
-                const tokenVal = (document.getElementById('hubVkTokenInput')?.value || sharedVkToken || '').trim();
-                if (!tokenVal) {
-                    showToast("Укажите VK токен", "error");
+                const ownerHashes = (document.getElementById('hubVkHashesInput')?.value || sharedVkHashes || '').trim();
+                if (!ownerHashes) {
+                    showToast("Сначала укажите VK хеши владельца", "error");
                     return;
                 }
-                titleEl.textContent = "Применить VK токен";
-                msgEl.textContent = `Включить общий VK токен для выбранных клиентов (${count} шт.)? Индивидуальные VK хеши будут очищены.`;
+                titleEl.textContent = "Выдать хеши владельца";
+                msgEl.textContent = `Выбранные клиенты (${count} шт.) получат VK хеши владельца? Их индивидуальные VK хеши будут очищены.`;
                 submitBtn.textContent = "Применить токен";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-token') {
@@ -13217,7 +13189,7 @@ mod tests {
         PWA_ICON_512_PNG, PWA_MANIFEST, PWA_SERVICE_WORKER, count_active_sessions,
         decrypt_csqtt_link, deploy_dns_profile_or_yandex, dns_provider_by_id, dns_provider_id,
         encrypt_csqtt_link, make_client_link, manual_dns, normalize_client_vk_hashes,
-        normalize_vk_access_token, process_memory, process_memory_rollup, provider_dns,
+        make_entry_link, process_memory, process_memory_rollup, provider_dns, refuse_vk_token,
         validate_client_name, validate_proxy_profile_name, validate_workers,
     };
 
@@ -13328,17 +13300,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         assert!(normalize_client_vk_hashes(&seven).is_err());
-    }
-
-    #[test]
-    fn vk_token_accepts_one_compact_value_or_empty() {
-        assert_eq!(
-            normalize_vk_access_token("  vk1.token-_%2B  ").unwrap(),
-            "vk1.token-_%2B"
-        );
-        assert_eq!(normalize_vk_access_token(" ").unwrap(), "");
-        assert!(normalize_vk_access_token("token with space").is_err());
-        assert!(normalize_vk_access_token(&"x".repeat(4097)).is_err());
     }
 
     #[test]
@@ -13458,6 +13419,64 @@ mod tests {
         assert!(decrypted.contains("password=abc1234567890123"));
         assert!(!decrypted.contains("client="));
         assert!(!decrypted.contains("&workers="));
+    }
+
+    #[test]
+    fn no_link_carries_a_token() {
+        // M-169: token mode hands out the owner's hashes, never a token; own hashes win; no owner hashes → no credential
+        let token_mode = decrypt_csqtt_link(&make_client_link("1.2.3.4", 46000, "client-pass-0001", "", true, "h1,h2"))
+            .expect("must decrypt");
+        assert!(token_mode.contains("&hashes=h1+h2"), "{token_mode}");
+        let own = decrypt_csqtt_link(&make_client_link("1.2.3.4", 46000, "client-pass-0001", "own1", true, "h1,h2"))
+            .expect("must decrypt");
+        assert!(own.contains("&hashes=own1") && !own.contains("h1"), "{own}");
+        let bare = decrypt_csqtt_link(&make_client_link("1.2.3.4", 46000, "client-pass-0001", "", true, ""))
+            .expect("must decrypt");
+        assert!(!bare.contains("hashes=") && !bare.contains("token="), "{bare}");
+        let not_token_mode = decrypt_csqtt_link(&make_client_link("1.2.3.4", 46000, "client-pass-0001", "", false, "h1"))
+            .expect("must decrypt");
+        assert!(!not_token_mode.contains("hashes="), "{not_token_mode}");
+        for link in [token_mode, own, bare, not_token_mode] {
+            assert!(!link.contains("token="), "{link}");
+        }
+    }
+
+    #[test]
+    fn token_mode_falls_back_to_group_then_default_hashes() {
+        let mut db = crate::model::Database {
+            vk_hashes: "default1".to_owned(),
+            vk_access_token: "vk1.must-never-appear".to_owned(),
+            ..Default::default()
+        };
+        db.groups.insert(
+            "g1".to_owned(),
+            crate::model::ClientGroup { id: "g1".to_owned(), vk_hashes: Some("group1".to_owned()), ..Default::default() },
+        );
+        db.groups.insert(
+            "g2".to_owned(),
+            crate::model::ClientGroup { id: "g2".to_owned(), vk_hashes: Some("  ".to_owned()), ..Default::default() },
+        );
+        let entry = |group: &str| crate::model::PasswordEntry {
+            vk_token_enabled: true,
+            group_id: group.to_owned(),
+            ..Default::default()
+        };
+        let link = |group: &str| {
+            decrypt_csqtt_link(&make_entry_link("1.2.3.4", 46000, "client-pass-0001", &entry(group), &db)).unwrap()
+        };
+        assert!(link("g1").contains("&hashes=group1"));
+        assert!(link("g2").contains("&hashes=default1"), "a blank group list falls back to the default");
+        assert!(link("").contains("&hashes=default1"));
+        for group in ["g1", "g2", ""] {
+            assert!(!link(group).contains("vk1.must-never-appear"));
+        }
+    }
+
+    #[test]
+    fn setting_a_token_is_refused() {
+        assert!(refuse_vk_token(Some("vk1.a.token")).is_some());
+        assert!(refuse_vk_token(Some("   ")).is_none(), "an empty token still switches token mode off");
+        assert!(refuse_vk_token(None).is_none());
     }
 
     #[test]
