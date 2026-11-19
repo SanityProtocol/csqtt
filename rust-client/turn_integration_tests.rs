@@ -1480,7 +1480,7 @@ fn start_limited_relay_runtime_with_jitter(
                 let mut endpoints = Vec::with_capacity(workers);
                 let mut meters = Vec::with_capacity(workers);
                 for _ in 0..workers {
-                    let relay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                    let relay = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
                     endpoints.push(Arc::from(format!(
                         "turn:127.0.0.1:{}?transport=udp",
                         relay.local_addr().unwrap().port()
@@ -1933,7 +1933,7 @@ async fn getconf_timeout_recovers_without_terminating_the_tunnel() {
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
-            srtp_mode: SrtpMode::Auto,
+            srtp_mode: SrtpMode::Wrap, // GETCONF without a DTLS handshake first, so the dropped replies are GETCONF's own
             local_port: Arc::from(local_port.clone()),
             password: password.clone(),
             generation: 20_260_902,
@@ -2176,10 +2176,18 @@ async fn running_client_receives_hot_dns_configuration_without_reconnect() {
         ("google", "8.8.8.8,8.8.4.4")
     };
     apply_e2e_dns(&web_url, dns_provider);
-    let changed = tokio::time::timeout(Duration::from_secs(12), config_rx.recv())
-        .await
-        .expect("the running client did not receive hot TUNCONF")
-        .expect("the configuration channel was closed");
+    // the server may answer a GETCONF more than once, so a repeat of the initial TUNCONF can still be queued: wait for
+    // the one that carries the new DNS
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let changed = loop {
+        let next = tokio::time::timeout_at(deadline, config_rx.recv())
+            .await
+            .expect("the running client did not receive hot TUNCONF")
+            .expect("the configuration channel was closed");
+        if next != initial {
+            break next;
+        }
+    };
     assert!(
         changed.contains(&format!(":{expected_dns}:")),
         "unexpected hot DNS configuration: {changed}"
@@ -2327,7 +2335,7 @@ async fn nine_windows_workers_register_with_a_wsl_server_without_missing_or_dupl
                 get_config,
                 server_stream_repair: server_stream_repair.clone(),
                 repair: repair.clone(),
-                configured_workers: 1,
+                configured_workers: WORKERS,
             },
             TurnCredentials {
                 username: Arc::from(USERNAME),
@@ -2784,7 +2792,7 @@ async fn linux_workers_hold_per_stream_rate_through_server_dataplane() {
                 get_config,
                 server_stream_repair: server_stream_repair.clone(),
                 repair: repair.clone(),
-                configured_workers: 1,
+                configured_workers: workers,
             },
             TurnCredentials {
                 username: Arc::from(USERNAME),
@@ -2980,7 +2988,10 @@ async fn linux_workers_hold_per_stream_rate_through_server_dataplane() {
     }
 }
 
-async fn assert_fatal_auth_case(wrap_pwd: &str, session_pwd: &str, expected_needle: &str) {
+/// `expected_needle`: Some(text) = the server answers with a FATAL_AUTH carrying it; None = a password the server holds no
+/// credential for, which it never answers (the client cannot even be told apart from a probe), so the session ends in
+/// its GETCONF timeout instead.
+async fn assert_fatal_auth_case(wrap_pwd: &str, session_pwd: &str, expected_needle: Option<&str>) {
     let peer: SocketAddr = std::env::var("CSQTT_E2E_PEER")
         .expect("CSQTT_E2E_PEER is required")
         .parse()
@@ -3063,16 +3074,22 @@ async fn assert_fatal_auth_case(wrap_pwd: &str, session_pwd: &str, expected_need
         },
     ));
 
-    let res = tokio::time::timeout(Duration::from_secs(8), session)
+    let res = tokio::time::timeout(Duration::from_secs(if expected_needle.is_some() { 8 } else { 30 }), session)
         .await
         .expect("session timed out waiting for rejection")
         .expect("session task panicked");
     assert!(res.is_err(), "expected fatal auth error but got success");
     let err_msg = res.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("FATAL_AUTH") && err_msg.contains(expected_needle),
-        "expected FATAL_AUTH containing '{expected_needle}', got: '{err_msg}'"
-    );
+    match expected_needle {
+        Some(needle) => assert!(
+            err_msg.contains("FATAL_AUTH") && err_msg.contains(needle),
+            "expected FATAL_AUTH containing '{needle}', got: '{err_msg}'"
+        ),
+        None => assert!(
+            err_msg.contains("GETCONF") && !err_msg.contains("FATAL_"),
+            "expected the GETCONF timeout of an unanswered password, got: '{err_msg}'"
+        ),
+    }
     assert_eq!(dispatcher.active_count(), 0);
     assert!(config_rx.try_recv().is_err());
 
@@ -3084,13 +3101,11 @@ async fn assert_fatal_auth_case(wrap_pwd: &str, session_pwd: &str, expected_need
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a separately started CSQTT WSL server and CSQTT_E2E_PEER"]
-async fn wrong_password_returns_fatal_auth_without_crashing_server() {
-    assert_fatal_auth_case(
-        "e2e-local-password-20260830",
-        "wrong-password-for-getconf",
-        "неверный пароль",
-    )
-    .await;
+async fn wrong_password_is_never_answered_and_does_not_crash_the_server() {
+    // a client with a wrong password also derives the wrong wrap key, so the server holds no credential that decrypts
+    // its GETCONF and stays silent: the session times out (the original test wrapped with the right password and expected
+    // FATAL_AUTH, a combination no real client sends)
+    assert_fatal_auth_case("wrong-password-for-getconf", "wrong-password-for-getconf", None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3100,7 +3115,7 @@ async fn expired_password_returns_fatal_auth_without_crashing_server() {
     assert_fatal_auth_case(
         "e2e-expired-password-2026",
         "e2e-expired-password-2026",
-        "истёк",
+        Some("истёк"),
     )
     .await;
 }
@@ -3111,7 +3126,7 @@ async fn deactivated_password_returns_fatal_auth_without_crashing_server() {
     assert_fatal_auth_case(
         "e2e-deactivated-password-2026",
         "e2e-deactivated-password-2026",
-        "деактивирован",
+        Some("деактивирован"),
     )
     .await;
 }
@@ -3186,7 +3201,7 @@ async fn streams_partial_death_keeps_tunnel_and_dataplane_alive() {
                 get_config,
                 server_stream_repair: server_stream_repair.clone(),
                 repair: repair.clone(),
-                configured_workers: 1,
+                configured_workers: WORKERS,
             },
             TurnCredentials {
                 username: Arc::from(USERNAME),
