@@ -57,12 +57,15 @@ jobs:
         run: recipe/ci/test.sh src server
 
       - name: Client tests
+        if: ${{ !cancelled() }}  # a red suite above still lets this one report
         run: recipe/ci/test.sh src client
 
       - name: Android build image
+        if: ${{ !cancelled() }}  # a red suite above still lets this one report
         run: docker build -t csqtt-ci-android -f recipe/ci/Dockerfile.android recipe/ci
 
       - name: App unit tests
+        if: ${{ !cancelled() }}  # a red suite above still lets this one report
         run: recipe/ci/test.sh src app
 
   build:
