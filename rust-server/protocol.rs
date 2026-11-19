@@ -5052,18 +5052,23 @@ async fn handle_getconf(
         && let Some(stored) = routing_rule
     {
         // M-56: what the client would refuse goes out dropped, so an older stored rule never stops its tunnel
-        let (rule, dropped) = stored.cleaned_for_client();
-        if dropped > 0 && note_cleaned_rule(&rule.id) {
-            log_event(
-                app,
-                "WARNING",
-                "ROUTING",
-                &format!(
-                    "Правило «{}»: {dropped} записей, которые клиент не примет (имя пакета или больше {} в списке), не отправлены; исправьте правило в панели",
-                    rule.name,
-                    crate::model::ROUTING_LIST_MAX
-                ),
-            );
+        let (rule, cleaning) = stored.cleaned_for_client();
+        let warning = match cleaning {
+            crate::model::RuleCleaning::None => None,
+            crate::model::RuleCleaning::Dropped(dropped) => Some(format!(
+                "Правило «{}»: {dropped} записей, которые клиент не примет (имя пакета или больше {} в списке), не отправлены; исправьте правило в панели",
+                rule.name,
+                crate::model::ROUTING_LIST_MAX
+            )),
+            crate::model::RuleCleaning::WhitelistAllInvalid => Some(format!(
+                "Правило «{}»: в списке «Только список через VPN» нет ни одного допустимого имени пакета; клиент не примет правило и остановится — исправьте правило в панели",
+                rule.name
+            )),
+        };
+        if let Some(warning) = warning
+            && note_cleaned_rule(&rule.id)
+        {
+            log_event(app, "WARNING", "ROUTING", &warning);
         }
         let json_val = serde_json::json!({
             "version": 2,

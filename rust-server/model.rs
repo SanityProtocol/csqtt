@@ -79,6 +79,17 @@ fn tidy_routing_list(list: &mut Vec<String>) {
     });
 }
 
+/// What `cleaned_for_client` did to a stored rule.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RuleCleaning {
+    /// sent as stored (blanks and repeats aside, which the client drops itself)
+    None,
+    /// this many entries the client would refuse were left out
+    Dropped(usize),
+    /// an apps whitelist with no valid name: sent as stored, so the client refuses it rather than widen it to every app
+    WhitelistAllInvalid,
+}
+
 impl RoutingRule {
     fn tidy(&mut self) {
         tidy_routing_list(&mut self.packages);
@@ -106,18 +117,34 @@ impl RoutingRule {
     }
 
     /// M-56 at send: a rule stored before 2.6.0, imported, or set by swg-panel's --desired may still hold what the
-    /// client refuses. It goes out without those entries, so a 2.5 client does not stop on it. Returns the number of
-    /// entries dropped (blanks and repeats, which the client drops itself, do not count).
-    pub fn cleaned_for_client(&self) -> (RoutingRule, usize) {
+    /// client refuses. It goes out without those entries, so a 2.5 client does not stop on it. Returns the rule to
+    /// send and what was done to it.
+    ///
+    /// One exception: an apps whitelist whose every name is invalid is sent as stored. The client reads an EMPTY
+    /// whitelist as "the rule covers every app" (TunVpnService), so dropping the names would send every app through the
+    /// VPN where the owner meant a few; the client refuses the rule instead and stops, as 2.5.3 did.
+    pub fn cleaned_for_client(&self) -> (RoutingRule, RuleCleaning) {
         let mut rule = self.clone();
         rule.tidy();
         let tidy = rule.entries();
-        rule.packages.retain(|name| is_routing_package_name(name));
+        let named_apps = !rule.packages.is_empty();
+        let mut packages = std::mem::take(&mut rule.packages);
+        let stored_packages = packages.clone();
+        packages.retain(|name| is_routing_package_name(name));
+        let kept_invalid = rule.is_whitelist && named_apps && packages.is_empty();
+        rule.packages = if kept_invalid { stored_packages } else { packages };
         for list in [&mut rule.packages, &mut rule.direct_domains, &mut rule.ips] {
             list.truncate(ROUTING_LIST_MAX);
         }
         let dropped = tidy - rule.entries();
-        (rule, dropped)
+        let cleaning = if kept_invalid {
+            RuleCleaning::WhitelistAllInvalid
+        } else if dropped > 0 {
+            RuleCleaning::Dropped(dropped)
+        } else {
+            RuleCleaning::None
+        };
+        (rule, cleaning)
     }
 }
 
@@ -2099,16 +2126,30 @@ mod tests {
         // a rule stored before 2.6.0 (or from --desired, or an import) with a typo and an oversized list
         let mut stored = rule(&["org.telegram.messenger", "com.example.", "com.vk", " com.vk "]);
         stored.ips = (0..super::ROUTING_LIST_MAX + 10).map(|i| format!("10.{}.{}.1", i / 256, i % 256)).collect();
-        let (sent, dropped) = stored.cleaned_for_client();
+        let (sent, cleaning) = stored.cleaned_for_client();
         assert_eq!(sent.packages, ["org.telegram.messenger", "com.vk"]);
         assert_eq!(sent.ips.len(), super::ROUTING_LIST_MAX);
-        assert_eq!(dropped, 1 + 10, "the bad name and the ten over the cap; the repeat is the client's to drop");
+        assert_eq!(cleaning, super::RuleCleaning::Dropped(1 + 10), "the bad name and the ten over the cap; the repeat is the client's to drop");
         // what is sent is what the client accepts
         let mut check = sent.clone();
         check.check_for_save().unwrap();
         // a clean rule goes out as stored
         let clean = rule(&["com.vk"]);
-        assert_eq!(clean.cleaned_for_client(), (clean.clone(), 0));
+        assert_eq!(clean.cleaned_for_client(), (clean.clone(), super::RuleCleaning::None));
+        // an apps whitelist with no valid name is never sent empty: the client would widen it to every app (review F1)
+        let mut only_bad = rule(&["https://play.google.com/store/apps/details?id=org.telegram.messenger"]);
+        only_bad.is_whitelist = true;
+        let (sent, cleaning) = only_bad.cleaned_for_client();
+        assert_eq!(cleaning, super::RuleCleaning::WhitelistAllInvalid);
+        assert_eq!(sent.packages, only_bad.packages, "sent as stored, so the client refuses it, as 2.5.3 did");
+        // a blacklist may lose all its names: an empty blacklist excludes nothing, as invalid names excluded nothing
+        let mut bad_blacklist = rule(&["com.ex-ample"]);
+        bad_blacklist.is_whitelist = false;
+        assert_eq!(bad_blacklist.cleaned_for_client().1, super::RuleCleaning::Dropped(1));
+        // an empty whitelist stays as the owner saved it (the client's device-wide rule)
+        let mut empty_white = rule(&[]);
+        empty_white.is_whitelist = true;
+        assert_eq!(empty_white.cleaned_for_client(), (empty_white.clone(), super::RuleCleaning::None));
     }
 
     #[test]

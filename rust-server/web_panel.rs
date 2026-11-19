@@ -9626,11 +9626,11 @@ const PANEL_HTML: &str = r##"
                 <option value="blacklist">Все через VPN, кроме списка</option>
                 <option value="whitelist">Только список через VPN</option>
             </select>
-            <div id="ruleModeWhitelistHint" style="display: none; margin-top: 6px; font-size: 12px; color: var(--warning, #b45309);">Остальные приложения идут мимо VPN. Списки доменов и адресов ниже действуют только для перечисленных приложений.</div>
+            <div id="ruleModeWhitelistHint" style="display: none; margin-top: 6px; font-size: 12px; color: var(--warning, #b45309);"></div>
         </div>
         <div class="input-group">
             <label for="rulePackages">Список пакетов приложений</label>
-            <textarea id="rulePackages" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
+            <textarea id="rulePackages" oninput="onRuleModeChange()" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
         </div>
         <div class="input-group">
             <label for="ruleDomainsMode">Домены</label>
@@ -11783,8 +11783,8 @@ const PANEL_HTML: &str = r##"
             const defaultName = rule ? (rule.name || '') : `Правило${randomNum}`;
             document.getElementById('ruleName').value = defaultName;
             document.getElementById('ruleMode').value = rule ? (rule.mode || 'blacklist') : 'blacklist';
-            onRuleModeChange();
             document.getElementById('rulePackages').value = rule && rule.packages ? rule.packages.join('\n') : '';
+            onRuleModeChange();
             document.getElementById('ruleDomainsMode').value = rule ? (rule.domains_mode || (rule.domains_is_whitelist ? 'whitelist' : 'blacklist')) : 'blacklist';
             onRuleDomainsModeChange();
             document.getElementById('ruleDomains').value = rule && (rule.domains || rule.direct_domains) ? (rule.domains || rule.direct_domains).join('\n') : '';
@@ -11837,7 +11837,13 @@ const PANEL_HTML: &str = r##"
 
         function onRuleModeChange() {
             const white = document.getElementById('ruleMode').value === 'whitelist';
-            document.getElementById('ruleModeWhitelistHint').style.display = white ? 'block' : 'none';
+            const hint = document.getElementById('ruleModeWhitelistHint');
+            // the client reads an empty whitelist as "every app" (a device-wide domain/address rule)
+            const empty = !document.getElementById('rulePackages').value.trim();
+            hint.textContent = empty
+                ? 'Список пуст: через VPN идут все приложения, а списки доменов и адресов ниже действуют для всех.'
+                : 'Остальные приложения идут мимо VPN. Списки доменов и адресов ниже действуют только для перечисленных приложений.';
+            hint.style.display = white ? 'block' : 'none';
         }
 
         async function saveRoutingRule() {
