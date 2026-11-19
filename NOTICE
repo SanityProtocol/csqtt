@@ -1,0 +1,14 @@
+CSQTT, SanityProtocol's fork
+
+Required Notice: Copyright 2026 amurcanov.
+Required Notice: Commercial use of CSQTT requires a separate written license from the licensor.
+Required Notice: Redistributions and derivative works must retain attribution to the original CSQTT project and these notices.
+
+This repository is a fork of the original CSQTT project, https://github.com/amurcanov/csqtt, and is distributed under the
+same terms: the PolyForm Noncommercial License 1.0.0, in LICENSE. The notices above are the licensor's and are kept
+unchanged.
+
+Changes made in this fork: Copyright 2026 SanityProtocol, https://github.com/SanityProtocol/csqtt. They are distributed
+under the same licence and the same notices.
+
+Third-party components keep their own licences, which ship in the app under app/src/main/assets/licenses/.
