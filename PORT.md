@@ -28,6 +28,17 @@ address nothing listens on. Nothing else changes.
 | Rebind, one config on several devices (2.1.9-3) | **native**: no device lock exists | dropped |
 | move-back hold, main password's first bind (2.1.9-4) | nothing moves, no device to bind | dropped |
 
+## 2.6.0 server additions (P1)
+- **Watchdog (S2):** a hung server exits (code 70) after 60 s without a beat from its main runtime or its dataplane, so
+  `Restart=on-failure` or Docker's `--restart` starts it again. Under systemd it sends `READY=1` and, with `WatchdogSec`,
+  `WATCHDOG=1`; `Type=simple` units are unaffected.
+- **`--instance-slot <1-7>` (S4):** a named instance's policy table, fwmark, TPROXY ports and egress table. Without it a
+  named instance keeps 2.5.3's 30002 / 0x7532 / 10766; the default instance keeps 30001 / 0x7531 / 10666. The DPI/syscalls
+  sockets (46003/46004) run only for the default instance with its web panel.
+- **`--host-tuning=auto|off` (S5):** `auto` (the default) is 2.5's host-wide set without `ipv6/conf/all/forwarding`;
+  `off` writes only its own TUN's `rp_filter`. `--no-nat` implies `off`, as before.
+- **`--version` (S6):** prints `csqtt <version> CSQTT-WIRE-3`.
+
 ## Node (swg-noded) consequences
 - `_csqtt_read_store` selects `device_id` FROM passwords + reads `devices`: a 2.5 store has neither → the query fails
   silently → the instance reports an empty store. It must read by the line that runs: 2.5 → `passwords.ip`, 2.1 →

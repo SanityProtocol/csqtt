@@ -33,11 +33,13 @@ mod swgpanel;
 mod tokio_io;
 mod tproxy;
 mod tun_device;
+mod watchdog;
 mod web_panel;
 #[path = "../shared/wire_protocol.rs"]
 mod wire_protocol;
 
 const WIRE_PROTOCOL_REVISION: &str = "CSQTT-WIRE-3";
+const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " CSQTT-WIRE-3");
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -62,7 +64,8 @@ use tokio::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "csqtt", version, about = "Сервер и консоль управления CSQTT")]
+// S6 / M-12: `csqtt --version` prints `csqtt <version> CSQTT-WIRE-3`, the staged binary's self-test (deploy v3)
+#[command(name = "csqtt", version = VERSION_LINE, about = "Сервер и консоль управления CSQTT")]
 struct Args {
     #[arg(long, hide = true)]
     protocol_revision: bool,
@@ -195,6 +198,18 @@ struct Args {
         help = "this server's name on the host (stock: csqtt) — its systemd unit, netfilter tags, local-proxy table/mark and session cookie; a second server next to a stock one runs as e.g. csqtt25"
     )]
     instance: Option<String>,
+    #[arg(
+        long = "instance-slot",
+        help = "S4: the row of per-instance values (policy table, fwmark, TPROXY ports) a named instance takes, 1-7 (default 1, 2.5.3's side-instance values); the deployer picks a free one"
+    )]
+    instance_slot: Option<usize>,
+    #[arg(
+        long = "host-tuning",
+        value_enum,
+        default_value_t = swgpanel::HostTuning::Auto,
+        help = "S5: auto = forwarding, rp_filter, fq/bbr and the TCP knobs host-wide (2.5.3's set without IPv6 forwarding); off = only this server's own TUN. --no-nat implies off"
+    )]
+    host_tuning: swgpanel::HostTuning,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -551,6 +566,7 @@ async fn cpu_loop(app: Arc<App>) {
         timer.tick().await;
         model::refresh_cached_now();
         protocol::refresh_monotonic_millis();
+        watchdog::beat_main();
         if let (Some(host_stat), Some(process_stat)) = (
             read_proc_text("/proc/stat", &mut host_stat_buffer),
             read_proc_text("/proc/self/stat", &mut process_stat_buffer),
@@ -1053,6 +1069,8 @@ async fn async_main() -> Result<()> {
         args.headless,
         args.desired.clone(),
         args.instance.clone(),
+        args.instance_slot,
+        args.host_tuning,
     )?);
 
     // As the short form above: without --instance the flag names the stock server's unit, which only a binary
@@ -1282,8 +1300,9 @@ async fn async_main() -> Result<()> {
     let web_app = app.clone();
 
     // swg-panel: the DPI (46003) + syscalls (46004) sockets only serve csqtt's own `dpi`/`syscalls` monitor
-    // CLIs, which we never use; their fixed loopback ports also collide on a multi-instance node.
-    if !swgpanel::headless() {
+    // CLIs, which we never use; their fixed loopback ports also collide on a multi-instance node (S4: off for a named
+    // instance too).
+    if swgpanel::diag_sockets() {
         let diagnostic_app = app.clone();
         tokio::spawn(async move {
             if let Err(e) = protocol::run_dpi_server().await {
@@ -1364,6 +1383,8 @@ async fn async_main() -> Result<()> {
     };
 
     let protocol_runtime = protocol::start(app.clone()).await?;
+    // S2: from here on both loops tick, and a stall of either exits the process so its supervisor restarts it
+    watchdog::spawn();
     let mut protocol_status = protocol_runtime.status_receiver();
     let mut web_task = match tls_config {
         // swg-panel: a never-completing task fills the web_task slot under --no-web so the select! below
@@ -2238,5 +2259,30 @@ mod swg_app_routing_tests {
         swgpanel_apply_routing(&mut db, &two, "owner");
         assert!(!db.routing_rules.contains_key(&first), "the old override's rule is gone");
         assert!(db.routing_rules.contains_key("user-made"), "a rule the panel did not make is never touched");
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn version_flag_output() {
+        let line = Args::command().render_version();
+        assert_eq!(line.trim_end(), format!("csqtt {} {}", env!("CARGO_PKG_VERSION"), WIRE_PROTOCOL_REVISION));
+        // `--version` is clap's own exit path: it answers before any root check, config or socket
+        let err = Args::try_parse_from(["csqtt", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn aria_label_once() {
+        // every detector (deploy.sh binary_version_label, swg-panel) reads this label out of the binary: it must carry
+        // the crate's version, so a bump cannot leave it stale (2.5.2 said 2.5.0), and appear exactly once
+        let label = format!("aria-label=\"v{} by amurcanov\"", env!("CARGO_PKG_VERSION"));
+        let source = include_str!("web_panel.rs");
+        assert_eq!(source.matches(&label).count(), 1, "{label}");
+        assert_eq!(source.matches("by amurcanov\"").count(), 1);
     }
 }

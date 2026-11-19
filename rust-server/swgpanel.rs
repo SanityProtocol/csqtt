@@ -28,10 +28,21 @@ pub struct InstanceCfg {
     // web panel's restart act on, the netfilter comments (stock deploy.sh deletes every rule whose comment CONTAINS
     // CSQTT_MANAGED / CSQTT_TPROXY, so CSQTT25_MANAGED is out of its reach), the local-proxy policy table and fwmark
     // (stock wipes table 30001 / mark 0x7531 at every start), the TPROXY status sockets and the web session cookie.
-    // One non-default slot: the deploy installs at most one side instance per host.
+    // Its table, mark and ports come from `slot` (S4): 2.5.3 had one shared non-default row.
     pub instance: String,
+    // S4: the row of SLOTS this instance's policy table, fwmark, TPROXY ports and egress table come from. 0 is the
+    // default instance's; a named one takes 1 (2.5.3's side-instance values) unless --instance-slot names another.
+    pub slot: usize,
+    // S5: whether the server tunes the host (sysctls, tcp_bbr) at start; --no-nat implies Off
+    pub host_tuning: HostTuning,
     pub managed_tag: String,    // KernelNetworking rules (stock: CSQTT_MANAGED)
     pub tproxy_tag: String,     // local-proxy TPROXY rules, ":<port>" appended (stock: CSQTT_TPROXY)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum HostTuning {
+    Auto,
+    Off,
 }
 
 pub const DEFAULT_INSTANCE: &str = "csqtt";
@@ -50,6 +61,8 @@ impl Default for InstanceCfg {
             headless: false,
             desired_path: None,
             instance: DEFAULT_INSTANCE.to_owned(),
+            slot: 0,
+            host_tuning: HostTuning::Auto,
             managed_tag: "CSQTT_MANAGED".to_owned(),
             tproxy_tag: "CSQTT_TPROXY".to_owned(),
         }
@@ -87,6 +100,9 @@ pub fn no_nat() -> bool {
 pub fn headless() -> bool {
     get().headless
 }
+pub fn host_tuning() -> HostTuning {
+    get().host_tuning
+}
 pub fn desired_path() -> Option<&'static PathBuf> {
     get().desired_path.as_ref()
 }
@@ -103,23 +119,53 @@ pub fn managed_tag() -> &'static str {
 pub fn tproxy_tag() -> &'static str {
     &get().tproxy_tag
 }
-// Local-proxy policy routing: stock owns table/priority 30001 and fwmark 0x7531 and flushes them at every start; the
-// side instance takes 30002 / 0x7532. The marks share bits (0x7530), but neither value matches the other's mask
-// (0x7531 & 0x7532 = 0x7530 ≠ 0x7532, and the reverse), so each rule sees only its own. Its TPROXY ports start at 10766;
-// they can still meet stock's 10666+id range, which the listener's EADDRINUSE retry already handles.
+// S4 / M-3: the per-instance values, one row per slot. Stock owns table/priority 30001 and fwmark 0x7531 and flushes
+// them at every start; 2.5.3's side instance took 30002 / 0x7532 / 10766. A mark is matched with its own value as the
+// mask, and every mark here is 0x7530 plus one bit 0x7530 lacks, so for any two of them a & b = 0x7530, which is neither:
+// no rule sees another slot's packets. TPROXY ports start at the slot's base plus the profile id; they can still meet
+// another slot's range, which the listener's EADDRINUSE retry already handles. The egress block (D7 / M-179) sits after
+// the local table, so the clients still reach the server itself, and before main, where their traffic would leave
+// directly.
+pub struct SlotValues {
+    pub table: &'static str,
+    pub mark: &'static str,
+    pub egress_table: &'static str,
+    pub tproxy_base_port: u16,
+}
+
+pub const SLOTS: [SlotValues; 8] = [
+    SlotValues { table: "30001", mark: "0x7531/0x7531", egress_table: "30011", tproxy_base_port: 10666 },
+    SlotValues { table: "30002", mark: "0x7532/0x7532", egress_table: "30012", tproxy_base_port: 10766 },
+    SlotValues { table: "30003", mark: "0x7534/0x7534", egress_table: "30013", tproxy_base_port: 10866 },
+    SlotValues { table: "30004", mark: "0x7538/0x7538", egress_table: "30014", tproxy_base_port: 10966 },
+    SlotValues { table: "30005", mark: "0x7570/0x7570", egress_table: "30015", tproxy_base_port: 11066 },
+    SlotValues { table: "30006", mark: "0x75b0/0x75b0", egress_table: "30016", tproxy_base_port: 11166 },
+    SlotValues { table: "30007", mark: "0x7730/0x7730", egress_table: "30017", tproxy_base_port: 11266 },
+    SlotValues { table: "30008", mark: "0x7d30/0x7d30", egress_table: "30018", tproxy_base_port: 11366 },
+];
+
+fn slot() -> &'static SlotValues {
+    &SLOTS[get().slot]
+}
 pub fn tproxy_table() -> &'static str {
-    if is_default_instance() { "30001" } else { "30002" }
+    slot().table
 }
 pub fn tproxy_mark() -> &'static str {
-    if is_default_instance() { "0x7531/0x7531" } else { "0x7532/0x7532" }
+    slot().mark
 }
-// D7 / M-179: the fail-closed egress block's table and rule priority (one number, as tproxy_table). It sits after the
-// local table, so the clients still reach the server itself, and before main, where their traffic would leave directly.
 pub fn egress_block_table() -> &'static str {
-    if is_default_instance() { "30011" } else { "30012" }
+    slot().egress_table
 }
 pub fn tproxy_base_port() -> u16 {
-    if is_default_instance() { 10666 } else { 10766 }
+    slot().tproxy_base_port
+}
+// M-6 / S4: the DPI and syscalls monitor sockets bind the fixed loopback 46003/46004, which `csqtt dpi` dials. Only the
+// default instance with its web panel runs them; a second instance's would collide.
+pub fn diag_sockets() -> bool {
+    diag_sockets_for(get())
+}
+fn diag_sockets_for(cfg: &InstanceCfg) -> bool {
+    cfg.instance == DEFAULT_INSTANCE && !cfg.headless
 }
 // Two panels on one host share its cookies (cookies are not port-scoped): a login to one logged the other out.
 pub fn session_cookie() -> String {
@@ -141,6 +187,8 @@ pub fn build(
     headless: bool,
     desired: Option<PathBuf>,
     instance: Option<String>,
+    slot: Option<usize>,
+    host_tuning: HostTuning,
 ) -> anyhow::Result<InstanceCfg> {
     let mut cfg = InstanceCfg::default();
     if let Some(name) = instance
@@ -165,6 +213,16 @@ pub fn build(
             }
         }
         cfg.instance = name;
+        cfg.slot = 1;
+    }
+    if let Some(n) = slot {
+        if cfg.instance == DEFAULT_INSTANCE {
+            anyhow::bail!("--instance-slot is for a named instance (--instance <name>); the default instance is slot 0");
+        }
+        if !(1..SLOTS.len()).contains(&n) {
+            anyhow::bail!("--instance-slot must be 1-{} (got {n})", SLOTS.len() - 1);
+        }
+        cfg.slot = n;
     }
     if let Some(i) = iface
         && !i.is_empty()
@@ -200,6 +258,7 @@ pub fn build(
     cfg.no_nat = no_nat;
     cfg.headless = headless;
     cfg.desired_path = desired;
+    cfg.host_tuning = host_tuning;
     Ok(cfg)
 }
 
@@ -210,16 +269,16 @@ mod tests {
     #[test]
     fn tun_addr_in_the_client_range_is_refused() {
         for bad in ["10.66.68.2/24", "10.66.68.5/24", "10.66.68.250/24"] {
-            assert!(build(None, Some(bad.to_owned()), false, false, None, None).is_err(), "{bad}");
+            assert!(build(None, Some(bad.to_owned()), false, false, None, None, None, HostTuning::Auto).is_err(), "{bad}");
         }
         for ok in ["10.66.68.1/24", "10.66.68.0/24", "10.66.68.254/24"] {
-            assert!(build(None, Some(ok.to_owned()), false, false, None, None).is_ok(), "{ok}");
+            assert!(build(None, Some(ok.to_owned()), false, false, None, None, None, HostTuning::Auto).is_ok(), "{ok}");
         }
     }
 
     #[test]
     fn no_flags_is_stock() {
-        let cfg = build(None, None, false, false, None, None).unwrap();
+        let cfg = build(None, None, false, false, None, None, None, HostTuning::Auto).unwrap();
         assert_eq!(cfg.iface, "csqtt1");
         assert_eq!(cfg.gw_addr, "10.66.67.1");
         assert_eq!(cfg.subnet_prefix, [10, 66, 67]);
@@ -228,13 +287,13 @@ mod tests {
         assert_eq!(cfg.instance, "csqtt");
         assert_eq!((cfg.managed_tag.as_str(), cfg.tproxy_tag.as_str()), ("CSQTT_MANAGED", "CSQTT_TPROXY"));
         // naming the default instance is the same as not naming one
-        let named = build(None, None, false, false, None, Some("csqtt".into())).unwrap();
+        let named = build(None, None, false, false, None, Some("csqtt".into()), None, HostTuning::Auto).unwrap();
         assert_eq!((named.instance.as_str(), named.managed_tag.as_str()), ("csqtt", "CSQTT_MANAGED"));
     }
 
     #[test]
     fn a_side_instance_is_out_of_stock_cleanup_reach() {
-        let cfg = build(Some("csqtt25".into()), Some("10.66.68.1/24".into()), false, false, None, Some("csqtt25".into())).unwrap();
+        let cfg = build(Some("csqtt25".into()), Some("10.66.68.1/24".into()), false, false, None, Some("csqtt25".into()), None, HostTuning::Auto).unwrap();
         assert_eq!(cfg.instance, "csqtt25");
         assert_eq!((cfg.managed_tag.as_str(), cfg.tproxy_tag.as_str()), ("CSQTT25_MANAGED", "CSQTT25_TPROXY"));
         // stock deploy.sh deletes every rule whose comment CONTAINS one of these; ours must contain none of them
@@ -242,26 +301,90 @@ mod tests {
             assert!(!cfg.managed_tag.contains(stock) && !cfg.tproxy_tag.contains(stock), "{stock}");
         }
         for bad in ["Csqtt25", "csqtt_25", "25csqtt", "csqtt/25", "a-very-long-instance-name", "old-csqtt", "xcsqtt"] {
-            assert!(build(None, None, false, false, None, Some(bad.into())).is_err(), "{bad}");
+            assert!(build(None, None, false, false, None, Some(bad.into()), None, HostTuning::Auto).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn tun_addr_sets_the_whole_subnet() {
-        let cfg = build(Some("csqtt7".into()), Some("10.66.71.1/24".into()), true, true, None, None).unwrap();
+        let cfg = build(Some("csqtt7".into()), Some("10.66.71.1/24".into()), true, true, None, None, None, HostTuning::Auto).unwrap();
         assert_eq!(cfg.iface, "csqtt7");
         assert_eq!(cfg.gw_addr, "10.66.71.1");
         assert_eq!(cfg.subnet_prefix, [10, 66, 71]);
         assert_eq!(cfg.subnet_cidr, "10.66.71.0/24");
         assert!(cfg.no_nat && cfg.headless);
         // a bare address means /24
-        assert_eq!(build(None, Some("10.9.8.1".into()), false, false, None, None).unwrap().subnet_prefix, [10, 9, 8]);
+        assert_eq!(build(None, Some("10.9.8.1".into()), false, false, None, None, None, HostTuning::Auto).unwrap().subnet_prefix, [10, 9, 8]);
     }
 
     #[test]
     fn only_a_24_is_accepted() {
-        assert!(build(None, Some("10.66.71.1/16".into()), false, false, None, None).is_err());
-        assert!(build(None, Some("10.66.71/24".into()), false, false, None, None).is_err());
-        assert!(build(None, Some("10.66.300.1/24".into()), false, false, None, None).is_err());
+        assert!(build(None, Some("10.66.71.1/16".into()), false, false, None, None, None, HostTuning::Auto).is_err());
+        assert!(build(None, Some("10.66.71/24".into()), false, false, None, None, None, HostTuning::Auto).is_err());
+        assert!(build(None, Some("10.66.300.1/24".into()), false, false, None, None, None, HostTuning::Auto).is_err());
+    }
+
+    #[test]
+    fn default_instance_values_unchanged() {
+        // the default instance: stock's values byte for byte
+        assert_eq!(build(None, None, false, false, None, None, None, HostTuning::Auto).unwrap().slot, 0);
+        let s = &SLOTS[0];
+        assert_eq!((s.table, s.mark, s.egress_table, s.tproxy_base_port), ("30001", "0x7531/0x7531", "30011", 10666));
+        // a named instance without --instance-slot: 2.5.3's side instance byte for byte
+        let named = build(None, None, false, false, None, Some("csqtt25".into()), None, HostTuning::Auto).unwrap();
+        assert_eq!(named.slot, 1);
+        let s = &SLOTS[1];
+        assert_eq!((s.table, s.mark, s.egress_table, s.tproxy_base_port), ("30002", "0x7532/0x7532", "30012", 10766));
+        // the slot flag: only for a named instance, and only 1..=7
+        assert_eq!(build(None, None, false, false, None, Some("side".into()), Some(5), HostTuning::Auto).unwrap().slot, 5);
+        for bad in [0, 8, 100] {
+            assert!(build(None, None, false, false, None, Some("side".into()), Some(bad), HostTuning::Auto).is_err(), "{bad}");
+        }
+        assert!(build(None, None, false, false, None, None, Some(1), HostTuning::Auto).is_err());
+        assert!(build(None, None, false, false, None, Some("csqtt".into()), Some(1), HostTuning::Auto).is_err());
+    }
+
+    #[test]
+    fn instance_values_distinct() {
+        let marks: Vec<u32> = SLOTS
+            .iter()
+            .map(|s| {
+                let (value, mask) = s.mark.split_once('/').unwrap();
+                assert_eq!(value, mask, "a mark is matched with its own value as the mask");
+                u32::from_str_radix(value.trim_start_matches("0x"), 16).unwrap()
+            })
+            .collect();
+        for (i, a) in marks.iter().enumerate() {
+            for (j, b) in marks.iter().enumerate() {
+                if i != j {
+                    // a packet marked a never matches the rule `fwmark b/b`, and the reverse
+                    assert_ne!(a & b, *b, "slot {i}'s mark {a:#x} matches slot {j}'s rule {b:#x}");
+                }
+            }
+        }
+        let mut numbers = std::collections::HashSet::new();
+        for (i, s) in SLOTS.iter().enumerate() {
+            assert!(numbers.insert(s.table), "table {}", s.table);
+            assert!(numbers.insert(s.egress_table), "egress table {}", s.egress_table);
+            // each a rule priority too: after local (0), before main (32766) and default (32767)
+            for n in [s.table, s.egress_table] {
+                let n: u32 = n.parse().unwrap();
+                assert!((1..32766).contains(&n));
+            }
+            if i > 0 {
+                assert_eq!(s.tproxy_base_port, SLOTS[i - 1].tproxy_base_port + 100, "slot {i}'s port block");
+            }
+        }
+        // the same block: slot 0's local table first, its egress block after every policy table
+        assert!(SLOTS.iter().all(|s| s.table < SLOTS[0].egress_table));
+    }
+
+    #[test]
+    fn diag_ports_off_for_named_instance() {
+        let rule = diag_sockets_for;
+        assert!(rule(&build(None, None, false, false, None, None, None, HostTuning::Auto).unwrap()));
+        assert!(!rule(&build(None, None, false, true, None, None, None, HostTuning::Auto).unwrap()));
+        assert!(!rule(&build(None, None, false, false, None, Some("csqtt25".into()), None, HostTuning::Auto).unwrap()));
+        assert!(!rule(&build(None, None, false, false, None, Some("side".into()), Some(3), HostTuning::Auto).unwrap()));
     }
 }

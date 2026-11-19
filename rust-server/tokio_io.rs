@@ -1082,9 +1082,11 @@ impl TokioIo {
 }
 
 const FIREWALL_REMOVE_PASSES: usize = 4;
+// S5 / M-5: what `--host-tuning=auto` sets host-wide. 2.5.3 also set ipv6/conf/all/forwarding=1, which on a SLAAC host
+// stops the kernel taking router advertisements, so the host's own IPv6 route expires. The server serves no IPv6 (its
+// TUN has no IPv6 address and it runs no IPv6 NAT), so nothing here needs it.
 const KERNEL_PARAMETERS: &[(&str, &str)] = &[
     ("/proc/sys/net/ipv4/ip_forward", "1"),
-    ("/proc/sys/net/ipv6/conf/all/forwarding", "1"),
     ("/proc/sys/net/ipv4/conf/all/rp_filter", "2"),
     ("/proc/sys/net/ipv4/conf/default/rp_filter", "2"),
     ("/proc/sys/net/core/default_qdisc", "fq"),
@@ -1288,29 +1290,41 @@ struct KernelNetworking {
     rules: Vec<FirewallRule>,
 }
 
+/// S5: the sysctls the server writes at start, and whether it loads tcp_bbr. A pure function, so the plan is tested
+/// without root. `Auto` is 2.5.3's host-wide set without IPv6 forwarding; `Off`, and `--no-nat`, which implies it, write
+/// only the reverse-path filter of the TUN this process creates.
+fn host_sysctls(
+    tuning: crate::swgpanel::HostTuning,
+    no_nat: bool,
+    tun_iface: &str,
+) -> (Vec<(String, &'static str)>, bool) {
+    let own_tun = (format!("/proc/sys/net/ipv4/conf/{tun_iface}/rp_filter"), "2");
+    if no_nat || tuning == crate::swgpanel::HostTuning::Off {
+        return (vec![own_tun], false);
+    }
+    let mut plan: Vec<(String, &'static str)> =
+        KERNEL_PARAMETERS.iter().map(|(path, value)| ((*path).to_owned(), *value)).collect();
+    plan.push(own_tun);
+    (plan, true)
+}
+
 impl KernelNetworking {
     fn install(tun_iface: &str) -> Self {
-        // swg-panel: under --no-nat the node owns forwarding, NAT and the firewall, and the host's sysctls are not
-        // ours to change (2.5 sets ip_forward, rp_filter, fq/bbr and six TCP knobs host-wide, adds FORWARD ACCEPT +
-        // MASQUERADE, and deletes TCPMSS rules on the subnet). Only the reverse-path filter of the TUN this process
-        // creates stays, which is scoped to that interface.
-        if crate::swgpanel::no_nat() {
-            set_kernel_parameter(
-                &format!("/proc/sys/net/ipv4/conf/{tun_iface}/rp_filter"),
-                "2",
-            );
-            return Self { rules: Vec::new() };
+        let (sysctls, load_bbr) =
+            host_sysctls(crate::swgpanel::host_tuning(), crate::swgpanel::no_nat(), tun_iface);
+        if load_bbr {
+            let _ = std::process::Command::new("modprobe")
+                .arg("tcp_bbr")
+                .output();
         }
-        let _ = std::process::Command::new("modprobe")
-            .arg("tcp_bbr")
-            .output();
-        for (path, value) in KERNEL_PARAMETERS {
+        for (path, value) in &sysctls {
             set_kernel_parameter(path, value);
         }
-        set_kernel_parameter(
-            &format!("/proc/sys/net/ipv4/conf/{tun_iface}/rp_filter"),
-            "2",
-        );
+        // swg-panel: under --no-nat the node owns forwarding, NAT and the firewall (2.5 adds FORWARD ACCEPT +
+        // MASQUERADE and deletes TCPMSS rules on the subnet). The firewall is --no-nat's; --host-tuning=off keeps it.
+        if crate::swgpanel::no_nat() {
+            return Self { rules: Vec::new() };
+        }
         purge_legacy_mss_clamp();
         let rules = managed_firewall_rules(tun_iface);
         for rule in &rules {
@@ -1506,6 +1520,46 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_tuning_auto_matches_253_minus_ipv6() {
+        use crate::swgpanel::HostTuning;
+        // 2.5.3's list (KERNEL_PARAMETERS at 0188606, the 2.5.3 build), in its order
+        let shipped_253: [(&str, &str); 12] = [
+            ("/proc/sys/net/ipv4/ip_forward", "1"),
+            ("/proc/sys/net/ipv6/conf/all/forwarding", "1"),
+            ("/proc/sys/net/ipv4/conf/all/rp_filter", "2"),
+            ("/proc/sys/net/ipv4/conf/default/rp_filter", "2"),
+            ("/proc/sys/net/core/default_qdisc", "fq"),
+            ("/proc/sys/net/ipv4/tcp_congestion_control", "bbr"),
+            ("/proc/sys/net/ipv4/tcp_sack", "1"),
+            ("/proc/sys/net/ipv4/tcp_dsack", "1"),
+            ("/proc/sys/net/ipv4/tcp_reordering", "15"),
+            ("/proc/sys/net/ipv4/tcp_window_scaling", "1"),
+            ("/proc/sys/net/ipv4/tcp_fastopen", "3"),
+            ("/proc/sys/net/ipv4/tcp_slow_start_after_idle", "0"),
+        ];
+        let mut expected: Vec<(String, &str)> = shipped_253
+            .iter()
+            .filter(|(path, _)| !path.contains("ipv6"))
+            .map(|(path, value)| ((*path).to_owned(), *value))
+            .collect();
+        expected.push(("/proc/sys/net/ipv4/conf/csqtt1/rp_filter".to_owned(), "2"));
+        let (plan, bbr) = host_sysctls(HostTuning::Auto, false, "csqtt1");
+        assert_eq!(plan, expected);
+        assert!(bbr);
+        assert!(plan.iter().all(|(path, _)| !path.contains("ipv6")));
+    }
+
+    #[test]
+    fn host_tuning_off_touches_own_tun_only() {
+        use crate::swgpanel::HostTuning;
+        let own = vec![("/proc/sys/net/ipv4/conf/sqc4/rp_filter".to_owned(), "2")];
+        assert_eq!(host_sysctls(HostTuning::Off, false, "sqc4"), (own.clone(), false));
+        // --no-nat implies off, whatever --host-tuning says (2.5.3's --no-nat behaviour)
+        assert_eq!(host_sysctls(HostTuning::Auto, true, "sqc4"), (own.clone(), false));
+        assert_eq!(host_sysctls(HostTuning::Off, true, "sqc4"), (own, false));
+    }
 
     #[test]
     fn datagram_mode_labels_identify_active_syscalls() {

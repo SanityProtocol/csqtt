@@ -356,6 +356,7 @@ where
 
     macro_rules! handle_tick {
         () => {{
+            crate::watchdog::beat_dataplane();
             logic.begin_batch(Instant::now());
             io.with_sink(|sink| logic.on_tick(sink));
             logic.on_io_counters(io.counters_snapshot());
