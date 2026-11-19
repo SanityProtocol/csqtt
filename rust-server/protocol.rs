@@ -4644,6 +4644,12 @@ fn purge_replaced_worker_sessions(
     }
 }
 
+/// Whether this rule's cleaning is new to this process: the warning is logged once per rule, not once per session.
+fn note_cleaned_rule(id: &str) -> bool {
+    static NOTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    crate::lock_unpoison(NOTED.get_or_init(Default::default)).insert(id.to_owned())
+}
+
 async fn handle_getconf(
     app: &Arc<App>,
     writer: &ControlWriter<'_>,
@@ -5043,8 +5049,22 @@ async fn handle_getconf(
     writer.write(response.as_bytes()).await?;
     if !reject_session
         && worker_id <= 1
-        && let Some(rule) = routing_rule
+        && let Some(stored) = routing_rule
     {
+        // M-56: what the client would refuse goes out dropped, so an older stored rule never stops its tunnel
+        let (rule, dropped) = stored.cleaned_for_client();
+        if dropped > 0 && note_cleaned_rule(&rule.id) {
+            log_event(
+                app,
+                "WARNING",
+                "ROUTING",
+                &format!(
+                    "Правило «{}»: {dropped} записей, которые клиент не примет (имя пакета или больше {} в списке), не отправлены; исправьте правило в панели",
+                    rule.name,
+                    crate::model::ROUTING_LIST_MAX
+                ),
+            );
+        }
         let json_val = serde_json::json!({
             "version": 2,
             "name": rule.name,

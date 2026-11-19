@@ -55,8 +55,8 @@ impl ProxyRoute {
     pub async fn connect(config: &LocalProxyProfile, log: LogFn) -> Result<Arc<Self>> {
         validate_config(config)?;
         ensure_linux_platform()?;
-        if !port_is_listening(config.port).await {
-            bail!("SOCKS5 port {} is not listening", config.port);
+        if !port_is_listening(config.socks_addr()).await {
+            bail!("SOCKS5 {} is not listening", config.socks_addr());
         }
         verify_socks5_udp_associate(config).await?;
 
@@ -86,8 +86,8 @@ impl ProxyRoute {
         });
         spawn_rule_watchdog(port, route.cancel.clone(), log.clone());
         println!(
-            "[LOCAL-PROXY] SOCKS5 route ready on 127.0.0.1:{} via TPROXY port {}",
-            route.config.port, route.port
+            "[LOCAL-PROXY] SOCKS5 route ready on {} via TPROXY port {}",
+            route.config.socks_addr(), route.port
         );
         Ok(route)
     }
@@ -336,8 +336,8 @@ async fn stop_tproxy_child(mut child: Child) {
     }
 }
 
-pub(crate) async fn port_is_listening(port: u16) -> bool {
-    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+/// Whether the SOCKS5 server answers a TCP connect at `target` (the profile's host and port, M-19).
+pub(crate) async fn port_is_listening(target: SocketAddr) -> bool {
     matches!(
         tokio::time::timeout(Duration::from_millis(1500), TcpStream::connect(target)).await,
         Ok(Ok(_))
@@ -358,6 +358,12 @@ async fn verify_socks5_udp_associate(config: &LocalProxyProfile) -> Result<()> {
 pub fn validate_config(config: &LocalProxyProfile) -> Result<()> {
     if config.port == 0 {
         bail!("SOCKS5 port must be in range 1-65535");
+    }
+    // M-19: an IPv4 address (the TPROXY path is IPv4-only and the forwarder has no resolver), one a SOCKS5 server can
+    // have: not 0.0.0.0, broadcast or multicast
+    match config.host.trim().parse::<Ipv4Addr>() {
+        Ok(ip) if !ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast() => {}
+        _ => bail!("SOCKS5 host must be an IPv4 address, e.g. 127.0.0.1 (got {:?})", config.host),
     }
     if config.username.len() > u8::MAX as usize || config.password.len() > u8::MAX as usize {
         bail!("SOCKS5 username and password must not exceed 255 bytes");
@@ -388,7 +394,7 @@ pub(crate) async fn socks_command(
     command: u8,
     destination: SocketAddr,
 ) -> Result<(TcpStream, SocketAddr)> {
-    let proxy = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
+    let proxy = config.socks_addr();
     let mut stream = tokio::time::timeout(SOCKS_COMMAND_TIMEOUT, TcpStream::connect(proxy))
         .await
         .context("local SOCKS5 connection timed out")??;
@@ -1165,6 +1171,19 @@ mod tests {
             username: String::new(),
             password: String::new(),
             fail_closed: true,
+            host: "127.0.0.1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn proxy_host_must_be_ipv4() {
+        for ok in ["127.0.0.1", "172.20.0.7", " 10.0.0.1 "] {
+            let value = LocalProxyProfile { host: ok.to_owned(), ..config() };
+            assert!(validate_config(&value).is_ok(), "{ok}");
+        }
+        for bad in ["", "localhost", "::1", "0.0.0.0", "255.255.255.255", "224.0.0.1", "10.0.0.256", "10.0.0.1:1080"] {
+            let value = LocalProxyProfile { host: bad.to_owned(), ..config() };
+            assert!(validate_config(&value).is_err(), "{bad}");
         }
     }
 

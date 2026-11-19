@@ -53,6 +53,74 @@ pub struct RoutingRule {
     pub ips: Vec<String>,
 }
 
+/// The most entries one list of a rule may carry: the client refuses a longer one, and with it the whole rule
+/// (ServerRoutingRule.kt `parseServerRoutingRule`).
+pub const ROUTING_LIST_MAX: usize = 4096;
+
+/// The client's test of an app package name, ported (ServerRoutingRule.kt `isRoutingPackageName`): one bad name makes
+/// it refuse the whole rule and stop the tunnel (M-56).
+pub fn is_routing_package_name(value: &str) -> bool {
+    (1..=255).contains(&value.len())
+        && value.split('.').all(|part| {
+            part.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// Trims every entry and drops blanks and repeats, keeping the order, as the client reads a list.
+fn tidy_routing_list(list: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    list.retain_mut(|entry| {
+        let trimmed = entry.trim();
+        if trimmed.len() != entry.len() {
+            *entry = trimmed.to_owned();
+        }
+        !entry.is_empty() && seen.insert(entry.clone())
+    });
+}
+
+impl RoutingRule {
+    fn tidy(&mut self) {
+        tidy_routing_list(&mut self.packages);
+        tidy_routing_list(&mut self.direct_domains);
+        tidy_routing_list(&mut self.ips);
+    }
+
+    fn entries(&self) -> usize {
+        self.packages.len() + self.direct_domains.len() + self.ips.len()
+    }
+
+    /// M-56 / D23 at save: the lists tidied as the client tidies them, then refused, naming the entry, where the
+    /// client would refuse the rule.
+    pub fn check_for_save(&mut self) -> Result<(), String> {
+        self.tidy();
+        if let Some(bad) = self.packages.iter().find(|name| !is_routing_package_name(name)) {
+            return Err(format!("Недопустимое имя пакета приложения: «{bad}»"));
+        }
+        for (list, what) in [(&self.packages, "приложений"), (&self.direct_domains, "доменов"), (&self.ips, "адресов")] {
+            if list.len() > ROUTING_LIST_MAX {
+                return Err(format!("В списке {what} {} записей; не больше {ROUTING_LIST_MAX}", list.len()));
+            }
+        }
+        Ok(())
+    }
+
+    /// M-56 at send: a rule stored before 2.6.0, imported, or set by swg-panel's --desired may still hold what the
+    /// client refuses. It goes out without those entries, so a 2.5 client does not stop on it. Returns the number of
+    /// entries dropped (blanks and repeats, which the client drops itself, do not count).
+    pub fn cleaned_for_client(&self) -> (RoutingRule, usize) {
+        let mut rule = self.clone();
+        rule.tidy();
+        let tidy = rule.entries();
+        rule.packages.retain(|name| is_routing_package_name(name));
+        for list in [&mut rule.packages, &mut rule.direct_domains, &mut rule.ips] {
+            list.truncate(ROUTING_LIST_MAX);
+        }
+        let dropped = tidy - rule.entries();
+        (rule, dropped)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PasswordEntry {
@@ -93,6 +161,10 @@ pub struct LocalProxyProfile {
     pub id: String,
     pub name: String,
     pub port: u16,
+    /// M-19: the SOCKS5 server's IPv4 address (amurcanov #23: Docker on ipvlan next to 3x-ui). Older profiles and
+    /// stores have none and mean the loopback, as before.
+    #[serde(default = "default_proxy_host")]
+    pub host: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub username: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -107,7 +179,20 @@ fn default_fail_closed() -> bool {
     true
 }
 
+pub const DEFAULT_PROXY_HOST: &str = "127.0.0.1";
+
+fn default_proxy_host() -> String {
+    DEFAULT_PROXY_HOST.to_owned()
+}
+
 impl LocalProxyProfile {
+    /// The SOCKS5 server's address. `host` is checked at save (proxy_route::validate_config) and at load; anything
+    /// unreadable means the loopback, the only address before M-19.
+    pub fn socks_addr(&self) -> std::net::SocketAddr {
+        let ip = self.host.trim().parse::<std::net::Ipv4Addr>().unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+        std::net::SocketAddr::from((ip, self.port))
+    }
+
     pub fn new_id() -> String {
         use rand::RngCore;
         let mut bytes = [0u8; 6];
@@ -206,6 +291,7 @@ impl<'de> serde::Deserialize<'de> for LocalProxyState {
                 } else {
                     port
                 },
+                host: default_proxy_host(),
                 username,
                 password,
                 fail_closed: true,
@@ -832,7 +918,8 @@ CREATE TABLE IF NOT EXISTS local_proxy_profiles (
     port       INTEGER NOT NULL,
     username   TEXT    NOT NULL DEFAULT '',
     password   TEXT    NOT NULL DEFAULT '',
-    fail_closed INTEGER NOT NULL DEFAULT 1
+    fail_closed INTEGER NOT NULL DEFAULT 1,
+    host       TEXT    NOT NULL DEFAULT '127.0.0.1'
 );
 CREATE TABLE IF NOT EXISTS local_proxy_state (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -986,7 +1073,7 @@ fn ensure_routing_rule_columns(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// 2.6.0: `fail_closed` (D7), on for every existing profile.
+/// 2.6.0: `fail_closed` (D7), on for every existing profile; `host` (M-19), the loopback for every existing profile.
 fn ensure_local_proxy_columns(connection: &Connection) -> Result<()> {
     let mut statement = connection
         .prepare("PRAGMA table_info(local_proxy_profiles)")
@@ -1003,6 +1090,14 @@ fn ensure_local_proxy_columns(connection: &Connection) -> Result<()> {
                 [],
             )
             .context("add fail_closed column")?;
+    }
+    if !columns.iter().any(|column| column == "host") {
+        connection
+            .execute(
+                "ALTER TABLE local_proxy_profiles ADD COLUMN host TEXT NOT NULL DEFAULT '127.0.0.1'",
+                [],
+            )
+            .context("add host column")?;
     }
     Ok(())
 }
@@ -1312,15 +1407,16 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password, fail_closed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password, fail_closed, host)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET
                     sort_order = excluded.sort_order,
                     name = excluded.name,
                     port = excluded.port,
                     username = excluded.username,
                     password = excluded.password,
-                    fail_closed = excluded.fail_closed",
+                    fail_closed = excluded.fail_closed,
+                    host = excluded.host",
             )
             .context("prepare local proxy profiles insert")?;
         for (sort_order, profile) in db.local_proxy.profiles.iter().enumerate() {
@@ -1333,6 +1429,7 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     profile.username,
                     profile.password,
                     i64::from(profile.fail_closed),
+                    profile.host,
                 ])
                 .context("write local proxy profile")?;
         }
@@ -1545,7 +1642,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
     {
         let mut select = connection
             .prepare(
-                "SELECT id, name, port, username, password, fail_closed
+                "SELECT id, name, port, username, password, fail_closed, host
                  FROM local_proxy_profiles ORDER BY sort_order",
             )
             .context("prepare local proxy profiles select")?;
@@ -1558,6 +1655,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                 username: row.get(3).context("read profile username")?,
                 password: row.get(4).context("read profile password")?,
                 fail_closed: row.get::<_, i64>(5).context("read profile fail_closed")? != 0,
+                host: row.get(6).context("read profile host")?,
             });
         }
     }
@@ -1954,6 +2052,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    fn rule(packages: &[&str]) -> super::RoutingRule {
+        super::RoutingRule {
+            id: "rule_x".to_owned(),
+            name: "x".to_owned(),
+            packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn routing_rule_save_rejects_bad_package() {
+        // the client's own cases (ServerRoutingRule.kt isRoutingPackageName)
+        for good in ["org.telegram.messenger", "com.example", "_x.y_1", "A.b"] {
+            assert!(super::is_routing_package_name(good), "{good}");
+        }
+        for bad in ["com.example.", ".com", "com..x", "1com.x", "com.ex-ample", "com.пример", "com x", ""] {
+            assert!(!super::is_routing_package_name(bad), "{bad}");
+        }
+        assert!(!super::is_routing_package_name(&"a".repeat(256)));
+        // at save: tidied as the client reads it, then the first bad name named
+        let mut tidy = rule(&["  org.telegram.messenger ", "", "org.telegram.messenger", "com.vk"]);
+        tidy.check_for_save().unwrap();
+        assert_eq!(tidy.packages, ["org.telegram.messenger", "com.vk"]);
+        let mut typo = rule(&["org.telegram.messenger", "com.example."]);
+        let message = typo.check_for_save().unwrap_err();
+        assert!(message.contains("«com.example.»"), "{message}");
+    }
+
+    #[test]
+    fn routing_rule_save_caps_count() {
+        let mut big = rule(&[]);
+        big.ips = (0..=super::ROUTING_LIST_MAX).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)).collect();
+        let message = big.check_for_save().unwrap_err();
+        assert!(message.contains("адресов") && message.contains("4097"), "{message}");
+        // 4096 after tidying is fine: repeats do not count
+        let mut repeats = rule(&[]);
+        repeats.direct_domains = (0..super::ROUTING_LIST_MAX).map(|i| format!("d{i}.ru")).collect();
+        repeats.direct_domains.extend(["d0.ru".to_owned(), " d1.ru".to_owned(), String::new()]);
+        repeats.check_for_save().unwrap();
+        assert_eq!(repeats.direct_domains.len(), super::ROUTING_LIST_MAX);
+    }
+
+    #[test]
+    fn stored_bad_rule_is_cleaned_on_send() {
+        // a rule stored before 2.6.0 (or from --desired, or an import) with a typo and an oversized list
+        let mut stored = rule(&["org.telegram.messenger", "com.example.", "com.vk", " com.vk "]);
+        stored.ips = (0..super::ROUTING_LIST_MAX + 10).map(|i| format!("10.{}.{}.1", i / 256, i % 256)).collect();
+        let (sent, dropped) = stored.cleaned_for_client();
+        assert_eq!(sent.packages, ["org.telegram.messenger", "com.vk"]);
+        assert_eq!(sent.ips.len(), super::ROUTING_LIST_MAX);
+        assert_eq!(dropped, 1 + 10, "the bad name and the ten over the cap; the repeat is the client's to drop");
+        // what is sent is what the client accepts
+        let mut check = sent.clone();
+        check.check_for_save().unwrap();
+        // a clean rule goes out as stored
+        let clean = rule(&["com.vk"]);
+        assert_eq!(clean.cleaned_for_client(), (clean.clone(), 0));
+    }
+
+    #[test]
+    fn proxy_host_defaults_to_loopback() {
+        // a profile from before M-19 (its JSON, the TPROXY child's bootstrap, has no host) dials the loopback
+        let old: super::LocalProxyProfile = serde_json::from_str(r#"{"id":"x","name":"x","port":1080}"#).unwrap();
+        assert_eq!(old.host, "127.0.0.1");
+        assert_eq!(old.socks_addr(), "127.0.0.1:1080".parse().unwrap());
+    }
+
+    #[test]
+    fn proxy_host_round_trips() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("csqtt-proxyhost-test-{unique}"));
+        let mut database = Database::default();
+        database.local_proxy.profiles.push(super::LocalProxyProfile {
+            id: "ipvlan".to_owned(),
+            name: "3x-ui".to_owned(),
+            port: 10808,
+            host: "172.20.0.7".to_owned(),
+            username: String::new(),
+            password: String::new(),
+            fail_closed: true,
+        });
+        save_database(&directory, &database).expect("save database");
+        let restored = load_database(&directory).expect("load database");
+        let profile = &restored.local_proxy.profiles[0];
+        assert_eq!(profile.socks_addr(), "172.20.0.7:10808".parse().unwrap());
+        // the TPROXY child gets the profile as JSON on stdin
+        let child: super::LocalProxyProfile = serde_json::from_str(&serde_json::to_string(profile).unwrap()).unwrap();
+        assert_eq!(child, *profile);
+        // a store from before M-19 (no host column) is upgraded in place, and its profiles dial the loopback
+        {
+            let conn = rusqlite::Connection::open(directory.join("csqtt.db")).unwrap();
+            conn.execute("ALTER TABLE local_proxy_profiles DROP COLUMN host", []).unwrap();
+        }
+        let upgraded = load_database(&directory).expect("load an older store");
+        assert_eq!(upgraded.local_proxy.profiles[0].host, "127.0.0.1");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     #[test]
     fn proxy_fail_closed_persists_and_defaults_on() {
         let unique = std::time::SystemTime::now()
@@ -1970,6 +2169,7 @@ mod tests {
                 username: String::new(),
                 password: String::new(),
                 fail_closed,
+                host: if id == "b" { "10.0.0.5".to_owned() } else { super::default_proxy_host() },
             });
         }
         save_database(&directory, &database).expect("save database");
@@ -1980,6 +2180,7 @@ mod tests {
         // an older profile (no field in its JSON) comes in fail-closed
         let old: super::LocalProxyProfile = serde_json::from_str(r#"{"id":"x","name":"x","port":1}"#).unwrap();
         assert!(old.fail_closed);
+        assert_eq!(old.host, "127.0.0.1");
         let _ = std::fs::remove_dir_all(directory);
     }
 

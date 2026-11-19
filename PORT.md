@@ -38,6 +38,12 @@ address nothing listens on. Nothing else changes.
 - **`--host-tuning=auto|off` (S5):** `auto` (the default) is 2.5's host-wide set without `ipv6/conf/all/forwarding`;
   `off` writes only its own TUN's `rp_filter`. `--no-nat` implies `off`, as before.
 - **`--version` (S6):** prints `csqtt <version> CSQTT-WIRE-3`.
+- **`--web-bind <ip>` (D22):** the panel's address, default 0.0.0.0; 127.0.0.1 serves it only to a reverse proxy on the
+  same host.
+- **SOCKS5 exit host (M-19):** a profile's SOCKS5 server may sit at any IPv4 address (default 127.0.0.1, older profiles
+  keep it).
+- **Routing rules (M-16, M-56):** a rule the client would refuse (a bad package name, a list over 4096) is refused at
+  save with the entry named; one stored before is sent without those entries, with one warning per rule.
 
 ## Node (swg-noded) consequences
 - `_csqtt_read_store` selects `device_id` FROM passwords + reads `devices`: a 2.5 store has neither → the query fails

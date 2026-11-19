@@ -4221,7 +4221,7 @@ async fn routing_rules_create(
         request.target_client_passwords.unwrap_or_default()
     };
     let id = format!("rule_{}", random_token(8));
-    let rule = RoutingRule {
+    let mut rule = RoutingRule {
         id: id.clone(),
         name,
         is_whitelist,
@@ -4232,6 +4232,9 @@ async fn routing_rules_create(
         ip_is_whitelist,
         ips: request.ips,
     };
+    if let Err(message) = rule.check_for_save() {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
     let revision = {
         let mut db = state.app.db.write().await;
         for g_id in &assigned_groups {
@@ -4297,19 +4300,26 @@ async fn routing_rules_update(
     } else {
         request.target_client_passwords.unwrap_or_default()
     };
+    let mut candidate = RoutingRule {
+        id: id.clone(),
+        name,
+        is_whitelist,
+        packages: request.packages,
+        template_domains: request.template_domains,
+        direct_domains,
+        domains_is_whitelist,
+        ip_is_whitelist,
+        ips: request.ips,
+    };
+    if let Err(message) = candidate.check_for_save() {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
     let revision = {
         let mut db = state.app.db.write().await;
         let Some(rule) = db.routing_rules.get_mut(&id) else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        rule.name = name;
-        rule.is_whitelist = is_whitelist;
-        rule.packages = request.packages;
-        rule.template_domains = request.template_domains;
-        rule.direct_domains = direct_domains;
-        rule.domains_is_whitelist = domains_is_whitelist;
-        rule.ip_is_whitelist = ip_is_whitelist;
-        rule.ips = request.ips;
+        *rule = candidate;
 
         for group in db.groups.values_mut() {
             if assigned_groups.contains(&group.id) {
@@ -5053,6 +5063,15 @@ struct ProfileRequest {
     /// D7: absent = keep (update) / on (create)
     #[serde(default)]
     fail_closed: Option<bool>,
+    /// M-19: the SOCKS5 server's IPv4 address; absent or blank = keep (update) / 127.0.0.1 (create)
+    #[serde(default)]
+    host: Option<String>,
+}
+
+impl ProfileRequest {
+    fn host(&self) -> Option<String> {
+        self.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).map(str::to_owned)
+    }
 }
 
 async fn local_proxy_get(State(state): State<WebState>) -> impl IntoResponse {
@@ -5072,6 +5091,7 @@ async fn local_proxy_get(State(state): State<WebState>) -> impl IntoResponse {
                 "id": p.id,
                 "name": p.name,
                 "port": p.port,
+                "host": p.host,
                 "username": p.username,
                 "password": p.password,
                 "fail_closed": p.fail_closed,
@@ -5096,6 +5116,7 @@ async fn local_proxy_create(
     if let Err(message) = validate_proxy_profile_name(&request.name) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
+    let host = request.host();
     let port = if request.port == 0 {
         crate::model::DEFAULT_LOCAL_PROXY_PORT
     } else {
@@ -5109,6 +5130,7 @@ async fn local_proxy_create(
             request.name
         },
         port,
+        host: host.unwrap_or_else(|| crate::model::DEFAULT_PROXY_HOST.to_owned()),
         fail_closed: request.fail_closed.unwrap_or(true),
         username: request.username,
         password: request.password,
@@ -5117,6 +5139,7 @@ async fn local_proxy_create(
         return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
     }
     let id = profile.id.clone();
+    let socks_addr = profile.socks_addr();
     let revision = {
         let mut db = state.app.db.write().await;
         if db.local_proxy.profiles.len() >= 20 {
@@ -5134,7 +5157,7 @@ async fn local_proxy_create(
         "PROXY",
         &format!("SOCKS5 profile created: {id}"),
     );
-    let port_listening = crate::proxy_route::port_is_listening(port).await;
+    let port_listening = crate::proxy_route::port_is_listening(socks_addr).await;
     Json(serde_json::json!({ "id": id, "port_listening": port_listening })).into_response()
 }
 
@@ -5146,6 +5169,7 @@ async fn local_proxy_update(
     if let Err(message) = validate_proxy_profile_name(&request.name) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
+    let host = request.host();
     let port = if request.port == 0 {
         crate::model::DEFAULT_LOCAL_PROXY_PORT
     } else {
@@ -5158,11 +5182,13 @@ async fn local_proxy_update(
         username: request.username.clone(),
         password: request.password.clone(),
         fail_closed: request.fail_closed.unwrap_or(true),
+        // an absent host keeps the stored one, which was checked when it was saved
+        host: host.clone().unwrap_or_else(|| crate::model::DEFAULT_PROXY_HOST.to_owned()),
     };
     if let Err(error) = crate::proxy_route::validate_config(&temp_profile) {
         return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
     }
-    let (was_active, revision) = {
+    let (was_active, socks_addr, revision) = {
         let mut db = state.app.db.write().await;
         let was_active = db.local_proxy.active_profile_id == id;
         let Some(profile) = db.local_proxy.find_profile_mut(&id) else {
@@ -5177,7 +5203,11 @@ async fn local_proxy_update(
         if let Some(fail_closed) = request.fail_closed {
             profile.fail_closed = fail_closed;
         }
-        (was_active, state.app.db_persistence.submit(db.clone()))
+        if let Some(host) = host {
+            profile.host = host;
+        }
+        let socks_addr = profile.socks_addr();
+        (was_active, socks_addr, state.app.db_persistence.submit(db.clone()))
     };
     if let Err(response) = wait_for_persistence(&state, revision).await {
         return response;
@@ -5191,7 +5221,7 @@ async fn local_proxy_update(
         "PROXY",
         &format!("SOCKS5 profile updated: {id}"),
     );
-    let port_listening = crate::proxy_route::port_is_listening(port).await;
+    let port_listening = crate::proxy_route::port_is_listening(socks_addr).await;
     Json(serde_json::json!({ "updated": true, "port_listening": port_listening })).into_response()
 }
 
@@ -5567,9 +5597,10 @@ pub async fn run(
 
     tokio::spawn(web_session_janitor(app.clone()));
     tokio::spawn(web_slowloris_watchdog());
-    println!("[WEB] HTTP/HTTPS listening on 0.0.0.0:{}", app.web_port);
+    let bind = SocketAddr::new(app.web_bind, app.web_port);
+    println!("[WEB] HTTP/HTTPS listening on {bind}");
     let acceptor = DualAcceptor::new(tls_config, app.clone());
-    axum_server::Server::bind(SocketAddr::from(([0, 0, 0, 0], app.web_port)))
+    axum_server::Server::bind(bind)
         .acceptor(acceptor)
         .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
@@ -9423,6 +9454,7 @@ const PANEL_HTML: &str = r##"
     <dialog id="profileDlg">
         <h2 id="profileDlgTitle" style="font-size: 18px; margin-bottom: 18px;">Новый профиль</h2>
         <div class="input-group"><label for="profileDlgName">Имя</label><input id="profileDlgName" maxlength="64" placeholder="3x-ui VLESS"></div>
+        <div class="input-group"><label for="profileDlgHost">Адрес SOCKS5</label><input id="profileDlgHost" value="127.0.0.1" placeholder="127.0.0.1" inputmode="decimal" autocomplete="off" spellcheck="false"></div>
         <div class="input-group"><label for="profileDlgPort">Порт SOCKS5</label><input type="number" id="profileDlgPort" min="1" max="65535" value="45000" inputmode="numeric"></div>
         <div class="input-group"><label for="profileDlgUser">Логин (необязательно)</label><input id="profileDlgUser" maxlength="255" autocomplete="off"></div>
         <div class="input-group"><label for="profileDlgPass">Пароль (необязательно)</label><input type="password" id="profileDlgPass" maxlength="255" autocomplete="new-password"></div>
@@ -9589,21 +9621,22 @@ const PANEL_HTML: &str = r##"
             <input id="ruleName" maxlength="128" placeholder="Например: Обход блокировок">
         </div>
         <div class="input-group">
-            <label for="ruleMode">Режим исключения приложений</label>
-            <select id="ruleMode">
-                <option value="blacklist">Чёрный список</option>
-                <option value="whitelist">Белый список</option>
+            <label for="ruleMode">Приложения</label>
+            <select id="ruleMode" onchange="onRuleModeChange()">
+                <option value="blacklist">Все через VPN, кроме списка</option>
+                <option value="whitelist">Только список через VPN</option>
             </select>
+            <div id="ruleModeWhitelistHint" style="display: none; margin-top: 6px; font-size: 12px; color: var(--warning, #b45309);">Остальные приложения идут мимо VPN. Списки доменов и адресов ниже действуют только для перечисленных приложений.</div>
         </div>
         <div class="input-group">
             <label for="rulePackages">Список пакетов приложений</label>
             <textarea id="rulePackages" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
         </div>
         <div class="input-group">
-            <label for="ruleDomainsMode">Режим исключения доменов</label>
+            <label for="ruleDomainsMode">Домены</label>
             <select id="ruleDomainsMode" onchange="onRuleDomainsModeChange()">
-                <option value="blacklist">Чёрный список</option>
-                <option value="whitelist">Белый список</option>
+                <option value="blacklist">Все через VPN, кроме списка</option>
+                <option value="whitelist">Только список через VPN</option>
             </select>
         </div>
         <div class="input-group">
@@ -9623,10 +9656,10 @@ const PANEL_HTML: &str = r##"
             </label>
         </div>
         <div class="input-group">
-            <label for="ruleIpMode">Режим исключения адресов</label>
+            <label for="ruleIpMode">Адреса</label>
             <select id="ruleIpMode">
-                <option value="blacklist">Чёрный список</option>
-                <option value="whitelist">Белый список</option>
+                <option value="blacklist">Все через VPN, кроме списка</option>
+                <option value="whitelist">Только список через VPN</option>
             </select>
         </div>
         <div class="input-group">
@@ -10339,14 +10372,19 @@ const PANEL_HTML: &str = r##"
                 </div>
                 <div class="api-card-body">
                     <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
-                        <code>GET</code> возвращает список настроенных правил обхода. <code>POST</code> создает новое правило с доменами, IP-диапазонами и outbound-действием (прямой выход или прокси):
+                        <code>GET</code> возвращает список правил. <code>POST</code> создаёт правило. Режим каждого списка: <code>"blacklist"</code> — всё через VPN, кроме перечисленного; <code>"whitelist"</code> — через VPN только перечисленное. Пустые строки и повторы отбрасываются; недопустимое имя пакета или список длиннее 4096 записей — ошибка 400 с названием записи:
                     </p>
                     <pre class="api-code-block"><code>{
-  "name": "YouTube & Discord",
-  "domains": ["youtube.com", "googlevideo.com", "discord.com"],
-  "ip_ranges": ["162.158.0.0/15"],
-  "action": "proxy", // "direct" или "proxy"
-  "proxy_id": "proxy_uuid_here"
+  "name": "Обход блокировок",
+  "mode": "blacklist",               // приложения (или "is_whitelist": false)
+  "packages": ["org.telegram.messenger"],
+  "domains_mode": "blacklist",       // домены (или "domains_is_whitelist")
+  "direct_domains": ["gosuslugi.ru", "*.ru"],   // или "domains"
+  "template_domains": true,          // готовый список RU доменов (только для "blacklist")
+  "ip_mode": "blacklist",            // адреса (или "ip_is_whitelist")
+  "ips": ["1.2.3.4/32", "1.2.3.4-1.2.3.255"],
+  "assigned_groups": ["group_id"],   // или "target_group_ids"
+  "assigned_clients": ["password"]   // или "target_client_passwords"
 }</code></pre>
                 </div>
             </div>
@@ -10360,7 +10398,7 @@ const PANEL_HTML: &str = r##"
                 </div>
                 <div class="api-card-body">
                     <p style="font-size: 12px; color: var(--text-muted);">
-                        <code>PUT</code> обновляет список доменов и IP правила, <code>DELETE</code> удаляет правило.
+                        <code>PUT</code> заменяет правило целиком (те же поля, что у <code>POST</code>; группы и клиенты, не названные в запросе, от правила отвязываются), <code>DELETE</code> удаляет правило.
                     </p>
                 </div>
             </div>
@@ -10369,11 +10407,11 @@ const PANEL_HTML: &str = r##"
                 <div class="api-card-header">
                     <span class="api-method get">GET</span>
                     <span class="api-path">/api/template-domains</span>
-                    <span class="api-desc">Шаблоны доменов популярных сервисов</span>
+                    <span class="api-desc">Готовый список RU доменов</span>
                 </div>
                 <div class="api-card-body">
                     <p style="font-size: 12px; color: var(--text-muted);">
-                        Возвращает готовые списки доменов для YouTube, Discord, Instagram, Twitter/X, ChatGPT, Spotify и др.
+                        Возвращает готовый список RU доменов (текст, по домену в строке), который включает <code>"template_domains"</code>.
                     </p>
                 </div>
             </div>
@@ -10902,7 +10940,8 @@ const PANEL_HTML: &str = r##"
                         badge = `<span style="font-size:11px;font-weight:600;color:#f59e0b;margin-left:6px;">Подключение...</span>`;
                     }
                 }
-                let meta = p.username ? `${p.port} · ${p.username}` : `${p.port}`;
+                const where = p.host && p.host !== '127.0.0.1' ? `${esc(p.host)}:${p.port}` : `${p.port}`;
+                let meta = p.username ? `${where} · ${p.username}` : where;
                 if (isActive) {
                     if (route_active) {
                         meta += ` · ${tcp_sessions} TCP · ${udp_flows} UDP`;
@@ -10969,6 +11008,7 @@ const PANEL_HTML: &str = r##"
                 title.textContent = 'Редактировать профиль';
                 saveBtn.textContent = 'Сохранить';
                 document.getElementById('profileDlgName').value = p.name;
+                document.getElementById('profileDlgHost').value = p.host || '127.0.0.1';
                 document.getElementById('profileDlgPort').value = p.port;
                 document.getElementById('profileDlgUser').value = p.username || '';
                 document.getElementById('profileDlgPass').value = p.password || '';
@@ -10977,6 +11017,7 @@ const PANEL_HTML: &str = r##"
                 title.textContent = 'Новый профиль';
                 saveBtn.textContent = 'Создать';
                 document.getElementById('profileDlgName').value = '';
+                document.getElementById('profileDlgHost').value = '127.0.0.1';
                 document.getElementById('profileDlgPort').value = '45000';
                 document.getElementById('profileDlgUser').value = '';
                 document.getElementById('profileDlgPass').value = '';
@@ -10997,8 +11038,12 @@ const PANEL_HTML: &str = r##"
             if (password && !username) {
                 showToast('Для пароля SOCKS5 укажите логин', 'error'); return;
             }
+            const host = document.getElementById('profileDlgHost').value.trim() || '127.0.0.1';
+            if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+                showToast('Адрес SOCKS5 — IPv4, например 127.0.0.1', 'error'); return;
+            }
             const fail_closed = document.getElementById('profileDlgFailClosed').value !== '0';
-            const body = JSON.stringify({ name, port, username, password, fail_closed });
+            const body = JSON.stringify({ name, host, port, username, password, fail_closed });
             const btn = document.getElementById('profileDlgSave');
             profileDlgSaving = true;
             btn.disabled = true;
@@ -11623,7 +11668,7 @@ const PANEL_HTML: &str = r##"
             }
             container.innerHTML = window.routingRulesData.map(rule => {
                 const isWhite = rule.mode === 'whitelist';
-                const modeText = isWhite ? 'Белый список' : 'Чёрный список';
+                const modeText = isWhite ? 'Приложения: только список' : 'Приложения: все, кроме списка';
                 const modeBadge = `<span class="badge ${isWhite ? 'active' : 'inactive'}" style="font-size: 11px;">${modeText}</span>`;
                 const appsCount = (rule.packages || []).length;
                 const domainsCount = (rule.domains || []).length;
@@ -11738,6 +11783,7 @@ const PANEL_HTML: &str = r##"
             const defaultName = rule ? (rule.name || '') : `Правило${randomNum}`;
             document.getElementById('ruleName').value = defaultName;
             document.getElementById('ruleMode').value = rule ? (rule.mode || 'blacklist') : 'blacklist';
+            onRuleModeChange();
             document.getElementById('rulePackages').value = rule && rule.packages ? rule.packages.join('\n') : '';
             document.getElementById('ruleDomainsMode').value = rule ? (rule.domains_mode || (rule.domains_is_whitelist ? 'whitelist' : 'blacklist')) : 'blacklist';
             onRuleDomainsModeChange();
@@ -11787,6 +11833,11 @@ const PANEL_HTML: &str = r##"
             targetsCont.innerHTML = targetsHtml || '<div style="color: var(--text-muted); font-size: 12px; padding: 12px; text-align: center;">Нет доступных групп или клиентов</div>';
             bindTargetDragSelection(targetsCont);
             document.getElementById('editRoutingRuleDlg').showModal();
+        }
+
+        function onRuleModeChange() {
+            const white = document.getElementById('ruleMode').value === 'whitelist';
+            document.getElementById('ruleModeWhitelistHint').style.display = white ? 'block' : 'none';
         }
 
         async function saveRoutingRule() {

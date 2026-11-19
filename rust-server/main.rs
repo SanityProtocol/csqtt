@@ -76,6 +76,10 @@ struct Args {
     #[arg(long, default_value_t = 46002, help = "HTTPS-порт веб-панели")]
     web_port: u16,
 
+    // D22 / M-17: 127.0.0.1 serves the panel only to a reverse proxy on the same host (amurcanov #32)
+    #[arg(long, default_value = "0.0.0.0", help = "Адрес веб-панели (127.0.0.1 — только для своего прокси на этом сервере)")]
+    web_bind: std::net::IpAddr,
+
     #[arg(long, default_value = "/etc/csqtt", help = "Каталог конфигурации")]
     config_dir: std::path::PathBuf,
 
@@ -334,6 +338,7 @@ pub struct App {
     pub config_dir: std::path::PathBuf,
     pub listen: SocketAddr,
     pub web_port: u16,
+    pub web_bind: std::net::IpAddr,
     pub web_user: String,
     pub web_pass: String,
     pub web_secret_path: String,
@@ -1223,6 +1228,7 @@ async fn async_main() -> Result<()> {
         config_dir: args.config_dir.clone(),
         listen: args.listen,
         web_port: args.web_port,
+        web_bind: args.web_bind,
         web_user: args.web_user,
         web_pass,
         web_secret_path: args.web_secret_path.trim().trim_matches('/').to_string(),
@@ -1293,7 +1299,7 @@ async fn async_main() -> Result<()> {
     let web_line = if swgpanel::headless() {
         " Web: off (--no-web)".to_owned()
     } else {
-        format!(" Web: 0.0.0.0:{}", app.web_port)
+        format!(" Web: {}", SocketAddr::new(app.web_bind, app.web_port))
     };
     log_event(&app, "INFO", "SYSTEM", &web_line);
 
@@ -1944,9 +1950,9 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
         };
         if let Some(route) = current {
             if route.is_alive() && route.matches(&profile) {
-                if !proxy_route::port_is_listening(profile.port).await {
+                if !proxy_route::port_is_listening(profile.socks_addr()).await {
                     *write_unpoison(&app.proxy_health_error) =
-                        Some(format!("Порт {} не отвечает", profile.port));
+                        Some(format!("SOCKS5 {} не отвечает", profile.socks_addr()));
                     app.proxy_port_listening
                         .store(false, std::sync::atomic::Ordering::Release);
                     // block first: deactivate removes the TPROXY rules, and a packet between the two would leave direct
@@ -1960,8 +1966,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                         "WARNING",
                         "PROXY",
                         &format!(
-                            "SOCKS5 port {} is no longer listening; {}",
-                            profile.port,
+                            "SOCKS5 {} is no longer listening; {}",
+                            profile.socks_addr(),
                             egress_words(&profile)
                         ),
                     );
@@ -1991,12 +1997,12 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
             continue;
         }
 
-        let listening = proxy_route::port_is_listening(profile.port).await;
+        let listening = proxy_route::port_is_listening(profile.socks_addr()).await;
         app.proxy_port_listening
             .store(listening, std::sync::atomic::Ordering::Release);
         if !listening {
             *write_unpoison(&app.proxy_health_error) =
-                Some(format!("Порт {} не отвечает", profile.port));
+                Some(format!("SOCKS5 {} не отвечает", profile.socks_addr()));
             note_egress(&app, proxy_route::apply_egress(Some(&profile), false).await);
             if port_failures == 0 {
                 log_event(
@@ -2004,8 +2010,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                     "WARNING",
                     "PROXY",
                     &format!(
-                        "SOCKS5 port {} is not listening; {}, port re-check every 3s",
-                        profile.port,
+                        "SOCKS5 {} is not listening; {}, port re-check every 3s",
+                        profile.socks_addr(),
                         egress_words(&profile)
                     ),
                 );
@@ -2031,8 +2037,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
             "INFO",
             "PROXY",
             &format!(
-                "Connecting SOCKS5 forwarder to local SOCKS5 127.0.0.1:{}...",
-                profile.port
+                "Connecting SOCKS5 forwarder to SOCKS5 {}...",
+                profile.socks_addr()
             ),
         );
         let proxy_log_app = app.clone();
@@ -2049,8 +2055,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                     "INFO",
                     "PROXY",
                     &format!(
-                        "Local SOCKS5 route 127.0.0.1:{} is active (TCP and UDP)",
-                        profile.port
+                        "SOCKS5 route {} is active (TCP and UDP)",
+                        profile.socks_addr()
                     ),
                 );
                 wait = Some(PORT_CHECK);
@@ -2274,6 +2280,21 @@ mod version_tests {
         // `--version` is clap's own exit path: it answers before any root check, config or socket
         let err = Args::try_parse_from(["csqtt", "--version"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn web_bind_default_unchanged() {
+        let args = Args::try_parse_from(["csqtt"]).unwrap();
+        assert_eq!(SocketAddr::new(args.web_bind, args.web_port), "0.0.0.0:46002".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn web_bind_loopback() {
+        let args = Args::try_parse_from(["csqtt", "--web-bind", "127.0.0.1", "--web-port", "8443"]).unwrap();
+        assert_eq!(SocketAddr::new(args.web_bind, args.web_port), "127.0.0.1:8443".parse::<SocketAddr>().unwrap());
+        let v6 = Args::try_parse_from(["csqtt", "--web-bind", "::1"]).unwrap();
+        assert_eq!(SocketAddr::new(v6.web_bind, v6.web_port), "[::1]:46002".parse::<SocketAddr>().unwrap());
+        assert!(Args::try_parse_from(["csqtt", "--web-bind", "localhost"]).is_err());
     }
 
     #[test]
