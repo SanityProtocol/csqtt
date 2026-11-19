@@ -77,7 +77,7 @@ struct Args {
     web_port: u16,
 
     // D22 / M-17: 127.0.0.1 serves the panel only to a reverse proxy on the same host (amurcanov #32)
-    #[arg(long, default_value = "0.0.0.0", help = "Адрес веб-панели (127.0.0.1 — только для своего прокси на этом сервере)")]
+    #[arg(long, default_value = "0.0.0.0", help = "Адрес веб-панели (127.0.0.1 — только для своего прокси на этом сервере; для HTTP-прокси, который пишет X-Forwarded-For, задайте CSQTT_TRUST_XFF=1)")]
     web_bind: std::net::IpAddr,
 
     #[arg(long, default_value = "/etc/csqtt", help = "Каталог конфигурации")]

@@ -837,6 +837,23 @@ async fn qrcode_js() -> Response {
     )
 }
 
+/// Whose failed logins count against whom. Behind an HTTP reverse proxy on this host (D22 `--web-bind 127.0.0.1`)
+/// every visitor arrives from 127.0.0.1, and one shared bucket lets anyone's three wrong passwords lock the owner out.
+/// Such a proxy appends the address it saw to X-Forwarded-For, so its LAST entry is the visitor's. The header is believed
+/// only when the owner says the proxy is an HTTP one (`CSQTT_TRUST_XFF=1`) and the peer is on loopback: a TLS
+/// passthrough (nginx stream, HAProxy tcp, an Xray fallback) adds no header, and a visitor could then pick its own.
+fn login_source(peer: std::net::IpAddr, forwarded_for: Option<&str>, trust_xff: bool) -> String {
+    if trust_xff
+        && peer.to_canonical().is_loopback()
+        && let Some(visitor) = forwarded_for
+            .and_then(|list| list.rsplit(',').next())
+            .and_then(|last| last.trim().parse::<std::net::IpAddr>().ok())
+    {
+        return visitor.to_string();
+    }
+    peer.to_string()
+}
+
 async fn login(
     State(state): State<WebState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -846,9 +863,10 @@ async fn login(
     if let Err(message) = validate_login_request(&request) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
-    let source = addr.ip().to_string();
-    if let Ok(forwarded) = std::env::var("CSQTT_TRUST_XFF")
-        && (forwarded == "1" || forwarded.eq_ignore_ascii_case("true"))
+    let trust_xff = std::env::var("CSQTT_TRUST_XFF")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let source = login_source(addr.ip(), headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()), trust_xff);
+    if trust_xff
         && let Some(forwarded) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
@@ -13169,6 +13187,26 @@ const PANEL_HTML: &str = r##"
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn login_limit_behind_a_local_proxy_is_per_visitor() {
+        use std::net::IpAddr;
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let public: IpAddr = "203.0.113.9".parse().unwrap();
+        // CSQTT_TRUST_XFF=1: the proxy appends the visitor; what the visitor sent before it is not believed
+        assert_eq!(super::login_source(local, Some("198.51.100.7"), true), "198.51.100.7");
+        assert_eq!(super::login_source(local, Some("10.0.0.1, 198.51.100.7"), true), "198.51.100.7");
+        assert_eq!(super::login_source("::1".parse().unwrap(), Some("2001:db8::5"), true), "2001:db8::5");
+        // --web-bind :: sees a local IPv4 proxy as ::ffff:127.0.0.1
+        assert_eq!(super::login_source("::ffff:127.0.0.1".parse().unwrap(), Some("198.51.100.7"), true), "198.51.100.7");
+        // no header, or junk: the peer itself, as before
+        assert_eq!(super::login_source(local, None, true), "127.0.0.1");
+        assert_eq!(super::login_source(local, Some("unknown"), true), "127.0.0.1");
+        // a peer that is not on this host is counted by its own address, whatever it claims
+        assert_eq!(super::login_source(public, Some("198.51.100.7"), true), "203.0.113.9");
+        // without the opt-in (a TLS passthrough adds no header, so a visitor could forge one): the peer, as before
+        assert_eq!(super::login_source(local, Some("198.51.100.7"), false), "127.0.0.1");
+    }
+
     use super::{
         DNS_PROVIDERS, LOGIN_HTML, MAX_CLIENT_NAME_BYTES, PANEL_HTML, PWA_ICON_192_PNG,
         PWA_ICON_512_PNG, PWA_MANIFEST, PWA_SERVICE_WORKER, count_active_sessions,
