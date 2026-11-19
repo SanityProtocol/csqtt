@@ -43,7 +43,8 @@ val V2AccentFamily = FontFamily(
 )
 
 /**
- * TT Travels Next (variable) — signature geometric font for version pills and badges.
+ * Nunito (variable) — version pills and badges. They used TT Travels Next, whose trial licence does not allow
+ * distribution (M-165); Nunito is OFL and already bundled.
  */
 val V2VersionFamily = FontFamily(
     versionFont(FontWeight.Normal),
@@ -60,7 +61,7 @@ val V2VersionFamily = FontFamily(
 val V2MonoFamily: FontFamily = FontFamily.Monospace
 
 private fun versionFont(weight: FontWeight) = Font(
-    resId = R.font.tt_travels_next_trial_variable,
+    resId = R.font.nunito_variable,
     weight = weight,
     variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)),
 )
