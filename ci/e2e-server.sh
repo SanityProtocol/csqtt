@@ -55,6 +55,7 @@ down() {
   ip netns pids $NS 2>/dev/null | xargs -r kill -9 2>/dev/null || true
   ip link del ${NS}h 2>/dev/null || true
   ip netns del $NS 2>/dev/null || true
+  rm -f "$st/echo.pid" "$st/server.pid"   # a later run with this state dir must not signal a pid reused since
 }
 
 case "${1:-}" in
