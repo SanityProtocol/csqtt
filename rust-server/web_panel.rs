@@ -8834,8 +8834,8 @@ const PANEL_HTML: &str = r##"
         }
 
         @media(max-width: 420px) {
-            /* the version beside CSQTT needs the room: the API button keeps its icon and title, without the word */
-            .btn-api span { display: none; }
+            /* the version beside CSQTT needs the room: the API button keeps its word, without the icon */
+            .btn-api svg { display: none; }
         }
 
         @media(max-width: 768px) {
