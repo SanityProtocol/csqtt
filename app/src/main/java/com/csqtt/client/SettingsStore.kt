@@ -1509,6 +1509,12 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
             // a new link from the owner (QR, csqtt:// link) starts with all of its hashes in use
             prefs.remove(getProfileKey(LINK_HASHES_REMOVED, profile))
+            // the link replaces this configuration, so the slot leaves any subscription it came from: otherwise the
+            // subscription's next refresh would match the slot again and silently put its own node back
+            listOf(SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE).forEach {
+                prefs.remove(getProfileKey(it, profile))
+            }
+            prefs.remove(getProfileKey(SUBSCRIPTION_POWER, profile))
         }
     }
 
