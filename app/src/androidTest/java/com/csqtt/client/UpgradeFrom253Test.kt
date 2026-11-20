@@ -38,6 +38,8 @@ class UpgradeFrom253Test {
             old.edit { prefs ->
                 prefs[stringPreferencesKey("peer")] = "203.0.113.5"
                 prefs[intPreferencesKey("server_peer_port")] = 46100
+                prefs[stringPreferencesKey("deploy_ip")] = "203.0.113.5"
+                prefs[stringPreferencesKey("deploy_ip_7")] = "203.0.113.7"
                 prefs[intPreferencesKey("workers_per_hash")] = 18
                 prefs[stringPreferencesKey("vk_hash_mode")] = "auto"
                 prefs[stringPreferencesKey("ui_design")] = "v2"
@@ -64,6 +66,10 @@ class UpgradeFrom253Test {
             assertNull(prefs[booleanPreferencesKey("csqtt_link_mode")])
             assertEquals(hashC, prefs[stringPreferencesKey("vk_hashes_3")])
             assertEquals(SettingsStore.STORE_SCHEMA, prefs[intPreferencesKey("store_schema_version")])
+            // B5b2: each slot's deploy data is a VPS record its profile links, a VPS-only slot too
+            assertEquals(0, prefs[intPreferencesKey("vps_ref")])
+            assertEquals(7, prefs[intPreferencesKey("vps_ref_7")])
+            assertNull(prefs[intPreferencesKey("vps_ref_3")])
         } finally {
             file.delete()
         }

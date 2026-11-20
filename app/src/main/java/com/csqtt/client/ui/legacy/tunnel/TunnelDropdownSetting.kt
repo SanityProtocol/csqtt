@@ -84,6 +84,7 @@ internal fun CompactDropdownSetting(
     onTitleInfo: (() -> Unit)? = null,
     onInfo: ((String) -> Unit)? = null,
     onItemEdit: ((String) -> Unit)? = null,
+    itemEditable: (String) -> Boolean = { true },
     leadingContent: (@Composable RowScope.() -> Unit)? = null,
     indicatorProvider: ((String) -> ModeIndicator?)? = null,
 ) {
@@ -190,7 +191,7 @@ internal fun CompactDropdownSetting(
                         trailingIcon = if (onItemEdit != null || onInfo != null) {
                             {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (onItemEdit != null) {
+                                    if (onItemEdit != null && itemEditable(key)) {
                                         IconButton(
                                             onClick = {
                                                 expanded = false

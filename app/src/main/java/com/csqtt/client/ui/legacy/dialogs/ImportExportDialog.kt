@@ -66,12 +66,36 @@ fun ImportExportDialog(
     var includeDeploy by rememberSaveable { mutableStateOf(true) }
     var includeExceptions by rememberSaveable { mutableStateOf(true) }
     var includeSettings by rememberSaveable { mutableStateOf(true) }
+    // M-42: the full backup (every profile, VPS record and setting) instead of the active profile's sections
+    var fullBackup by rememberSaveable { mutableStateOf(false) }
+    var includeServerSecrets by rememberSaveable { mutableStateOf(false) }
+    // a backup read for import, waiting for the user to confirm that it replaces everything
+    var pendingRestore by remember { mutableStateOf<String?>(null) }
+    val tunnelRunning by com.csqtt.client.TunnelManager.running.collectAsState()
+    val anySection = fullBackup || includeTunnel || includeDeploy || includeExceptions || includeSettings
+
+    suspend fun exportJson(): String = if (fullBackup) {
+        settingsStore.exportBackupJson(includeServerSecrets)
+    } else {
+        settingsStore.exportConfigJson(
+            includeTunnel = includeTunnel,
+            includeDeploy = includeDeploy,
+            includeExceptions = includeExceptions,
+            includeSettings = includeSettings,
+        )
+    }
 
     var isProcessing by remember { mutableStateOf(false) }
 
     val executeImportJson: (String) -> Unit = { jsonText ->
         if (jsonText.isBlank()) {
             Toast.makeText(context, "Конфигурация пуста", Toast.LENGTH_SHORT).show()
+        } else if (com.csqtt.client.StoreBackup.isBackup(jsonText)) {
+            if (tunnelRunning) {
+                Toast.makeText(context, "Отключите туннель, чтобы восстановить копию", Toast.LENGTH_SHORT).show()
+            } else {
+                pendingRestore = jsonText
+            }
         } else {
             scope.launch {
                 isProcessing = true
@@ -172,26 +196,57 @@ fun ImportExportDialog(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    ConfigOptionRow(
-                        title = "Туннель",
-                        checked = includeTunnel,
-                        onCheckedChange = { includeTunnel = it }
-                    )
-                    ConfigOptionRow(
-                        title = "Деплой",
-                        checked = includeDeploy,
-                        onCheckedChange = { includeDeploy = it }
-                    )
-                    ConfigOptionRow(
-                        title = "Маршрут",
-                        checked = includeExceptions,
-                        onCheckedChange = { includeExceptions = it }
-                    )
-                    ConfigOptionRow(
-                        title = "Настройки",
-                        checked = includeSettings,
-                        onCheckedChange = { includeSettings = it }
-                    )
+                    if (selectedTab == ImportExportTab.EXPORT) {
+                        ConfigOptionRow(
+                            title = "Все профили (полная копия)",
+                            checked = fullBackup,
+                            onCheckedChange = { fullBackup = it }
+                        )
+                    }
+                    if (fullBackup && selectedTab == ImportExportTab.EXPORT) {
+                        ConfigOptionRow(
+                            title = "Пароли серверов (SSH, панель)",
+                            checked = includeServerSecrets,
+                            onCheckedChange = { includeServerSecrets = it }
+                        )
+                        Text(
+                            text = "Файл подключает к вашим серверам: в нём пароли туннеля и хеши" +
+                                if (includeServerSecrets) ", а также пароли и ключи SSH и пароли панели." else
+                                    ". Пароли SSH и панели в него не попадут.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 6.dp)
+                        )
+                    } else {
+                        ConfigOptionRow(
+                            title = "Туннель",
+                            checked = includeTunnel,
+                            onCheckedChange = { includeTunnel = it }
+                        )
+                        ConfigOptionRow(
+                            title = "Деплой",
+                            checked = includeDeploy,
+                            onCheckedChange = { includeDeploy = it }
+                        )
+                        ConfigOptionRow(
+                            title = "Маршрут",
+                            checked = includeExceptions,
+                            onCheckedChange = { includeExceptions = it }
+                        )
+                        ConfigOptionRow(
+                            title = "Настройки",
+                            checked = includeSettings,
+                            onCheckedChange = { includeSettings = it }
+                        )
+                        if (selectedTab == ImportExportTab.IMPORT) {
+                            Text(
+                                text = "Полная копия узнаётся сама и заменяет все профили — перед этим приложение спросит.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp)
+                            )
+                        }
+                    }
                 }
 
                 if (selectedTab == ImportExportTab.EXPORT) {
@@ -204,12 +259,7 @@ fun ImportExportDialog(
                                 scope.launch {
                                     isProcessing = true
                                     try {
-                                        val json = settingsStore.exportConfigJson(
-                                            includeTunnel = includeTunnel,
-                                            includeDeploy = includeDeploy,
-                                            includeExceptions = includeExceptions,
-                                            includeSettings = includeSettings
-                                        )
+                                        val json = exportJson()
                                         clipboardManager.setText(AnnotatedString(json))
                                         Toast.makeText(context, "Конфиг скопирован в буфер ✓", Toast.LENGTH_SHORT).show()
                                     } catch (e: Exception) {
@@ -219,7 +269,7 @@ fun ImportExportDialog(
                                     }
                                 }
                             },
-                            enabled = !isProcessing && (includeTunnel || includeDeploy || includeExceptions || includeSettings),
+                            enabled = !isProcessing && anySection,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(CsqttSizes.ControlHeight),
@@ -247,13 +297,8 @@ fun ImportExportDialog(
                                 scope.launch {
                                     isProcessing = true
                                     try {
-                                        val json = settingsStore.exportConfigJson(
-                                            includeTunnel = includeTunnel,
-                                            includeDeploy = includeDeploy,
-                                            includeExceptions = includeExceptions,
-                                            includeSettings = includeSettings
-                                        )
-                                        val savedPath = saveJsonToDownloads(context, json)
+                                        val json = exportJson()
+                                        val savedPath = saveJsonToDownloads(context, json, if (fullBackup) "csqtt-backup" else "csqtt-config")
                                         if (savedPath != null) {
                                             Toast.makeText(context, "Сохранено: $savedPath ✓", Toast.LENGTH_LONG).show()
                                         } else {
@@ -266,7 +311,7 @@ fun ImportExportDialog(
                                     }
                                 }
                             },
-                            enabled = !isProcessing && (includeTunnel || includeDeploy || includeExceptions || includeSettings),
+                            enabled = !isProcessing && anySection,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(CsqttSizes.ControlHeight),
@@ -302,7 +347,7 @@ fun ImportExportDialog(
                                     Toast.makeText(context, "Буфер обмена пуст", Toast.LENGTH_SHORT).show()
                                 }
                             },
-                            enabled = !isProcessing && (includeTunnel || includeDeploy || includeExceptions || includeSettings),
+                            enabled = !isProcessing && anySection,
                             modifier = Modifier
                                 .weight(1f)
                                 .height(CsqttSizes.ControlHeight),
@@ -325,7 +370,7 @@ fun ImportExportDialog(
 
                         OutlinedButton(
                             onClick = { filePickerLauncher.launch("application/json") },
-                            enabled = !isProcessing && (includeTunnel || includeDeploy || includeExceptions || includeSettings),
+                            enabled = !isProcessing && anySection,
                             modifier = Modifier
                                 .weight(1f)
                                 .height(CsqttSizes.ControlHeight),
@@ -350,6 +395,39 @@ fun ImportExportDialog(
             }
         }
     }
+
+    pendingRestore?.let { json ->
+        RestoreConfirmDialog(
+            onConfirm = {
+                pendingRestore = null
+                scope.launch {
+                    isProcessing = true
+                    try {
+                        if (settingsStore.restoreBackupJson(json)) {
+                            Toast.makeText(context, "Копия восстановлена ✓", Toast.LENGTH_LONG).show()
+                            onDismissRequest()
+                        } else {
+                            Toast.makeText(context, "Ошибка: файл не является копией csqtt", Toast.LENGTH_SHORT).show()
+                        }
+                    } finally {
+                        isProcessing = false
+                    }
+                }
+            },
+            onDismiss = { pendingRestore = null },
+        )
+    }
+}
+
+@Composable
+private fun RestoreConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Восстановить полную копию?") },
+        text = { Text("Все профили, серверы и настройки на этом устройстве будут заменены данными из копии.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Заменить") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
 }
 
 @Composable
@@ -383,8 +461,8 @@ private fun ConfigOptionRow(
     }
 }
 
-private fun saveJsonToDownloads(context: Context, json: String): String? {
-    val filename = "csqtt-config-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())}.json"
+private fun saveJsonToDownloads(context: Context, json: String, prefix: String): String? {
+    val filename = "$prefix-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())}.json"
     return try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver

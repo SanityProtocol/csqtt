@@ -31,7 +31,10 @@ private fun <T> Flow<T>.onIo(): Flow<T> = flowOn(Dispatchers.IO)
 /** What a per-profile key belongs to: the connection, or the VPS the deploy screen manages (M-40; B5b2 splits them). */
 internal enum class ProfileKeyGroup { CONNECTION, VPS }
 
-private class PerProfileKey(val make: (String) -> Preferences.Key<*>, val group: ProfileKeyGroup)
+/** How a key's value is stored: a backup (M-42) restores a value only when its type is the declared one. */
+internal enum class StoredKind { STRING, INT, BOOLEAN, LONG }
+
+internal class PerProfileKey(val make: (String) -> Preferences.Key<*>, val group: ProfileKeyGroup, val kind: StoredKind)
 
 /**
  * Stores [value] encrypted under [encryptedKey] and drops the legacy plain copy. An unchanged value writes nothing: a fresh
@@ -58,6 +61,8 @@ internal fun MutablePreferences.putSecretValue(
 
 internal data class DeploySettingsSnapshot(
     val profile: Int = -1,
+    /** The profile's VPS record (B5b2); null until its first deploy-form write. */
+    val vps: Int? = null,
     val ip: String = "",
     val serverName: String = "",
     val sshLogin: String = "",
@@ -69,6 +74,9 @@ internal data class DeploySettingsSnapshot(
     val manualPortsEnabled: Boolean = false,
     val serverPeerPort: Int = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
     val serverWebPort: Int = CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT,
+    /** The form's ports with «Ручные порты» on, kept apart from the ports the profile dials until a deploy succeeds. */
+    val draftPeerPort: Int? = null,
+    val draftWebPort: Int? = null,
     val sshKeysMode: Boolean = false,
     val dockerInstall: Boolean = false,
     val secretPathEnabled: Boolean = true,
@@ -121,17 +129,6 @@ internal data class ProfileSubscriptionInfo(
     val subUuid: String,
     val nodeName: String,
     val powerLimit: Int,
-)
-
-/** A profile slot that has a server configured on the deploy screen. */
-internal data class DeployServerInfo(
-    val profile: Int,
-    val name: String,
-    val ip: String,
-    val configured: Boolean = false,
-    val installedVersion: String = "",
-    val serviceStatus: String = "",
-    val panelAvailable: Boolean = false,
 )
 
 internal data class SubscriptionMeta(
@@ -203,18 +200,19 @@ class SettingsStore(context: Context) {
             key: Preferences.Key<T>,
             make: (String) -> Preferences.Key<T>,
             group: ProfileKeyGroup,
+            kind: StoredKind,
         ): Preferences.Key<T> {
-            check(perProfileKeys.put(key.name, PerProfileKey(make, group)) == null) { "per-profile key ${key.name} twice" }
+            check(perProfileKeys.put(key.name, PerProfileKey(make, group, kind)) == null) { "per-profile key ${key.name} twice" }
             return key
         }
         private fun profileString(name: String, group: ProfileKeyGroup = CONNECTION) =
-            perProfile(stringPreferencesKey(name), ::stringPreferencesKey, group)
+            perProfile(stringPreferencesKey(name), ::stringPreferencesKey, group, StoredKind.STRING)
         private fun profileInt(name: String, group: ProfileKeyGroup = CONNECTION) =
-            perProfile(intPreferencesKey(name), ::intPreferencesKey, group)
+            perProfile(intPreferencesKey(name), ::intPreferencesKey, group, StoredKind.INT)
         private fun profileBoolean(name: String, group: ProfileKeyGroup = CONNECTION) =
-            perProfile(booleanPreferencesKey(name), ::booleanPreferencesKey, group)
+            perProfile(booleanPreferencesKey(name), ::booleanPreferencesKey, group, StoredKind.BOOLEAN)
         private fun profileLong(name: String, group: ProfileKeyGroup = CONNECTION) =
-            perProfile(longPreferencesKey(name), ::longPreferencesKey, group)
+            perProfile(longPreferencesKey(name), ::longPreferencesKey, group, StoredKind.LONG)
 
         private val Context.dataStore by preferencesDataStore(
             "settings",
@@ -245,6 +243,10 @@ class SettingsStore(context: Context) {
         private val LISTEN_PORT = profileInt("listen_port")
         private val MANUAL_PORTS_ENABLED = profileBoolean("manual_ports_enabled", VPS)
         private val SERVER_PEER_PORT = profileInt("server_peer_port")
+        // the web port of the installation the profile connects to (its panel); the deploy form's draft is DEPLOY_WEB_PORT
+        private val SERVER_WEB_PORT = profileInt("server_web_port")
+        // the index of the profile's VPS record (B5b2): the VPS keys with that suffix; absent when it has none
+        private val VPS_REF = profileInt("vps_ref")
         private val SNI = profileString("sni")
         private val NO_DNS = profileBoolean("no_dns")
         private val CUSTOM_TURN_IPS = profileString("custom_turn_ips")
@@ -292,7 +294,9 @@ class SettingsStore(context: Context) {
         private val DEPLOY_WEB_LOGIN = profileString("deploy_web_login", VPS)
         private val DEPLOY_WEB_PASSWORD = profileString("deploy_web_password", VPS)
         private val DEPLOY_WEB_PASSWORD_ENCRYPTED = profileString("deploy_web_password_encrypted", VPS)
-        private val SERVER_WEB_PORT = profileInt("server_web_port", VPS)
+        // the deploy form's ports with «Ручные порты» on: a draft until a deploy succeeds and writes the profile's ports
+        private val DEPLOY_PEER_PORT = profileInt("deploy_peer_port", VPS)
+        private val DEPLOY_WEB_PORT = profileInt("deploy_web_port", VPS)
 
 
         private val VK_AUTH_MODE = profileString("vk_auth_mode")
@@ -433,7 +437,7 @@ class SettingsStore(context: Context) {
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 1
+        internal const val STORE_SCHEMA = 2
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -470,6 +474,13 @@ class SettingsStore(context: Context) {
                         val key = getProfileKey(WORKERS_PER_HASH, profile)
                         prefs[key]?.let { prefs[key] = WorkerCountPolicy.normalize(it) }
                     }
+                }
+            }
+            if (from < 2) {
+                // 2.6.0, B5b2: each slot's deploy data becomes VPS record n, linked from profile n (a VPS-only slot too:
+                // classic has no VPS list, and a record no profile links could not be reached)
+                for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
+                    step { if (vpsRecordExists(prefs, profile)) prefs[getProfileKey(VPS_REF, profile)] = profile }
                 }
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
@@ -544,11 +555,192 @@ class SettingsStore(context: Context) {
         internal val perProfileKeyGroups: Map<String, ProfileKeyGroup>
             get() = perProfileKeys.mapValues { it.value.group }
 
+        /** Every per-profile key, for the backup (M-42). */
+        internal val perProfileDeclarations: Map<String, PerProfileKey> get() = perProfileKeys
+
+        /** The app settings a full backup carries (M-42), by name and stored type. */
+        internal val backupGlobalKeys: Map<String, StoredKind> by lazy {
+            listOf(
+                ACTIVE_PROFILE to StoredKind.INT, SHOW_SYSTEM_APPS to StoredKind.BOOLEAN,
+                LOGGING_ENABLED to StoredKind.BOOLEAN, DETAILED_LOGS to StoredKind.BOOLEAN,
+                INFO_ACTIONS_EXPANDED to StoredKind.BOOLEAN, INFO_PROJECT_EXPANDED to StoredKind.BOOLEAN,
+                SUBSCRIPTION_META to StoredKind.STRING, AUTO_JS_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN,
+                TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
+                BATTERY_SAVER_MODE to StoredKind.STRING, BATTERY_SAVER_PERCENT to StoredKind.INT,
+                THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
+                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT,
+            ).associate { (key, kind) -> key.name to kind }
+        }
+
+        /** App state a backup leaves out: this device's flags, update and tunnel state, check results. */
+        internal val notBackedUpGlobalKeys: Set<String> by lazy {
+            listOf(
+                STORE_SCHEMA_VERSION, DEPLOY_PROFILE_NAMES_CLEANED, DEFAULT_ROLE_DECIDED, SPLIT_TUNNEL_WHITELIST_MIGRATED,
+                BATTERY_OPTIMIZATION_PROMPT_HANDLED, UPDATE_LAST_CHECK_AT, UPDATE_LATEST_VERSION, UPDATE_LAST_ERROR,
+                UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
+                UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
+                CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
+                TUNNEL_WAS_RUNNING,
+            ).mapTo(HashSet()) { it.name }
+        }
+
+        internal fun slotKeyName(name: String, index: Int): String = if (index == 0) name else "${name}_$index"
+
         /** Removes every key of [group] from [profile]'s slot: profile 0's are the base keys. */
         internal fun clearProfileKeys(prefs: MutablePreferences, profile: Int, group: ProfileKeyGroup) {
             for ((name, key) in perProfileKeys) {
-                if (key.group == group) prefs.remove(key.make(if (profile == 0) name else "${name}_$profile"))
+                if (key.group == group) prefs.remove(key.make(slotKeyName(name, profile)))
             }
+        }
+
+        private val profileIndices = CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX
+
+        // opening the deploy tab writes the secret-path pair, so the pair alone is not a VPS record
+        private val vpsPresenceIgnored = setOf("deploy_secret_path_enabled", "deploy_secret_path_uuid")
+
+        /**
+         * B5b2: VPS record n is the VPS keys with suffix n, profile p the CONNECTION keys with suffix p and its `vps_ref`.
+         * A record exists when it holds a value the user gave (a blank string is none).
+         */
+        internal fun vpsRecordExists(prefs: Preferences, index: Int): Boolean {
+            val values = prefs.asMap()
+            return perProfileKeys.any { (name, key) ->
+                key.group == VPS && name !in vpsPresenceIgnored &&
+                    when (val value = values[key.make(slotKeyName(name, index))]) {
+                        null -> false
+                        is String -> value.isNotBlank()
+                        else -> true
+                    }
+            }
+        }
+
+        /** The VPS record [profile] links, or null. */
+        internal fun linkedVps(prefs: Preferences, profile: Int): Int? =
+            prefs[getProfileKey(VPS_REF, profile)]?.takeIf { it in profileIndices }
+
+        /**
+         * The VPS record a deploy-form write of [profile] goes to: its own, or on the first write a free one (the profile's
+         * own index when free), cleared, linked and given a fresh secret path. Null only when all 32 are taken.
+         */
+        internal fun vpsForWrite(prefs: MutablePreferences, profile: Int): Int? {
+            linkedVps(prefs, profile)?.let { return it }
+            val linked = profileIndices.mapNotNullTo(HashSet()) { linkedVps(prefs, it) }
+            val index = (sequenceOf(profile) + profileIndices.asSequence())
+                .firstOrNull { it !in linked && !vpsRecordExists(prefs, it) } ?: return null
+            clearProfileKeys(prefs, index, VPS)
+            prefs[getProfileKey(DEPLOY_SECRET_PATH_UUID, index)] = UUID.randomUUID().toString()
+            prefs[getProfileKey(VPS_REF, profile)] = index
+            return index
+        }
+
+        /** A profile the user has: a peer, a link, a subscription, a VPS record or a name they gave it (M-39). */
+        internal fun profileInUse(prefs: Preferences, profile: Int): Boolean =
+            listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, PROFILE_NAME).any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
+                linkedVps(prefs, profile) != null
+
+        /** Deletes [profile]: every connection key, its VPS link with them; the VPS record stays (M-41). */
+        internal fun deleteProfileKeys(prefs: MutablePreferences, profile: Int) {
+            clearProfileKeys(prefs, profile, CONNECTION)
+            if ((prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX) == profile) {
+                prefs[ACTIVE_PROFILE] = profileIndices.firstOrNull { it != profile && profileInUse(prefs, it) }
+                    ?: CsqttConstants.Profiles.MIN_INDEX
+            }
+        }
+
+        /** Deletes VPS record [index] and every link to it; the profiles keep their connection (M-41, M-104). */
+        internal fun deleteVpsKeys(prefs: MutablePreferences, index: Int) {
+            clearProfileKeys(prefs, index, VPS)
+            for (profile in profileIndices) {
+                if (linkedVps(prefs, profile) == index) prefs.remove(getProfileKey(VPS_REF, profile))
+            }
+        }
+
+        /**
+         * A new profile written into a free slot starts clean: no VK keys or lists left by an older profile there (M-40).
+         * The active slot's keys are the settings the user is looking at, so they stay.
+         */
+        internal fun startCleanIfFree(prefs: MutablePreferences, profile: Int) {
+            if (!profileInUse(prefs, profile) && profile != (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)) {
+                clearProfileKeys(prefs, profile, CONNECTION)
+            }
+        }
+
+        /** Whether [profile] links a VPS record no other profile links. */
+        internal fun isOnlyLinkToVps(prefs: Preferences, profile: Int): Boolean {
+            val vps = linkedVps(prefs, profile) ?: return false
+            return profileIndices.none { it != profile && linkedVps(prefs, it) == vps }
+        }
+
+        /** Classic's delete: the profile, and its VPS record when nothing else links it (classic has no VPS list). */
+        internal fun deleteProfileWithLoneVps(prefs: MutablePreferences, profile: Int) {
+            val lone = if (isOnlyLinkToVps(prefs, profile)) linkedVps(prefs, profile) else null
+            deleteProfileKeys(prefs, profile)
+            lone?.let { deleteVpsKeys(prefs, it) }
+        }
+
+        /** The deploy form's ports with «Ручные порты» on, as drafts on [profile]'s VPS record: its own ports stay. */
+        internal fun putDeployDraftPorts(prefs: MutablePreferences, profile: Int, peer: Int, web: Int, ssh: String) {
+            val vps = vpsForWrite(prefs, profile) ?: return
+            prefs[getProfileKey(DEPLOY_PEER_PORT, vps)] = peer
+            prefs[getProfileKey(DEPLOY_WEB_PORT, vps)] = web
+            prefs[getProfileKey(DEPLOY_SSH_PORT, vps)] = ssh
+        }
+
+        /** «Добавить профиль»: the first free slot but the active one, cleared, in [linkMode], made active; null if none. */
+        internal fun addProfileKeys(prefs: MutablePreferences, linkMode: Boolean): Int? {
+            val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            val free = profileIndices.firstOrNull { it != active && !profileInUse(prefs, it) } ?: return null
+            clearProfileKeys(prefs, free, CONNECTION)
+            prefs[getProfileKey(CSQTT_LINK_MODE, free)] = linkMode
+            prefs[ACTIVE_PROFILE] = free
+            return free
+        }
+
+        /** Classic's dropdown (M-97): the profiles in use and the active one, with their names. */
+        internal fun profileList(prefs: Preferences): List<Pair<Int, String>> {
+            val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            return profileIndices.filter { it == active || profileInUse(prefs, it) }.map { it to profileDisplayName(prefs, it) }
+        }
+
+        /** The name the user gave, else the linked server's (a deploy-only slot's name, #54), else «Профиль N». */
+        internal fun profileDisplayName(prefs: Preferences, profile: Int): String =
+            prefs[getProfileKey(PROFILE_NAME, profile)]?.takeIf { it.isNotBlank() }
+                ?: linkedVps(prefs, profile)?.let { prefs[getProfileKey(DEPLOY_SERVER_NAME, it)] }?.takeIf { it.isNotBlank() }
+                ?: defaultProfileName(profile)
+
+        /**
+         * A deploy that succeeded: the profile that started it takes the server (its address when it had none, both ports,
+         * the synced [password]) and the record's drafts go, only while [profile] still links [vps]: a profile deleted or
+         * relinked during the deploy is not brought back. Ports other than 46000/46002 turn «Ручные порты» on.
+         */
+        internal fun applyDeployedServer(
+            prefs: MutablePreferences,
+            profile: Int,
+            vps: Int,
+            host: String,
+            peerPort: Int,
+            webPort: Int,
+            password: String?,
+        ): Boolean {
+            if (linkedVps(prefs, profile) != vps) return false
+            if (prefs[getProfileKey(PEER, profile)].isNullOrBlank() && host.isNotBlank()) {
+                prefs[getProfileKey(PEER, profile)] = host
+            }
+            prefs[getProfileKey(SERVER_PEER_PORT, profile)] = peerPort
+            prefs[getProfileKey(SERVER_WEB_PORT, profile)] = webPort
+            if (password != null && isValidTunnelPassword(password)) {
+                prefs[getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)] = password
+                prefs.remove(getProfileKey(CONNECTION_PASSWORD, profile))
+                prefs.remove(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile))
+            }
+            prefs.remove(getProfileKey(DEPLOY_PEER_PORT, vps))
+            prefs.remove(getProfileKey(DEPLOY_WEB_PORT, vps))
+            if (peerPort != CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT ||
+                webPort != CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT
+            ) {
+                prefs[getProfileKey(MANUAL_PORTS_ENABLED, vps)] = true
+            }
+            return true
         }
 
     }
@@ -618,9 +810,9 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(LISTEN_PORT, profile)] ?: 0
     }
+    /** The deploy form's «Ручные порты», on the active profile's VPS record. */
     val manualPortsEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(MANUAL_PORTS_ENABLED, profile)] ?: false
+        linkedVps(prefs, prefs[ACTIVE_PROFILE] ?: 0)?.let { prefs[getProfileKey(MANUAL_PORTS_ENABLED, it)] } ?: false
     }
     val serverPeerPort: Flow<Int> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -631,56 +823,48 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(SNI, profile)] ?: ""
     }
 
-    val deployIp: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_IP, profile)] ?: ""
-    }
-    val deployLogin: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_LOGIN, profile)] ?: ""
-    }
-    val deployPassword: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, profile)
-    }.onIo()
-    val deploySshPort: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] ?: ""
-    }
+    /** The deploy tab's form: the active profile's VPS record (B5b2), its ports, and the defaults when it has none. */
     internal val deploySettingsSnapshot: Flow<DeploySettingsSnapshot> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val vps = linkedVps(prefs, profile)
+        fun <T> record(key: Preferences.Key<T>): T? = vps?.let { prefs[getProfileKey(key, it)] }
+        fun secret(encrypted: Preferences.Key<String>, legacy: Preferences.Key<String>) =
+            vps?.let { readSecret(prefs, encrypted, legacy, it) } ?: ""
         DeploySettingsSnapshot(
             profile = profile,
-            ip = prefs[getProfileKey(DEPLOY_IP, profile)] ?: "",
-            serverName = prefs[getProfileKey(DEPLOY_SERVER_NAME, profile)] ?: "",
-            sshLogin = prefs[getProfileKey(DEPLOY_LOGIN, profile)] ?: "",
-            sshPassword = readSecret(prefs, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, profile),
-            webLogin = prefs[getProfileKey(DEPLOY_WEB_LOGIN, profile)] ?: "",
-            webPassword = readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, profile),
-            mainPassword = readSecret(prefs, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, profile),
-            sshPort = prefs[getProfileKey(DEPLOY_SSH_PORT, profile)]
+            vps = vps,
+            ip = record(DEPLOY_IP) ?: "",
+            serverName = record(DEPLOY_SERVER_NAME) ?: "",
+            sshLogin = record(DEPLOY_LOGIN) ?: "",
+            sshPassword = secret(DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD),
+            webLogin = record(DEPLOY_WEB_LOGIN) ?: "",
+            webPassword = secret(DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD),
+            mainPassword = secret(DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD),
+            sshPort = record(DEPLOY_SSH_PORT)
                 ?.ifBlank { CsqttConstants.Network.DEFAULT_SSH_PORT.toString() }
                 ?: CsqttConstants.Network.DEFAULT_SSH_PORT.toString(),
-            manualPortsEnabled = prefs[getProfileKey(MANUAL_PORTS_ENABLED, profile)] ?: false,
+            manualPortsEnabled = record(MANUAL_PORTS_ENABLED) ?: false,
             serverPeerPort = prefs[getProfileKey(SERVER_PEER_PORT, profile)]
                 ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
             serverWebPort = prefs[getProfileKey(SERVER_WEB_PORT, profile)]
                 ?: CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT,
-            sshKeysMode = prefs[getProfileKey(SSH_KEYS_MODE, profile)] ?: false,
-            dockerInstall = prefs[getProfileKey(DOCKER_INSTALL, profile)] ?: false,
+            draftPeerPort = record(DEPLOY_PEER_PORT),
+            draftWebPort = record(DEPLOY_WEB_PORT),
+            sshKeysMode = record(SSH_KEYS_MODE) ?: false,
+            dockerInstall = record(DOCKER_INSTALL) ?: false,
             secretPathEnabled = true,
-            secretPathUuid = prefs[getProfileKey(DEPLOY_SECRET_PATH_UUID, profile)] ?: "",
-            serverConfigured = prefs[getProfileKey(DEPLOY_SERVER_CONFIGURED, profile)] ?: false,
-            lastInspectionAtMs = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_AT, profile)] ?: 0L,
-            lastInspectionOk = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_OK, profile)] ?: false,
-            lastInspectionArch = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_ARCH, profile)] ?: "",
-            lastInspectionServiceStatus = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_SERVICE, profile)] ?: "",
-            lastInspectionVersion = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_VERSION, profile)] ?: "",
-            lastInspectionMessage = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_MESSAGE, profile)] ?: "",
-            lastPanelAvailable = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_PANEL, profile)] ?: false,
-            sshPrivateKey = readSecret(prefs, SSH_PRIVATE_KEY_ENCRYPTED, SSH_PRIVATE_KEY, profile),
-            sshKeyPassphrase = readSecret(prefs, SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_KEY_PASSPHRASE, profile),
-            sshCertificate = readSecret(prefs, SSH_CERTIFICATE_ENCRYPTED, SSH_CERTIFICATE, profile),
+            secretPathUuid = record(DEPLOY_SECRET_PATH_UUID) ?: "",
+            serverConfigured = record(DEPLOY_SERVER_CONFIGURED) ?: false,
+            lastInspectionAtMs = record(DEPLOY_LAST_INSPECTION_AT) ?: 0L,
+            lastInspectionOk = record(DEPLOY_LAST_INSPECTION_OK) ?: false,
+            lastInspectionArch = record(DEPLOY_LAST_INSPECTION_ARCH) ?: "",
+            lastInspectionServiceStatus = record(DEPLOY_LAST_INSPECTION_SERVICE) ?: "",
+            lastInspectionVersion = record(DEPLOY_LAST_INSPECTION_VERSION) ?: "",
+            lastInspectionMessage = record(DEPLOY_LAST_INSPECTION_MESSAGE) ?: "",
+            lastPanelAvailable = record(DEPLOY_LAST_INSPECTION_PANEL) ?: false,
+            sshPrivateKey = secret(SSH_PRIVATE_KEY_ENCRYPTED, SSH_PRIVATE_KEY),
+            sshKeyPassphrase = secret(SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_KEY_PASSPHRASE),
+            sshCertificate = secret(SSH_CERTIFICATE_ENCRYPTED, SSH_CERTIFICATE),
         )
     }.onIo()
     internal val tunnelAuthSnapshot: Flow<TunnelAuthSnapshot> = dataStore.data.map { prefs ->
@@ -708,22 +892,6 @@ class SettingsStore(context: Context) {
         readConnectionPasswordState(prefs, profile)
     }.onIo()
     val connectionPassword: Flow<String> = connectionPasswordState.map { it.value }
-    val deployMainPassword: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, profile)
-    }.onIo()
-    val deployWebLogin: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_WEB_LOGIN, profile)] ?: ""
-    }
-    val deployWebPassword: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, profile)
-    }.onIo()
-    val serverWebPort: Flow<Int> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(SERVER_WEB_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT
-    }
 
     val vkAuthMode: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -886,56 +1054,12 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] ?: ""
     }
 
-    val profileNames: Flow<Map<Int, String>> = dataStore.data.map { prefs ->
-        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).associateWith { p ->
-            val name = prefs[getProfileKey(PROFILE_NAME, p)]
-            if (name.isNullOrBlank()) defaultProfileName(p) else name
-        }
-    }
+    /** Classic's «Профиль конфигурации»: the profiles in use and the active one, with their names (M-97). */
+    internal val profileList: Flow<List<Pair<Int, String>>> = dataStore.data.map(::profileList)
 
-    /** Every profile slot that has a server configured on the deploy screen. */
-    internal val deployServers: Flow<List<DeployServerInfo>> = dataStore.data.map { prefs ->
-        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).mapNotNull { p ->
-            val ip = prefs[getProfileKey(DEPLOY_IP, p)]?.trim().orEmpty()
-            if (ip.isEmpty()) return@mapNotNull null
-            val configured = prefs[getProfileKey(DEPLOY_SERVER_CONFIGURED, p)] ?: false
-            val inspectionOk = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_OK, p)] ?: false
-            val serviceStatus = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_SERVICE, p)] ?: ""
-            val installedVersion = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_VERSION, p)] ?: ""
-            val panelAvailable = prefs[getProfileKey(DEPLOY_LAST_INSPECTION_PANEL, p)] ?: false
-            val deployed = configured || (
-                inspectionOk && (
-                    serviceStatus in listOf("systemd_active", "docker_active", "process_running") ||
-                        panelAvailable ||
-                        (
-                            installedVersion.isNotBlank() &&
-                                installedVersion != "не определена" &&
-                                installedVersion != "unknown"
-                            )
-                    )
-                )
-            DeployServerInfo(
-                profile = p,
-                name = prefs[getProfileKey(DEPLOY_SERVER_NAME, p)]
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "Сервер ${p + 1}",
-                ip = ip,
-                configured = deployed,
-                installedVersion = installedVersion,
-                serviceStatus = serviceStatus,
-                panelAvailable = panelAvailable,
-            )
-        }
-    }
-
-    /** Profile slots that hold a peer or a participant link. */
+    /** Profiles the user has (a peer, link, subscription, VPS record or name): a new one never lands on them (M-39). */
     val occupiedProfiles: Flow<Set<Int>> = dataStore.data.map { prefs ->
-        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
-            .filter { p ->
-                !prefs[getProfileKey(PEER, p)].isNullOrBlank() ||
-                    !prefs[getProfileKey(CSQTT_LINK, p)].isNullOrBlank()
-            }
-            .toSet()
+        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).filter { profileInUse(prefs, it) }.toSet()
     }
 
     /** Subscription metadata of every slot imported from a subscription. */
@@ -1045,6 +1169,7 @@ class SettingsStore(context: Context) {
                 val profile = write.profile
                 val host = write.host.trim().removePrefix("[").removeSuffix("]")
                 if (host.isEmpty() || write.port !in 1..65535) continue
+                startCleanIfFree(prefs, profile)
 
                 prefs[getProfileKey(PEER, profile)] =
                     if (host.contains(':')) "[$host]:${write.port}" else host
@@ -1110,43 +1235,44 @@ class SettingsStore(context: Context) {
         }
     }
 
-    /** A profile slot is considered free when it has neither a peer nor a participant link. */
+    /** The first slot no profile uses (M-39). */
     internal suspend fun findFirstFreeProfile(): Int? = dataStore.data.map { prefs ->
-        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).firstOrNull { p ->
-            val peer = prefs[getProfileKey(PEER, p)]
-            val link = prefs[getProfileKey(CSQTT_LINK, p)]
-            peer.isNullOrBlank() && link.isNullOrBlank()
-        }
-    }.first()
-
-    /** A slot is free for a new server only when it has no connection and no deploy IP. */
-    internal suspend fun findFirstFreeDeployProfile(): Int? = dataStore.data.map { prefs ->
-        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).firstOrNull { p ->
-            prefs[getProfileKey(PEER, p)].isNullOrBlank() &&
-                prefs[getProfileKey(CSQTT_LINK, p)].isNullOrBlank() &&
-                prefs[getProfileKey(DEPLOY_IP, p)].isNullOrBlank()
-        }
+        (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).firstOrNull { !profileInUse(prefs, it) }
     }.first()
 
     /**
-     * Wipes every connection key of a profile slot (hashes, token, modes, routing and app lists, subscription), making it
-     * free again; a VPS saved in the slot stays (M-40).
+     * Deletes a profile: every connection key (hashes, token, modes, routing and app lists, subscription, its VPS link),
+     * making the slot free again; its VPS record stays (M-40, M-41).
      */
     suspend fun clearProfile(profile: Int) {
+        dataStore.edit { prefs -> deleteProfileKeys(prefs, profile) }
+    }
+
+    /** Deletes a VPS record and every link to it; the profiles keep connecting (M-41). */
+    suspend fun deleteVps(index: Int) {
+        dataStore.edit { prefs -> deleteVpsKeys(prefs, index) }
+    }
+
+    /**
+     * Classic's «Удалить профиль»: the profile, and its VPS record when no other profile links it — classic has no VPS list
+     * to reach it from. The server itself is not touched.
+     */
+    suspend fun deleteProfileFromClassic(profile: Int) {
+        dataStore.edit { prefs -> deleteProfileWithLoneVps(prefs, profile) }
+    }
+
+    /** Whether [profile] is the only one linking its VPS record (the delete dialog says the SSH data go too). */
+    internal suspend fun profileHoldsOnlyLinkToVps(profile: Int): Boolean =
+        dataStore.data.map { prefs -> isOnlyLinkToVps(prefs, profile) }.first()
+
+    /** «Добавить профиль»: a free slot, cleared, with the current role; null when all 32 are in use. */
+    suspend fun addProfile(): Int? {
+        var added: Int? = null
         dataStore.edit { prefs ->
-            clearProfileKeys(prefs, profile, CONNECTION)
-            val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
-            if (active == profile) {
-                val fallback = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
-                    .firstOrNull { p ->
-                        p != profile && (
-                            !prefs[getProfileKey(PEER, p)].isNullOrBlank() ||
-                                !prefs[getProfileKey(CSQTT_LINK, p)].isNullOrBlank()
-                            )
-                    }
-                prefs[ACTIVE_PROFILE] = fallback ?: CsqttConstants.Profiles.MIN_INDEX
-            }
+            val linkMode = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] ?: false
+            added = addProfileKeys(prefs, linkMode)
         }
+        return added
     }
 
     /** Wipes all profile slots associated with the given subscription URL. */
@@ -1644,15 +1770,17 @@ class SettingsStore(context: Context) {
         }
     }
 
+    /** A deploy-form write: into the active profile's VPS record, created on the first write (B5b2). */
+    private suspend fun editVps(write: MutablePreferences.(vps: Int) -> Unit) {
+        dataStore.edit { prefs -> vpsForWrite(prefs, prefs[ACTIVE_PROFILE] ?: 0)?.let { prefs.write(it) } }
+    }
+
     /**
      * The deploy form's «Ручные порты». Off, a deploy uses 46000/46002; the profile's stored ports are what the tunnel
      * dials, so they change only when a deploy succeeds (saveDeployedServer), never on the switch (M-85).
      */
-    suspend fun saveManualPortsEnabled(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(MANUAL_PORTS_ENABLED, profile)] = enabled
-        }
+    suspend fun saveManualPortsEnabled(enabled: Boolean) = editVps { vps ->
+        this[getProfileKey(MANUAL_PORTS_ENABLED, vps)] = enabled
     }
 
     suspend fun saveVkHashesOnly(vkHashes: String) {
@@ -1662,95 +1790,59 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveSshKeysMode(enabled: Boolean) {
+    suspend fun saveSshKeysMode(enabled: Boolean) = editVps { vps ->
+        this[getProfileKey(SSH_KEYS_MODE, vps)] = enabled
+    }
+
+    /**
+     * After a successful deploy the profile that started it points at the server it installed or updated (its ports
+     * whatever they are, the synced [password]), only while it still links [vps] (applyDeployedServer). False when it no
+     * longer does: nothing was written.
+     */
+    suspend fun saveDeployedServer(profile: Int, vps: Int, host: String, peerPort: Int, webPort: Int, password: String?): Boolean {
+        var written = false
+        dataStore.edit { prefs -> written = applyDeployedServer(prefs, profile, vps, host, peerPort, webPort, password) }
+        return written
+    }
+
+    /** The active profile's VPS record, created now if it has none: a deploy captures it before it runs. */
+    internal suspend fun activeVpsForDeploy(): Int? {
+        var vps: Int? = null
+        editVps { vps = it }
+        return vps
+    }
+
+    suspend fun saveDockerInstall(enabled: Boolean) = editVps { vps ->
+        this[getProfileKey(DOCKER_INSTALL, vps)] = enabled
+    }
+
+    suspend fun regenerateDeploySecretPathUuid() = editVps { vps ->
+        this[getProfileKey(DEPLOY_SECRET_PATH_UUID, vps)] = UUID.randomUUID().toString()
+    }
+
+    /** A record without a panel secret path gets one; opening the tab of a profile without a record writes nothing. */
+    suspend fun ensureDeploySecretPathUuid() {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(SSH_KEYS_MODE, profile)] = enabled
+            val vps = linkedVps(prefs, prefs[ACTIVE_PROFILE] ?: 0) ?: return@edit
+            val key = getProfileKey(DEPLOY_SECRET_PATH_UUID, vps)
+            if (prefs[key].isNullOrBlank()) prefs[key] = UUID.randomUUID().toString()
         }
     }
 
-    // After a successful deploy the profile points at the server it installed or updated: its ports are written whatever
-    // they are (a profile that last deployed a second server on 46100 and now updates the one on 46000 must dial 46000),
-    // ports other than 46000/46002 turn "Ручные порты" on — the connection dials serverPeerPort only then — and an empty
-    // server address becomes the host. Nothing changes before a deploy succeeds.
-    suspend fun saveDeployedServer(profile: Int, host: String, peerPort: Int, webPort: Int) {
-        dataStore.edit { prefs ->
-            // the profile that started the deploy, even if another is active by the time it finished
-            if ((prefs[getProfileKey(PEER, profile)] ?: "").isBlank() && host.isNotBlank()) {
-                prefs[getProfileKey(PEER, profile)] = host
-            }
-            prefs[getProfileKey(SERVER_PEER_PORT, profile)] = peerPort
-            prefs[getProfileKey(SERVER_WEB_PORT, profile)] = webPort
-            if (peerPort != CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT || webPort != CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT) {
-                prefs[getProfileKey(MANUAL_PORTS_ENABLED, profile)] = true
-            }
-        }
+    suspend fun saveSshKeys(privateKey: String, keyPassphrase: String, certificate: String) = editVps { vps ->
+        putSecret(SSH_PRIVATE_KEY_ENCRYPTED, SSH_PRIVATE_KEY, privateKey, vps)
+        putSecret(SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_KEY_PASSPHRASE, keyPassphrase, vps)
+        putSecret(SSH_CERTIFICATE_ENCRYPTED, SSH_CERTIFICATE, certificate, vps)
     }
 
-    suspend fun saveDockerInstall(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(DOCKER_INSTALL, profile)] = enabled
-        }
-    }
-
-    suspend fun saveDeploySecretPath(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            val keyEnabled = getProfileKey(DEPLOY_SECRET_PATH_ENABLED, profile)
-            val keyUuid = getProfileKey(DEPLOY_SECRET_PATH_UUID, profile)
-            prefs[keyEnabled] = enabled
-            if (enabled && prefs[keyUuid].isNullOrBlank()) {
-                prefs[keyUuid] = UUID.randomUUID().toString()
-            }
-        }
-    }
-
-    suspend fun regenerateDeploySecretPathUuid(): String {
-        val newUuid = UUID.randomUUID().toString()
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(DEPLOY_SECRET_PATH_UUID, profile)] = newUuid
-        }
-        return newUuid
-    }
-
-    /** Persists a panel secret path that has already been applied and verified on the server. */
-    suspend fun saveDeploySecretPathUuid(uuid: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(DEPLOY_SECRET_PATH_UUID, profile)] = uuid
-        }
-    }
-
-    /** Removes every stored deploy setting and secret of the active profile; its connection, password and port stay. */
-    suspend fun clearDeployProfile() {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs -> clearProfileKeys(prefs, profile, VPS) }
-    }
-
-    suspend fun saveSshKeys(privateKey: String, keyPassphrase: String, certificate: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs.putSecret(SSH_PRIVATE_KEY_ENCRYPTED, SSH_PRIVATE_KEY, privateKey, profile)
-            prefs.putSecret(SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_KEY_PASSPHRASE, keyPassphrase, profile)
-            prefs.putSecret(SSH_CERTIFICATE_ENCRYPTED, SSH_CERTIFICATE, certificate, profile)
-        }
-    }
-
+    /** The form's ports with «Ручные порты» on: drafts on the VPS record; the profile's ports change only on success. */
     suspend fun savePorts(peer: Int, web: Int, sshPortStr: String) {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs ->
-            prefs[getProfileKey(SERVER_PEER_PORT, profile)] = peer
-            prefs[getProfileKey(SERVER_WEB_PORT, profile)] = web
-            prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] = sshPortStr
-        }
+        dataStore.edit { prefs -> putDeployDraftPorts(prefs, prefs[ACTIVE_PROFILE] ?: 0, peer, web, sshPortStr) }
     }
 
     /** The deploy form's SSH port alone, while «Ручные порты» is off (the profile's own ports stay). */
-    suspend fun saveDeploySshPort(sshPortStr: String) {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs -> prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] = sshPortStr }
+    suspend fun saveDeploySshPort(sshPortStr: String) = editVps { vps ->
+        this[getProfileKey(DEPLOY_SSH_PORT, vps)] = sshPortStr
     }
 
     suspend fun saveServerPeerPort(peer: Int) {
@@ -1761,74 +1853,16 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveDeployServerName(name: String) {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs ->
-            val trimmed = name.trim()
-            if (trimmed.isEmpty()) {
-                prefs.remove(getProfileKey(DEPLOY_SERVER_NAME, profile))
-            } else {
-                prefs[getProfileKey(DEPLOY_SERVER_NAME, profile)] = trimmed
+    suspend fun saveDeploy(ip: String) = editVps { vps ->
+        val previous = this[getProfileKey(DEPLOY_IP, vps)]
+        this[getProfileKey(DEPLOY_IP, vps)] = ip
+        if (previous != ip) {
+            this[getProfileKey(DEPLOY_SERVER_CONFIGURED, vps)] = false
+            for (key in listOf(DEPLOY_LAST_INSPECTION_AT, DEPLOY_LAST_INSPECTION_OK, DEPLOY_LAST_INSPECTION_ARCH,
+                DEPLOY_LAST_INSPECTION_SERVICE, DEPLOY_LAST_INSPECTION_VERSION, DEPLOY_LAST_INSPECTION_MESSAGE,
+                DEPLOY_LAST_INSPECTION_PANEL)) {
+                remove(getProfileKey(key, vps))
             }
-        }
-    }
-
-    suspend fun saveDeploy(ip: String) {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs ->
-            val previous = prefs[getProfileKey(DEPLOY_IP, profile)]
-            prefs[getProfileKey(DEPLOY_IP, profile)] = ip
-            if (previous != ip) {
-                prefs[getProfileKey(DEPLOY_SERVER_CONFIGURED, profile)] = false
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_AT, profile))
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_OK, profile))
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_ARCH, profile))
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_SERVICE, profile))
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_VERSION, profile))
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_MESSAGE, profile))
-                prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_PANEL, profile))
-            }
-        }
-    }
-
-    suspend fun saveServerConfigured(configured: Boolean) {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs ->
-            prefs[getProfileKey(DEPLOY_SERVER_CONFIGURED, profile)] = configured
-        }
-    }
-
-    /** Persists the last successful server inspection so the deploy screen remembers it after restart. */
-    suspend fun saveDeployInspection(
-        checkedAtMs: Long,
-        arch: String,
-        serviceStatus: String,
-        installedVersion: String,
-        message: String,
-        panelAvailable: Boolean,
-    ) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_AT, profile)] = checkedAtMs
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_OK, profile)] = true
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_ARCH, profile)] = arch
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_SERVICE, profile)] = serviceStatus
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_VERSION, profile)] = installedVersion
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_MESSAGE, profile)] = message
-            prefs[getProfileKey(DEPLOY_LAST_INSPECTION_PANEL, profile)] = panelAvailable
-        }
-    }
-
-    suspend fun clearDeployInspection() {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_AT, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_OK, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_ARCH, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_SERVICE, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_VERSION, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_MESSAGE, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_PANEL, profile))
         }
     }
 
@@ -1902,16 +1936,14 @@ class SettingsStore(context: Context) {
         return reset
     }
 
-    suspend fun saveDeploySecrets(mainPass: String, sshLogin: String, sshPass: String, webLogin: String, webPass: String) {
-        val profile = activeProfile.first()
-        dataStore.edit { prefs ->
-            prefs.putSecret(DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, mainPass, profile)
-            prefs[getProfileKey(DEPLOY_LOGIN, profile)] = sshLogin
-            prefs.putSecret(DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, sshPass, profile)
-            prefs[getProfileKey(DEPLOY_WEB_LOGIN, profile)] = webLogin
-            prefs.putSecret(DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, webPass, profile)
+    suspend fun saveDeploySecrets(mainPass: String, sshLogin: String, sshPass: String, webLogin: String, webPass: String) =
+        editVps { vps ->
+            putSecret(DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, mainPass, vps)
+            this[getProfileKey(DEPLOY_LOGIN, vps)] = sshLogin
+            putSecret(DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, sshPass, vps)
+            this[getProfileKey(DEPLOY_WEB_LOGIN, vps)] = webLogin
+            putSecret(DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, webPass, vps)
         }
-    }
 
     suspend fun saveVkAuthMode(mode: String) {
         dataStore.edit { prefs ->
@@ -2411,6 +2443,8 @@ class SettingsStore(context: Context) {
         val prefs = dataStore.data.first()
         // the ACTIVE profile's values (base keys are profile 0's), and secrets the way the store keeps them
         val p = prefs[ACTIVE_PROFILE] ?: 0
+        // its VPS record's (B5b2); a profile without one exports the defaults, as an empty slot did
+        val v = linkedVps(prefs, p) ?: -1
         val root = JSONObject()
         root.put("version", 1)
         root.put("exported_at", System.currentTimeMillis())
@@ -2419,7 +2453,7 @@ class SettingsStore(context: Context) {
             val tunnel = JSONObject()
             tunnel.put("peer", prefs[getProfileKey(PEER, p)] ?: "")
             tunnel.put("listen_port", prefs[getProfileKey(LISTEN_PORT, p)] ?: CsqttConstants.Network.DEFAULT_LOCAL_PORT)
-            tunnel.put("manual_ports_enabled", prefs[getProfileKey(MANUAL_PORTS_ENABLED, p)] ?: false)
+            tunnel.put("manual_ports_enabled", (if (v >= 0) prefs[getProfileKey(MANUAL_PORTS_ENABLED, v)] else null) ?: false)
             tunnel.put("server_peer_port", prefs[getProfileKey(SERVER_PEER_PORT, p)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT)
             tunnel.put("connection_password", readConnectionPasswordState(prefs, p).value)
             tunnel.put("obfs_mode", prefs[getProfileKey(OBFS_MODE, p)] ?: CsqttConstants.Tunnel.DEFAULT_OBFS_MODE)
@@ -2434,12 +2468,13 @@ class SettingsStore(context: Context) {
 
         if (includeDeploy) {
             val deploy = JSONObject()
-            deploy.put("deploy_ip", prefs[getProfileKey(DEPLOY_IP, p)] ?: "")
-            deploy.put("deploy_login", prefs[getProfileKey(DEPLOY_LOGIN, p)] ?: "")
-            deploy.put("deploy_ssh_port", prefs[getProfileKey(DEPLOY_SSH_PORT, p)] ?: "")
+            fun <T> record(key: Preferences.Key<T>): T? = if (v >= 0) prefs[getProfileKey(key, v)] else null
+            deploy.put("deploy_ip", record(DEPLOY_IP) ?: "")
+            deploy.put("deploy_login", record(DEPLOY_LOGIN) ?: "")
+            deploy.put("deploy_ssh_port", record(DEPLOY_SSH_PORT) ?: "")
             deploy.put("server_web_port", prefs[getProfileKey(SERVER_WEB_PORT, p)] ?: CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT)
-            deploy.put("docker_install", prefs[getProfileKey(DOCKER_INSTALL, p)] ?: true)
-            deploy.put("ssh_keys_mode", prefs[getProfileKey(SSH_KEYS_MODE, p)] ?: false)
+            deploy.put("docker_install", record(DOCKER_INSTALL) ?: true)
+            deploy.put("ssh_keys_mode", record(SSH_KEYS_MODE) ?: false)
             deploy.put("vk_hashes", prefs[getProfileKey(VK_HASHES, p)] ?: "")
             deploy.put("secondary_vk_hash", prefs[getProfileKey(SECONDARY_VK_HASH, p)] ?: "")
             deploy.put("vk_auth_mode", prefs[getProfileKey(VK_AUTH_MODE, p)] ?: CsqttConstants.VkAuth.MODE_CALLS)
@@ -2450,8 +2485,8 @@ class SettingsStore(context: Context) {
             deploy.put("extra_workers", prefs[getProfileKey(EXTRA_WORKERS, p)] ?: false)
             deploy.put("csqtt_link", prefs[getProfileKey(CSQTT_LINK, p)] ?: "")
             deploy.put("csqtt_link_mode", prefs[getProfileKey(CSQTT_LINK_MODE, p)] ?: false)
-            deploy.put("secret_path_enabled", prefs[getProfileKey(DEPLOY_SECRET_PATH_ENABLED, p)] ?: false)
-            deploy.put("secret_path_uuid", prefs[getProfileKey(DEPLOY_SECRET_PATH_UUID, p)] ?: "")
+            deploy.put("secret_path_enabled", record(DEPLOY_SECRET_PATH_ENABLED) ?: false)
+            deploy.put("secret_path_uuid", record(DEPLOY_SECRET_PATH_UUID) ?: "")
             root.put("deploy", deploy)
         }
 
@@ -2493,6 +2528,15 @@ class SettingsStore(context: Context) {
         return root.toString(2)
     }
 
+    /** The full backup (M-42): every profile, VPS record and app setting; server secrets only by [serverSecrets]. */
+    suspend fun exportBackupJson(serverSecrets: Boolean): String =
+        StoreBackup.encode(dataStore.data.first(), serverSecrets, secureStore::decrypt, System.currentTimeMillis())
+
+    /** Replaces every profile, VPS record and backed-up setting with the backup's; false if it is not a valid backup. */
+    suspend fun restoreBackupJson(json: String): Boolean = runCatching {
+        dataStore.edit { prefs -> StoreBackup.restore(prefs, json, secureStore::encrypt, secureStore::decrypt) }
+    }.isSuccess
+
     suspend fun importConfigJson(
         jsonString: String,
         includeTunnel: Boolean,
@@ -2505,11 +2549,16 @@ class SettingsStore(context: Context) {
             dataStore.edit { mutable ->
                 // into the ACTIVE profile (base keys are profile 0's), secrets the way the store keeps them
                 val p = mutable[ACTIVE_PROFILE] ?: 0
+                // deploy values go to the profile's VPS record (B5b2): a file naming a server creates one, others need one
+                val deployIp = root.optJSONObject("deploy")?.optString("deploy_ip").orEmpty()
+                val v = if (includeDeploy && deployIp.isNotBlank()) vpsForWrite(mutable, p) else linkedVps(mutable, p)
                 if (includeTunnel && root.has("tunnel")) {
                     val tunnel = root.getJSONObject("tunnel")
                     if (tunnel.has("peer")) mutable[getProfileKey(PEER, p)] = tunnel.getString("peer")
                     if (tunnel.has("listen_port")) mutable[getProfileKey(LISTEN_PORT, p)] = tunnel.getInt("listen_port")
-                    if (tunnel.has("manual_ports_enabled")) mutable[getProfileKey(MANUAL_PORTS_ENABLED, p)] = tunnel.getBoolean("manual_ports_enabled")
+                    if (tunnel.has("manual_ports_enabled") && v != null) {
+                        mutable[getProfileKey(MANUAL_PORTS_ENABLED, v)] = tunnel.getBoolean("manual_ports_enabled")
+                    }
                     if (tunnel.has("server_peer_port")) mutable[getProfileKey(SERVER_PEER_PORT, p)] = tunnel.getInt("server_peer_port")
                     // a blank password in an export is "none in that export" (older exports carried a stored one blank):
                     // it never wipes the password this profile has; nor does one that breaks the password rule
@@ -2532,12 +2581,16 @@ class SettingsStore(context: Context) {
                 }
                 if (includeDeploy && root.has("deploy")) {
                     val deploy = root.getJSONObject("deploy")
-                    if (deploy.has("deploy_ip")) mutable[getProfileKey(DEPLOY_IP, p)] = deploy.getString("deploy_ip")
-                    if (deploy.has("deploy_login")) mutable[getProfileKey(DEPLOY_LOGIN, p)] = deploy.getString("deploy_login")
-                    if (deploy.has("deploy_ssh_port")) mutable[getProfileKey(DEPLOY_SSH_PORT, p)] = deploy.getString("deploy_ssh_port")
+                    if (v != null) {
+                        if (deploy.has("deploy_ip")) mutable[getProfileKey(DEPLOY_IP, v)] = deploy.getString("deploy_ip")
+                        if (deploy.has("deploy_login")) mutable[getProfileKey(DEPLOY_LOGIN, v)] = deploy.getString("deploy_login")
+                        if (deploy.has("deploy_ssh_port")) mutable[getProfileKey(DEPLOY_SSH_PORT, v)] = deploy.getString("deploy_ssh_port")
+                        if (deploy.has("docker_install")) mutable[getProfileKey(DOCKER_INSTALL, v)] = deploy.getBoolean("docker_install")
+                        if (deploy.has("ssh_keys_mode")) mutable[getProfileKey(SSH_KEYS_MODE, v)] = deploy.getBoolean("ssh_keys_mode")
+                        if (deploy.has("secret_path_enabled")) mutable[getProfileKey(DEPLOY_SECRET_PATH_ENABLED, v)] = deploy.getBoolean("secret_path_enabled")
+                        if (deploy.has("secret_path_uuid")) mutable[getProfileKey(DEPLOY_SECRET_PATH_UUID, v)] = deploy.getString("secret_path_uuid")
+                    }
                     if (deploy.has("server_web_port")) mutable[getProfileKey(SERVER_WEB_PORT, p)] = deploy.getInt("server_web_port")
-                    if (deploy.has("docker_install")) mutable[getProfileKey(DOCKER_INSTALL, p)] = deploy.getBoolean("docker_install")
-                    if (deploy.has("ssh_keys_mode")) mutable[getProfileKey(SSH_KEYS_MODE, p)] = deploy.getBoolean("ssh_keys_mode")
                     if (deploy.has("vk_hashes")) mutable[getProfileKey(VK_HASHES, p)] = deploy.getString("vk_hashes")
                     if (deploy.has("secondary_vk_hash")) mutable[getProfileKey(SECONDARY_VK_HASH, p)] = deploy.getString("secondary_vk_hash")
                     if (deploy.has("vk_auth_mode")) mutable[getProfileKey(VK_AUTH_MODE, p)] = deploy.getString("vk_auth_mode")
@@ -2550,8 +2603,6 @@ class SettingsStore(context: Context) {
                     if (deploy.has("extra_workers")) mutable[getProfileKey(EXTRA_WORKERS, p)] = deploy.getBoolean("extra_workers")
                     if (deploy.has("csqtt_link")) mutable[getProfileKey(CSQTT_LINK, p)] = deploy.getString("csqtt_link")
                     if (deploy.has("csqtt_link_mode")) mutable[getProfileKey(CSQTT_LINK_MODE, p)] = deploy.getBoolean("csqtt_link_mode")
-                    if (deploy.has("secret_path_enabled")) mutable[getProfileKey(DEPLOY_SECRET_PATH_ENABLED, p)] = deploy.getBoolean("secret_path_enabled")
-                    if (deploy.has("secret_path_uuid")) mutable[getProfileKey(DEPLOY_SECRET_PATH_UUID, p)] = deploy.getString("secret_path_uuid")
                 }
                 if (includeExceptions && root.has("exceptions")) {
                     val exc = root.getJSONObject("exceptions")

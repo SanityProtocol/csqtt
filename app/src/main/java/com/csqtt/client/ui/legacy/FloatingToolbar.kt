@@ -87,14 +87,16 @@ fun FloatingToolbar(
         initialValue = BatterySaver.DEFAULT_PERCENT,
     )
     var showTurnSubnetsDialog by rememberSaveable { mutableStateOf(false) }
-    val profileNames by settingsStore.profileNames.collectAsStateWithLifecycle(
-        initialValue = emptyMap(),
-    )
+    val profileList by settingsStore.profileList.collectAsStateWithLifecycle(initialValue = emptyList())
     val participantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(
         initialValue = false,
     )
     var editingProfileIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     var editingProfileName by rememberSaveable { mutableStateOf("") }
+    // the delete confirmation inside the name dialog; true when the profile's VPS record (SSH data) goes with it
+    var confirmingDelete by rememberSaveable { mutableStateOf(false) }
+    var deleteTakesVps by rememberSaveable { mutableStateOf(false) }
+    val isDeploying by com.csqtt.client.DeployManager.isDeploying.collectAsStateWithLifecycle()
     val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val settingsIconTint = if (isDarkTheme) Color.White else Color.Black
 
@@ -280,21 +282,32 @@ fun FloatingToolbar(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                     )
 
-                    // participants switch profiles too (one per link), as in V2
+                    // participants switch profiles too (one per link), as in V2. The real profiles only, and a last item
+                    // that adds one (M-97)
                     CompactDropdownSetting(
                         title = "Профиль конфигурации",
                         selectedKey = activeProfile.toString(),
-                        options = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
-                            .map { profile -> profile.toString() to (profileNames[profile] ?: "Профиль $profile") },
+                        options = profileList.map { (profile, name) -> profile.toString() to name } +
+                            (ADD_PROFILE_KEY to "+ Добавить профиль"),
                         enabled = true,
-                        onSelected = { profile ->
-                            profile.toIntOrNull()?.let(onActiveProfileChange)
+                        onSelected = { key ->
+                            if (key == ADD_PROFILE_KEY) {
+                                scope.launch {
+                                    if (settingsStore.addProfile() == null) {
+                                        Toast.makeText(context, "Все 32 профиля заняты", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            } else {
+                                key.toIntOrNull()?.let(onActiveProfileChange)
+                            }
                         },
                         onItemEdit = { key ->
                             val p = key.toIntOrNull() ?: 0
                             editingProfileIndex = p
-                            editingProfileName = profileNames[p] ?: "Профиль $p"
+                            editingProfileName = profileList.firstOrNull { it.first == p }?.second.orEmpty()
+                            confirmingDelete = false
                         },
+                        itemEditable = { it != ADD_PROFILE_KEY },
                     )
 
                     CompactDropdownSetting(
@@ -420,7 +433,7 @@ fun FloatingToolbar(
 
     editingProfileIndex?.let { p ->
         Dialog(
-            onDismissRequest = { editingProfileIndex = null },
+            onDismissRequest = { editingProfileIndex = null; confirmingDelete = false },
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             Surface(
@@ -460,60 +473,114 @@ fun FloatingToolbar(
                         }
                     }
 
-                    OutlinedTextField(
-                        value = editingProfileName,
-                        onValueChange = { editingProfileName = it },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = CsqttShapes.Control,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                        ),
-                        trailingIcon = {
-                            IconButton(
-                                onClick = { editingProfileName = "" },
-                                modifier = Modifier.size(32.dp),
+                    if (confirmingDelete) {
+                        Text(
+                            text = if (deleteTakesVps) {
+                                "Профиль «$editingProfileName» и данные для входа на его сервер (SSH, пароли установки) " +
+                                    "будут удалены из приложения. Сам сервер и установка на нём не меняются."
+                            } else {
+                                "Профиль «$editingProfileName» будет удалён из приложения."
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { confirmingDelete = false },
+                                modifier = Modifier.weight(1f).height(CsqttSizes.ControlHeight),
+                                shape = CsqttShapes.Control,
+                            ) { Text("Отмена", maxLines = 1) }
+                            Button(
+                                onClick = {
+                                    val targetProfile = p
+                                    editingProfileIndex = null
+                                    confirmingDelete = false
+                                    scope.launch { settingsStore.deleteProfileFromClassic(targetProfile) }
+                                },
+                                modifier = Modifier.weight(1f).height(CsqttSizes.ControlHeight),
+                                shape = CsqttShapes.Control,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError,
+                                ),
+                            ) { Text("Удалить", maxLines = 1) }
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = editingProfileName,
+                            onValueChange = { editingProfileName = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = CsqttShapes.Control,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                            ),
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = { editingProfileName = "" },
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Очистить",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            },
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    when {
+                                        tunnelRunning || TunnelManager.starting.value -> Toast.makeText(
+                                            context, "Отключите туннель, чтобы удалить профиль", Toast.LENGTH_SHORT,
+                                        ).show()
+                                        isDeploying -> Toast.makeText(
+                                            context, "Дождитесь конца установки", Toast.LENGTH_SHORT,
+                                        ).show()
+                                        else -> scope.launch {
+                                            deleteTakesVps = settingsStore.profileHoldsOnlyLinkToVps(p)
+                                            confirmingDelete = true
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f).height(CsqttSizes.ControlHeight),
+                                shape = CsqttShapes.Control,
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                            ) { Text("Удалить", maxLines = 1) }
+                            Button(
+                                onClick = {
+                                    val targetProfile = p
+                                    val targetName = editingProfileName
+                                    editingProfileIndex = null
+                                    scope.launch {
+                                        settingsStore.saveProfileName(targetProfile, targetName)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f).height(CsqttSizes.ControlHeight),
+                                shape = CsqttShapes.Control,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                                ),
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Очистить",
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(20.dp),
+                                Text(
+                                    text = "Сохранить",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                        },
-                    )
-
-                    Button(
-                        onClick = {
-                            val targetProfile = p
-                            val targetName = editingProfileName
-                            editingProfileIndex = null
-                            scope.launch {
-                                settingsStore.saveProfileName(targetProfile, targetName)
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(CsqttSizes.ControlHeight),
-                        shape = CsqttShapes.Control,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
-                        ),
-                    ) {
-                        Text(
-                            text = "Сохранить",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        }
                     }
                 }
             }
         }
     }
 }
+
+private const val ADD_PROFILE_KEY = "add"

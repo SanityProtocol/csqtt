@@ -23,7 +23,8 @@ class StoreMigrationsTest {
     fun `an owner keeps its role, port and secrets, while the design key goes and 18 workers become 10`() {
         val (before, after) = migrate(Store253Snapshots.owner)
         assertEquals(
-            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version"),
+            // vps_ref: step 2 (B5b2) links its deploy data as record 0
+            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref"),
             changedKeys(before, after),
         )
         assertNull(after["ui_design"])
@@ -34,6 +35,7 @@ class StoreMigrationsTest {
         assertNull(after["csqtt_link_mode"])
         assertEquals(46100, after["server_peer_port"])
         assertEquals(true, after["manual_ports_enabled"])
+        assertEquals(0, after["vps_ref"])
     }
 
     @Test

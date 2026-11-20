@@ -237,6 +237,9 @@ internal fun DeployTab(
     val savedSshCertificate = savedSettings.sshCertificate
     val savedServerPeerPort = savedSettings.serverPeerPort
     val savedServerWebPort = savedSettings.serverWebPort
+    // the form's ports: with «Ручные порты» on its drafts (B5b2), which never move the ports the profile dials
+    val savedFormPeerPort = savedSettings.draftPeerPort?.takeIf { savedManualPorts } ?: savedServerPeerPort
+    val savedFormWebPort = savedSettings.draftWebPort?.takeIf { savedManualPorts } ?: savedServerWebPort
     val savedSecretPathEnabled = savedSettings.secretPathEnabled
     val savedSecretPathUuid = savedSettings.secretPathUuid
     val isDeploying by DeployManager.isDeploying.collectAsStateWithLifecycle()
@@ -249,8 +252,8 @@ internal fun DeployTab(
     var sshPort by rememberSaveable(savedSettings.profile) {
         mutableStateOf(savedSshPort.ifBlank { CsqttConstants.Network.DEFAULT_SSH_PORT.toString() })
     }
-    var peerPort by rememberSaveable(savedSettings.profile) { mutableStateOf(savedServerPeerPort.toString()) }
-    var webPort by rememberSaveable(savedSettings.profile) { mutableStateOf(savedServerWebPort.toString()) }
+    var peerPort by rememberSaveable(savedSettings.profile) { mutableStateOf(savedFormPeerPort.toString()) }
+    var webPort by rememberSaveable(savedSettings.profile) { mutableStateOf(savedFormWebPort.toString()) }
     var dockerInstall by rememberSaveable(savedSettings.profile) { mutableStateOf(savedDockerInstall) }
     var secretPathEnabled by rememberSaveable(savedSettings.profile) { mutableStateOf(savedSecretPathEnabled) }
     var generalEdited by rememberSaveable(savedSettings.profile) { mutableStateOf(false) }
@@ -283,11 +286,11 @@ internal fun DeployTab(
             sshPassword = savedPassword
         }
     }
-    LaunchedEffect(savedSettings.profile, savedSshPort, savedServerPeerPort, savedServerWebPort) {
+    LaunchedEffect(savedSettings.profile, savedSshPort, savedFormPeerPort, savedFormWebPort) {
         if (!portsEdited) {
             sshPort = savedSshPort.ifBlank { CsqttConstants.Network.DEFAULT_SSH_PORT.toString() }
-            peerPort = savedServerPeerPort.toString()
-            webPort = savedServerWebPort.toString()
+            peerPort = savedFormPeerPort.toString()
+            webPort = savedFormWebPort.toString()
         }
     }
     LaunchedEffect(savedSettings.profile, savedDockerInstall) {
@@ -295,7 +298,7 @@ internal fun DeployTab(
     }
     LaunchedEffect(savedSettings.profile, savedSecretPathUuid) {
         if (savedSecretPathUuid.isBlank()) {
-            settingsStore.regenerateDeploySecretPathUuid()
+            settingsStore.ensureDeploySecretPathUuid()
         }
     }
 
@@ -397,22 +400,20 @@ internal fun DeployTab(
         val deployCertificate = if (savedSshKeysMode) savedSshCertificate else ""
         val deployPassword = if (savedSshKeysMode) "" else sshPassword
         val effectiveMainPass = savedMainPass
-        scope.launch {
-            settingsStore.saveDeploy(host)
-            settingsStore.saveDeploySecrets(effectiveMainPass, sshLogin, sshPassword, savedWebLogin, savedWebPassword)
-            // the ports as the form holds them (they are the profile's connection port): the deployed server's ports
-            // are written by saveDeployedServer only once the deploy succeeded
-            if (savedManualPorts) {
-                settingsStore.savePorts(
-                    peerPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: effectivePeerPort,
-                    webPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: effectiveWebPort,
-                    effectiveSshPort.toString(),
-                )
-            }
-        }
+        val formPeerPort = peerPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: effectivePeerPort
+        val formWebPort = webPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: effectiveWebPort
+        val formSshLogin = sshLogin
+        val formSshPassword = sshPassword
         DeployManager.startDeploy()
         DeployManager.scope.launch {
             try {
+                // the form into the profile's VPS record, before the deploy and in this order: the record the deploy runs
+                // on is the one its end writes back through. The form's ports are drafts there (B5b2): the profile's
+                // ports change only when the deploy succeeded
+                settingsStore.saveDeploy(host)
+                settingsStore.saveDeploySecrets(effectiveMainPass, formSshLogin, formSshPassword, savedWebLogin, savedWebPassword)
+                if (savedManualPorts) settingsStore.savePorts(formPeerPort, formWebPort, effectiveSshPort.toString())
+                val deployVps = settingsStore.activeVpsForDeploy()
                 context.startForegroundService(Intent(context, TunnelService::class.java).apply { action = "DEPLOY_START" })
                 val success = performDeploy(
                     context = context,
@@ -434,11 +435,15 @@ internal fun DeployTab(
                     instance = instance,
                 )
                 if (success) {
-                    passwordToSynchronizeAfterDeploy(success, effectiveMainPass)?.let { mainPassword ->
-                        settingsStore.saveConnectionPassword(mainPassword, deployProfile)
+                    val syncedPassword = passwordToSynchronizeAfterDeploy(success, effectiveMainPass)
+                    val written = deployVps != null && settingsStore.saveDeployedServer(
+                        deployProfile, deployVps, host, effectivePeerPort, effectiveWebPort, syncedPassword,
+                    )
+                    if (!written) {
+                        TunnelManager.addDeployErrorLog("Профиль, с которого шла установка, удалён: подключение не записано")
+                    } else if (syncedPassword != null) {
                         TunnelManager.addDeployInfoLog("Пароль подключения синхронизирован с паролем сервера")
                     }
-                    settingsStore.saveDeployedServer(deployProfile, host, effectivePeerPort, effectiveWebPort)
                     // the port fields are the profile's connection port: they follow the server just deployed. Once a
                     // field was edited they stopped following the store and kept the old ports, and a later edit of any
                     // port field saved the old peer port back, moving the connection off the new server
@@ -568,7 +573,7 @@ internal fun DeployTab(
                     scope.launch { settingsStore.saveDockerInstall(action.enabled) }
                 }
                 DeployAction.RegenerateSecretPath -> scope.launch {
-                    val newUuid = settingsStore.regenerateDeploySecretPathUuid()
+                    settingsStore.regenerateDeploySecretPathUuid()
                     showDeployToast(context, "Секретный путь перегенерирован")
                 }
                 DeployAction.EditSshKeys -> showSshKeysDialog = true

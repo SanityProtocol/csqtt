@@ -43,11 +43,11 @@ class ProfileDeleteClearsAllKeysTest {
         val groups = SettingsStore.perProfileKeyGroups
         assertEquals(declaredPerProfile.values.toSet(), groups.keys)
         val vps = groups.filterValues { it == ProfileKeyGroup.VPS }.keys
-        assertTrue(vps.all { it.startsWith("deploy_") || it.startsWith("ssh_") || it in setOf("docker_install", "server_web_port", "manual_ports_enabled") })
+        assertTrue(vps.all { it.startsWith("deploy_") || it.startsWith("ssh_") || it in setOf("docker_install", "manual_ports_enabled") })
         // the connection keeps its password, peer port and every VK and routing key
         for (name in listOf("connection_password_local", "server_peer_port", "vk_hashes", "vk_access_token_encrypted",
             "vk_hash_mode", "vk_hash_check_results", "excluded_apps", "direct_domains_black", "link_hashes_removed",
-            "subscription_url", "dpi_split")) {
+            "subscription_url", "dpi_split", "server_web_port", "vps_ref")) {
             assertEquals(name, ProfileKeyGroup.CONNECTION, groups[name])
         }
     }
