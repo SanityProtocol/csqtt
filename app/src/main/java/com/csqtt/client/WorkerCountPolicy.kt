@@ -5,19 +5,15 @@ internal object WorkerCountPolicy {
         requested: Int,
         maximum: Int = CsqttConstants.Tunnel.MAX_WORKERS,
     ): Int {
-        if (requested <= 5) {
-            return 5
-        }
+        // what the core runs: whole groups of 10, at least one (5 used to be stored and ran as 10, M-84)
         val group = CsqttConstants.Tunnel.WORKERS_PER_GROUP
         val normalizedMaximum = (maximum.coerceAtLeast(group) / group) * group
-        val clamped = requested.coerceIn(5, normalizedMaximum)
-        val rounded = (clamped / group) * group
-        return rounded.coerceAtLeast(5)
+        return (requested.coerceIn(group, normalizedMaximum) / group) * group
     }
 
     fun maximumForHashes(hashCount: Int): Int {
         val count = hashCount.coerceIn(1, CsqttConstants.Tunnel.MAX_VK_HASHES)
-        return (count * CsqttConstants.Tunnel.WORKERS_PER_GROUP).coerceIn(5, CsqttConstants.Tunnel.MAX_WORKERS)
+        return (count * CsqttConstants.Tunnel.WORKERS_PER_GROUP).coerceAtMost(CsqttConstants.Tunnel.MAX_WORKERS)
     }
 
     fun maximumForSources(

@@ -56,7 +56,7 @@ internal fun TunnelWorkersControl(
     fixedWorkers: Int? = null,
 ) {
     val isFixed = fixedWorkers != null && fixedWorkers in 3..100
-    val minimum = 5f
+    val minimum = CsqttConstants.Tunnel.WORKERS_PER_GROUP.toFloat()
     val normalizedMaximum = roundToGroup(maximum, maximum)
     val normalizedValue = roundToGroup(value.coerceIn(minimum, normalizedMaximum), normalizedMaximum)
     var localValue by remember(normalizedValue, normalizedMaximum) {
@@ -248,10 +248,10 @@ internal fun CompactSteppedSlider(
     }
 }
 
-internal val WORKER_STEPS = floatArrayOf(5f, 10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f, 90f, 100f)
+internal val WORKER_STEPS = floatArrayOf(10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f, 90f, 100f)
 
 internal fun roundToGroup(value: Float, maxW: Float = 100f): Float {
     val allowed = WORKER_STEPS.filter { it <= maxW }
-    if (allowed.isEmpty()) return 5f
+    if (allowed.isEmpty()) return 10f
     return allowed.minByOrNull { kotlin.math.abs(it - value) } ?: allowed.first()
 }

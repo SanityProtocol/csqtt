@@ -42,6 +42,8 @@ object CsqttConstants {
         const val GROUPS_PER_VK_HASH = 1
         const val MAX_VK_HASHES = 7
         const val DEFAULT_MAX_WORKERS = 70
+        // a new profile's workers: one group, what the old stored default of 18 ran as (M-84)
+        const val DEFAULT_WORKERS = 10
         const val MAX_WORKERS = 100
     }
 

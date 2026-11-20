@@ -88,7 +88,7 @@ internal fun ConnectionTab(
     val peer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = "")
     val vkHashes by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
     val vkHashCheckResultsJson by settingsStore.vkHashCheckResults.collectAsStateWithLifecycle(initialValue = "{}")
-    val workersPerHash by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = 18)
+    val workersPerHash by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_WORKERS)
     val sni by settingsStore.sni.collectAsStateWithLifecycle(initialValue = "")
     val turnTransport by settingsStore.turnTransport.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT)
     val dpiSplit by settingsStore.dpiSplit.collectAsStateWithLifecycle(initialValue = DpiSplitMode.OFF)

@@ -179,7 +179,7 @@ class TunnelService : Service() {
                             newTunnelSessionId()
                         }
 
-                        val requestedWorkers = intent.getIntExtra("workers_per_hash", 18)
+                        val requestedWorkers = intent.getIntExtra("workers_per_hash", CsqttConstants.Tunnel.DEFAULT_WORKERS)
                         val requestedVkAuthMode = sanitizeVkAuthMode(intent.getStringExtra("vk_auth_mode"))
                         val intentHashes = intent.getStringExtra("vk_hashes") ?: ""
                         val hashesFromLink = intent.getBooleanExtra("vk_hashes_from_link", false)

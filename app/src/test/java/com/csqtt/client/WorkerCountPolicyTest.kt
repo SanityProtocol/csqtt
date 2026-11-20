@@ -19,6 +19,15 @@ class WorkerCountPolicyTest {
     }
 
     @Test
+    fun belowOneGroupIsOneGroupAsTheCoreRunsIt() {
+        // the core runs fewer than 10 as 10, and the old stored default 18 as 10 (M-84)
+        for (requested in listOf(Int.MIN_VALUE, 0, 3, 5, 9, 10, 18, 19)) {
+            assertEquals("requested $requested", 10, WorkerCountPolicy.normalize(requested))
+        }
+        assertEquals(CsqttConstants.Tunnel.WORKERS_PER_GROUP, CsqttConstants.Tunnel.DEFAULT_WORKERS)
+    }
+
+    @Test
     fun extraWorkersRaiseTheDefaultMaximum() {
         assertEquals(
             CsqttConstants.Tunnel.DEFAULT_MAX_WORKERS,
@@ -83,9 +92,9 @@ class WorkerCountPolicyTest {
     fun invalidPersistedCountsAreBoundedAndNeverCreatePartialCredentialGroup() {
         for (requested in -1_000..1_000) {
             val normalized = WorkerCountPolicy.normalize(requested)
-            assertTrue(normalized in 5..CsqttConstants.Tunnel.MAX_WORKERS)
-            assertEquals(0, normalized % 5)
-            assertTrue(normalized <= requested.coerceAtLeast(5) || normalized == 100)
+            assertTrue(normalized in 10..CsqttConstants.Tunnel.MAX_WORKERS)
+            assertEquals(0, normalized % CsqttConstants.Tunnel.WORKERS_PER_GROUP)
+            assertTrue(normalized <= requested.coerceAtLeast(10) || normalized == 100)
         }
     }
 

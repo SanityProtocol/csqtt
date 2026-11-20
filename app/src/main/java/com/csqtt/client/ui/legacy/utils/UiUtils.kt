@@ -129,7 +129,7 @@ private fun parseLegacyCsqttLink(body: String): CsqttLink? {
     val at = raw.lastIndexOf('@')
     if (at <= 0 || at >= raw.length - 1) return null
     val password = decodeQueryComponent(raw.substring(0, at)) ?: return null
-    if (password.isEmpty() || password.any(Char::isWhitespace)) return null
+    if (!isValidTunnelPassword(password)) return null
     val address = raw.substring(at + 1)
     val host: String
     val port: Int
@@ -170,7 +170,8 @@ private fun parseCsqttV2(uri: java.net.URI): CsqttLink? {
     if (!isUsableLinkHost(host)) return null
     val port = parameters["peer"]?.let(::decodeQueryComponent)?.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
     val password = parameters["password"]?.let(::decodeQueryComponent)?.trim().orEmpty()
-    if (password.isNotEmpty() && password.any(Char::isWhitespace)) return null
+    // one rule for every field (M-99): a password GETCONF cannot carry is refused at import, not at every connect
+    if (password.isNotEmpty() && !isValidTunnelPassword(password)) return null
     val hashes = parameters["hashes"]?.let(::parseLinkHashes) ?: emptyList()
     if (parameters.containsKey("hashes") && hashes.isEmpty()) return null
     val vkAccessToken = parameters["token"]?.let(::parseLinkVkAccessToken).orEmpty()

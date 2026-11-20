@@ -114,6 +114,8 @@ internal fun SettingsTabContent(
     val savedServerPeerPort by settingsStore.serverPeerPort.collectAsStateWithLifecycle(
         initialValue = SettingsStore.cachedServerPeerPort ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
     )
+    // the port the tunnel dials is never hidden: the field shows with the deploy form's «Ручные порты» or any other port
+    val showPeerPort = manualPortsEnabled || savedServerPeerPort != CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT
 
     val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
     val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS)
@@ -248,7 +250,7 @@ internal fun SettingsTabContent(
 
     val currentWorkers = roundToGroup(
         (savedWorkersPerHash ?: WORKERS_PER_GROUP).toFloat()
-            .coerceIn(5f, selectableMaxWorkers),
+            .coerceIn(10f, selectableMaxWorkers),
         selectableMaxWorkers,
     )
 
@@ -326,8 +328,8 @@ internal fun SettingsTabContent(
         }
     }
 
-    LaunchedEffect(activeProfile, manualPortsEnabled) {
-        if (!manualPortsEnabled) {
+    LaunchedEffect(activeProfile, showPeerPort) {
+        if (!showPeerPort) {
             peerPortSaveJob?.cancel()
             peerPortEdited = false
         }
@@ -443,7 +445,7 @@ internal fun SettingsTabContent(
         else -> filledHashCount > 0
     }
     val peerRequiredError = showRequiredFieldErrors && !participantMode && !isPeerValid
-    val peerPortRequiredError = showRequiredFieldErrors && !participantMode && manualPortsEnabled && !isPeerPortValid
+    val peerPortRequiredError = showRequiredFieldErrors && !participantMode && showPeerPort && !isPeerPortValid
     val linkRequiredError = showRequiredFieldErrors && participantMode && parsedCsqttLink == null
     val hashesRequiredError = showRequiredFieldErrors && !hashesReadyForTunnel
     val passwordRequiredError = showRequiredFieldErrors && !participantMode && connectionPassword.isBlank()
@@ -634,7 +636,7 @@ internal fun SettingsTabContent(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(bottom = 12.dp),
                     )
-                    if (manualPortsEnabled) {
+                    if (showPeerPort) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),

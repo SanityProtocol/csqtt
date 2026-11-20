@@ -2,6 +2,7 @@ package com.csqtt.client
 
 import android.content.Context
 import android.content.pm.PackageManager
+import androidx.datastore.core.DataMigration
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -20,8 +21,40 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.UUID
 import org.json.JSONObject
+import com.csqtt.client.ProfileKeyGroup.CONNECTION
+import com.csqtt.client.ProfileKeyGroup.VPS
+import com.csqtt.client.ui.legacy.utils.isValidTunnelPassword
+import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 
 private fun <T> Flow<T>.onIo(): Flow<T> = flowOn(Dispatchers.IO)
+
+/** What a per-profile key belongs to: the connection, or the VPS the deploy screen manages (M-40; B5b2 splits them). */
+internal enum class ProfileKeyGroup { CONNECTION, VPS }
+
+private class PerProfileKey(val make: (String) -> Preferences.Key<*>, val group: ProfileKeyGroup)
+
+/**
+ * Stores [value] encrypted under [encryptedKey] and drops the legacy plain copy. An unchanged value writes nothing: a fresh
+ * ciphertext would rewrite the store and wake every collector, the tunnel service's too (M-37).
+ */
+internal fun MutablePreferences.putSecretValue(
+    encryptedKey: Preferences.Key<String>,
+    legacyKey: Preferences.Key<String>,
+    value: String,
+    encrypt: (String) -> String,
+    decrypt: (String?) -> String?,
+) {
+    if (value.isBlank()) {
+        remove(encryptedKey)
+        remove(legacyKey)
+        return
+    }
+    val stored = this[encryptedKey]
+    if (stored == null || runCatching { decrypt(stored) }.getOrNull() != value) {
+        this[encryptedKey] = encrypt(value)
+    }
+    remove(legacyKey)
+}
 
 internal data class DeploySettingsSnapshot(
     val profile: Int = -1,
@@ -56,17 +89,6 @@ internal data class DeploySettingsSnapshot(
         get() = profile >= 0
 }
 
-/** A csqtt:// link materialized into profile fields on import. */
-internal data class ImportedConnectionSettings(
-    val host: String,
-    val port: Int,
-    val password: String,
-    val hashes: List<String> = emptyList(),
-    val vkAccessToken: String = "",
-    val power: Int? = null,
-    val name: String? = null,
-)
-
 internal data class TunnelAuthSnapshot(
     val profile: Int = -1,
     val connectionPassword: String = "",
@@ -84,7 +106,7 @@ internal data class ProfileConnectionSnapshot(
     val serverPeerPort: Int = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
     val connectionPassword: String = "",
     val connectionPasswordState: StoredSecretState = StoredSecretState.Missing,
-    val workersPerHash: Int = 18,
+    val workersPerHash: Int = CsqttConstants.Tunnel.DEFAULT_WORKERS,
     val extraWorkers: Boolean = false,
     val csqttLink: String = "",
     val csqttLinkMode: Boolean = false,
@@ -173,103 +195,123 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
 class SettingsStore(context: Context) {
     private val appContext = context.applicationContext
     companion object {
-        private val Context.dataStore by preferencesDataStore("settings")
+        // Every per-profile key, declared once with its type and its group (M-37, M-40). It is filled by the
+        // profileString/Int/Boolean/Long calls below, so it stays first in the companion.
+        private val perProfileKeys = linkedMapOf<String, PerProfileKey>()
+
+        private fun <T> perProfile(
+            key: Preferences.Key<T>,
+            make: (String) -> Preferences.Key<T>,
+            group: ProfileKeyGroup,
+        ): Preferences.Key<T> {
+            check(perProfileKeys.put(key.name, PerProfileKey(make, group)) == null) { "per-profile key ${key.name} twice" }
+            return key
+        }
+        private fun profileString(name: String, group: ProfileKeyGroup = CONNECTION) =
+            perProfile(stringPreferencesKey(name), ::stringPreferencesKey, group)
+        private fun profileInt(name: String, group: ProfileKeyGroup = CONNECTION) =
+            perProfile(intPreferencesKey(name), ::intPreferencesKey, group)
+        private fun profileBoolean(name: String, group: ProfileKeyGroup = CONNECTION) =
+            perProfile(booleanPreferencesKey(name), ::booleanPreferencesKey, group)
+        private fun profileLong(name: String, group: ProfileKeyGroup = CONNECTION) =
+            perProfile(longPreferencesKey(name), ::longPreferencesKey, group)
+
+        private val Context.dataStore by preferencesDataStore(
+            "settings",
+            produceMigrations = { listOf(StoreMigrations) },
+        )
         private val ACTIVE_PROFILE = intPreferencesKey("active_profile")
         private val SHOW_SYSTEM_APPS = booleanPreferencesKey("show_system_apps")
         private val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")
         private val INFO_ACTIONS_EXPANDED = booleanPreferencesKey("info_actions_expanded")
         private val INFO_PROJECT_EXPANDED = booleanPreferencesKey("info_project_expanded")
-        private val CSQTT_LINK = stringPreferencesKey("csqtt_link")
-        private val CSQTT_LINK_MODE = booleanPreferencesKey("csqtt_link_mode")
+        private val CSQTT_LINK = profileString("csqtt_link")
+        private val CSQTT_LINK_MODE = profileBoolean("csqtt_link_mode")
         // the owner's link hashes a participant took out of the connection (per profile, comma-separated)
-        private val LINK_HASHES_REMOVED = stringPreferencesKey("link_hashes_removed")
-        private val PARTICIPANT_SHOW_LOGS = booleanPreferencesKey("participant_show_logs")
-        private val SUBSCRIPTION_URL = stringPreferencesKey("subscription_url")
-        private val SUBSCRIPTION_TITLE = stringPreferencesKey("subscription_title")
-        private val SUBSCRIPTION_UUID = stringPreferencesKey("subscription_uuid")
-        private val SUBSCRIPTION_NODE = stringPreferencesKey("subscription_node")
-        private val SUBSCRIPTION_POWER = intPreferencesKey("subscription_power")
+        private val LINK_HASHES_REMOVED = profileString("link_hashes_removed")
+        private val PARTICIPANT_SHOW_LOGS = profileBoolean("participant_show_logs")
+        private val SUBSCRIPTION_URL = profileString("subscription_url")
+        private val SUBSCRIPTION_TITLE = profileString("subscription_title")
+        private val SUBSCRIPTION_UUID = profileString("subscription_uuid")
+        private val SUBSCRIPTION_NODE = profileString("subscription_node")
+        private val SUBSCRIPTION_POWER = profileInt("subscription_power")
         private val SUBSCRIPTION_META = stringPreferencesKey("subscription_meta_v1")
 
-        private val PEER = stringPreferencesKey("peer")
-        private val VK_HASHES = stringPreferencesKey("vk_hashes")
-        private val SECONDARY_VK_HASH = stringPreferencesKey("secondary_vk_hash")
-        private val WORKERS_PER_HASH = intPreferencesKey("workers_per_hash")
-        private val PROTOCOL = stringPreferencesKey("protocol")
-        private val LISTEN_PORT = intPreferencesKey("listen_port")
-        private val MANUAL_PORTS_ENABLED = booleanPreferencesKey("manual_ports_enabled")
-        private val SERVER_PEER_PORT = intPreferencesKey("server_peer_port")
-        private val SNI = stringPreferencesKey("sni")
-        private val NO_DNS = booleanPreferencesKey("no_dns")
-        private val CUSTOM_TURN_IPS = stringPreferencesKey("custom_turn_ips")
-        private val SELECTED_TURN_SUBNET = stringPreferencesKey("selected_turn_subnet")
-        private val TURN_SUBNET_IP_LIMIT = stringPreferencesKey("turn_subnet_ip_limit")
+        private val PEER = profileString("peer")
+        private val VK_HASHES = profileString("vk_hashes")
+        private val SECONDARY_VK_HASH = profileString("secondary_vk_hash")
+        private val WORKERS_PER_HASH = profileInt("workers_per_hash")
+        private val PROTOCOL = profileString("protocol")
+        private val LISTEN_PORT = profileInt("listen_port")
+        private val MANUAL_PORTS_ENABLED = profileBoolean("manual_ports_enabled", VPS)
+        private val SERVER_PEER_PORT = profileInt("server_peer_port")
+        private val SNI = profileString("sni")
+        private val NO_DNS = profileBoolean("no_dns")
+        private val CUSTOM_TURN_IPS = profileString("custom_turn_ips")
+        private val SELECTED_TURN_SUBNET = profileString("selected_turn_subnet")
+        private val TURN_SUBNET_IP_LIMIT = profileString("turn_subnet_ip_limit")
 
-        private val USER_AGENT = stringPreferencesKey("user_agent")
-        private val PROFILE_NAME = stringPreferencesKey("profile_name")
+        private val PROFILE_NAME = profileString("profile_name")
 
-        private val DEPLOY_IP = stringPreferencesKey("deploy_ip")
-        private val DEPLOY_SERVER_NAME = stringPreferencesKey("deploy_server_name")
+        private val DEPLOY_IP = profileString("deploy_ip", VPS)
+        private val DEPLOY_SERVER_NAME = profileString("deploy_server_name", VPS)
         private val DEPLOY_PROFILE_NAMES_CLEANED = booleanPreferencesKey("deploy_profile_names_cleaned_v2")
         private val DEFAULT_ROLE_DECIDED = booleanPreferencesKey("default_role_decided")
-        private val DEPLOY_LOGIN = stringPreferencesKey("deploy_login")
-        private val DEPLOY_PASSWORD = stringPreferencesKey("deploy_password")
-        private val DEPLOY_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_password_encrypted")
-        private val DEPLOY_SSH_PORT = stringPreferencesKey("deploy_ssh_port")
-        private val SSH_KEYS_MODE = booleanPreferencesKey("ssh_keys_mode")
-        private val DOCKER_INSTALL = booleanPreferencesKey("docker_install")
-private val DEPLOY_SECRET_PATH_ENABLED = booleanPreferencesKey("deploy_secret_path_enabled")
-private val DEPLOY_SECRET_PATH_UUID = stringPreferencesKey("deploy_secret_path_uuid")
-private val DEPLOY_SERVER_CONFIGURED = booleanPreferencesKey("deploy_server_configured")
-private val DEPLOY_LAST_INSPECTION_AT = longPreferencesKey("deploy_last_inspection_at")
-private val DEPLOY_LAST_INSPECTION_OK = booleanPreferencesKey("deploy_last_inspection_ok")
-private val DEPLOY_LAST_INSPECTION_ARCH = stringPreferencesKey("deploy_last_inspection_arch")
-private val DEPLOY_LAST_INSPECTION_SERVICE = stringPreferencesKey("deploy_last_inspection_service")
-private val DEPLOY_LAST_INSPECTION_VERSION = stringPreferencesKey("deploy_last_inspection_version")
-private val DEPLOY_LAST_INSPECTION_MESSAGE = stringPreferencesKey("deploy_last_inspection_message")
-private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_inspection_panel")
-        private val SSH_PRIVATE_KEY = stringPreferencesKey("ssh_private_key")
-        private val SSH_PRIVATE_KEY_ENCRYPTED = stringPreferencesKey("ssh_private_key_encrypted")
-        private val SSH_KEY_PASSPHRASE = stringPreferencesKey("ssh_key_passphrase")
-        private val SSH_KEY_PASSPHRASE_ENCRYPTED = stringPreferencesKey("ssh_key_passphrase_encrypted")
-        private val SSH_CERTIFICATE = stringPreferencesKey("ssh_certificate")
-        private val SSH_CERTIFICATE_ENCRYPTED = stringPreferencesKey("ssh_certificate_encrypted")
-        private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
-        private val WHITELIST_APPS = stringPreferencesKey("whitelist_apps")
+        private val DEPLOY_LOGIN = profileString("deploy_login", VPS)
+        private val DEPLOY_PASSWORD = profileString("deploy_password", VPS)
+        private val DEPLOY_PASSWORD_ENCRYPTED = profileString("deploy_password_encrypted", VPS)
+        private val DEPLOY_SSH_PORT = profileString("deploy_ssh_port", VPS)
+        private val SSH_KEYS_MODE = profileBoolean("ssh_keys_mode", VPS)
+        private val DOCKER_INSTALL = profileBoolean("docker_install", VPS)
+        private val DEPLOY_SECRET_PATH_ENABLED = profileBoolean("deploy_secret_path_enabled", VPS)
+        private val DEPLOY_SECRET_PATH_UUID = profileString("deploy_secret_path_uuid", VPS)
+        private val DEPLOY_SERVER_CONFIGURED = profileBoolean("deploy_server_configured", VPS)
+        private val DEPLOY_LAST_INSPECTION_AT = profileLong("deploy_last_inspection_at", VPS)
+        private val DEPLOY_LAST_INSPECTION_OK = profileBoolean("deploy_last_inspection_ok", VPS)
+        private val DEPLOY_LAST_INSPECTION_ARCH = profileString("deploy_last_inspection_arch", VPS)
+        private val DEPLOY_LAST_INSPECTION_SERVICE = profileString("deploy_last_inspection_service", VPS)
+        private val DEPLOY_LAST_INSPECTION_VERSION = profileString("deploy_last_inspection_version", VPS)
+        private val DEPLOY_LAST_INSPECTION_MESSAGE = profileString("deploy_last_inspection_message", VPS)
+        private val DEPLOY_LAST_INSPECTION_PANEL = profileBoolean("deploy_last_inspection_panel", VPS)
+        private val SSH_PRIVATE_KEY = profileString("ssh_private_key", VPS)
+        private val SSH_PRIVATE_KEY_ENCRYPTED = profileString("ssh_private_key_encrypted", VPS)
+        private val SSH_KEY_PASSPHRASE = profileString("ssh_key_passphrase", VPS)
+        private val SSH_KEY_PASSPHRASE_ENCRYPTED = profileString("ssh_key_passphrase_encrypted", VPS)
+        private val SSH_CERTIFICATE = profileString("ssh_certificate", VPS)
+        private val SSH_CERTIFICATE_ENCRYPTED = profileString("ssh_certificate_encrypted", VPS)
+        private val EXCLUDED_APPS = profileString("excluded_apps")
+        private val WHITELIST_APPS = profileString("whitelist_apps")
 
         private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
 
-        private val CONNECTION_PASSWORD = stringPreferencesKey("connection_password")
-        private val CONNECTION_PASSWORD_ENCRYPTED = stringPreferencesKey("connection_password_encrypted")
-        private val CONNECTION_PASSWORD_LOCAL = stringPreferencesKey("connection_password_local")
-        private val DEPLOY_MAIN_PASSWORD = stringPreferencesKey("deploy_main_password")
-        private val DEPLOY_MAIN_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_main_password_encrypted")
-        private val DEPLOY_WEB_LOGIN = stringPreferencesKey("deploy_web_login")
-        private val DEPLOY_WEB_PASSWORD = stringPreferencesKey("deploy_web_password")
-        private val DEPLOY_WEB_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_web_password_encrypted")
-        private val SERVER_WEB_PORT = intPreferencesKey("server_web_port")
+        private val CONNECTION_PASSWORD = profileString("connection_password")
+        private val CONNECTION_PASSWORD_ENCRYPTED = profileString("connection_password_encrypted")
+        private val CONNECTION_PASSWORD_LOCAL = profileString("connection_password_local")
+        private val DEPLOY_MAIN_PASSWORD = profileString("deploy_main_password", VPS)
+        private val DEPLOY_MAIN_PASSWORD_ENCRYPTED = profileString("deploy_main_password_encrypted", VPS)
+        private val DEPLOY_WEB_LOGIN = profileString("deploy_web_login", VPS)
+        private val DEPLOY_WEB_PASSWORD = profileString("deploy_web_password", VPS)
+        private val DEPLOY_WEB_PASSWORD_ENCRYPTED = profileString("deploy_web_password_encrypted", VPS)
+        private val SERVER_WEB_PORT = profileInt("server_web_port", VPS)
 
-        private val PROXY_MODE = stringPreferencesKey("proxy_mode") 
-        private val PROXY_HOST = stringPreferencesKey("proxy_host")
-        private val PROXY_PORT = intPreferencesKey("proxy_port")
 
-        private val VK_AUTH_MODE = stringPreferencesKey("vk_auth_mode") 
-        private val OBFS_MODE = stringPreferencesKey("obfs_mode") 
-        private val TURN_TRANSPORT = stringPreferencesKey("turn_transport")
-        private val DPI_SPLIT = stringPreferencesKey("dpi_split")
-        private val SRTP_MODE = stringPreferencesKey("srtp_mode")
-        private val CAPTCHA_MODE = stringPreferencesKey("captcha_mode")
-        private val CAPTCHA_SOLVE_METHOD = stringPreferencesKey("captcha_solve_method") 
-        private val CAPTCHA_WBV_SOLVE_METHOD = stringPreferencesKey("captcha_wbv_solve_method") 
+        private val VK_AUTH_MODE = profileString("vk_auth_mode")
+        private val OBFS_MODE = profileString("obfs_mode")
+        private val TURN_TRANSPORT = profileString("turn_transport")
+        private val DPI_SPLIT = profileString("dpi_split")
+        private val SRTP_MODE = profileString("srtp_mode")
+        private val CAPTCHA_MODE = profileString("captcha_mode")
+        private val CAPTCHA_SOLVE_METHOD = profileString("captcha_solve_method")
+        private val CAPTCHA_WBV_SOLVE_METHOD = profileString("captcha_wbv_solve_method")
 
-        private val VK_HASH_MODE = stringPreferencesKey("vk_hash_mode")
-        private val VK_ACCESS_TOKEN = stringPreferencesKey("vk_access_token")
-        private val VK_ACCESS_TOKEN_ENCRYPTED = stringPreferencesKey("vk_access_token_encrypted")
-        private val VK_ACCESS_TOKEN_USER_ID = stringPreferencesKey("vk_access_token_user_id")
+        private val VK_HASH_MODE = profileString("vk_hash_mode")
+        private val VK_ACCESS_TOKEN = profileString("vk_access_token")
+        private val VK_ACCESS_TOKEN_ENCRYPTED = profileString("vk_access_token_encrypted")
+        private val VK_ACCESS_TOKEN_USER_ID = profileString("vk_access_token_user_id")
 
-        private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
+        private val IS_WHITELIST = profileBoolean("is_whitelist")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
-        private val EXTRA_WORKERS = booleanPreferencesKey("extra_workers")
+        private val EXTRA_WORKERS = profileBoolean("extra_workers")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
         private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
         private val BATTERY_OPTIMIZATION_PROMPT_HANDLED =
@@ -277,25 +319,25 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
         private val BATTERY_SAVER_MODE = stringPreferencesKey("battery_saver_mode")
         private val BATTERY_SAVER_PERCENT = intPreferencesKey("battery_saver_percent")
-        private val DOMAIN_ROUTING_ENABLED = booleanPreferencesKey("domain_routing_enabled")
-        private val DOMAIN_IS_WHITELIST = booleanPreferencesKey("domain_is_whitelist")
-        private val EXCLUDE_RU_ZONES_ENABLED = booleanPreferencesKey("exclude_ru_zones_enabled")
-        private val TEMPLATE_DOMAINS_ENABLED = booleanPreferencesKey("template_domains_enabled")
-        private val DIRECT_DOMAINS = stringPreferencesKey("direct_domains")
-        private val DIRECT_DOMAINS_BLACK = stringPreferencesKey("direct_domains_black")
-        private val DIRECT_DOMAINS_WHITE = stringPreferencesKey("direct_domains_white")
+        private val DOMAIN_ROUTING_ENABLED = profileBoolean("domain_routing_enabled")
+        private val DOMAIN_IS_WHITELIST = profileBoolean("domain_is_whitelist")
+        private val EXCLUDE_RU_ZONES_ENABLED = profileBoolean("exclude_ru_zones_enabled")
+        private val TEMPLATE_DOMAINS_ENABLED = profileBoolean("template_domains_enabled")
+        private val DIRECT_DOMAINS = profileString("direct_domains")
+        private val DIRECT_DOMAINS_BLACK = profileString("direct_domains_black")
+        private val DIRECT_DOMAINS_WHITE = profileString("direct_domains_white")
 
-        private val IP_ROUTING_ENABLED = booleanPreferencesKey("ip_routing_enabled")
-        private val IP_IS_WHITELIST = booleanPreferencesKey("ip_is_whitelist")
-        private val DIRECT_IPS_BLACK = stringPreferencesKey("direct_ips_black")
-        private val DIRECT_IPS_WHITE = stringPreferencesKey("direct_ips_white")
+        private val IP_ROUTING_ENABLED = profileBoolean("ip_routing_enabled")
+        private val IP_IS_WHITELIST = profileBoolean("ip_is_whitelist")
+        private val DIRECT_IPS_BLACK = profileString("direct_ips_black")
+        private val DIRECT_IPS_WHITE = profileString("direct_ips_white")
 
-        private val THEME_MODE = stringPreferencesKey("theme_mode") 
+        private val THEME_MODE = stringPreferencesKey("theme_mode")
         private val IS_DYNAMIC_COLOR = booleanPreferencesKey("is_dynamic_color")
         private val THEME_PALETTE = stringPreferencesKey("theme_palette")
 
-        private val SELECTED_FINGERPRINT = stringPreferencesKey("selected_fingerprint")
-        private val ACTIVE_CLIENT_IDS = stringPreferencesKey("active_client_ids")
+        private val SELECTED_FINGERPRINT = profileString("selected_fingerprint")
+        private val ACTIVE_CLIENT_IDS = profileString("active_client_ids")
 
         private val UPDATE_LAST_CHECK_AT = longPreferencesKey("update_last_check_at")
         private val UPDATE_LATEST_VERSION = stringPreferencesKey("update_latest_version")
@@ -310,7 +352,7 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
 
         private val CLIENT_ID_CHECK_RESULTS = stringPreferencesKey("client_id_check_results")
-        private val VK_HASH_CHECK_RESULTS = stringPreferencesKey("vk_hash_check_results")
+        private val VK_HASH_CHECK_RESULTS = profileString("vk_hash_check_results")
         private val CONNECTION_GENERATION = longPreferencesKey("connection_generation")
         private val TUNNEL_LAST_DIAGNOSTIC = stringPreferencesKey("tunnel_last_diagnostic")
         private val TUNNEL_LAST_DIAGNOSTIC_AT = longPreferencesKey("tunnel_last_diagnostic_at")
@@ -342,9 +384,6 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
 
         @Volatile
         internal var cachedServerPeerPort: Int? = null
-
-        @Volatile
-        internal var cachedExtraWorkers: Boolean? = null
 
         @Volatile
         internal var cachedCustomTurnIps: String? = null
@@ -392,20 +431,126 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         internal var cachedDirectIpsWhite: String? = null
 
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
-        private val migrationsStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
+        internal const val STORE_SCHEMA = 1
+
+        /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
+        private object StoreMigrations : DataMigration<Preferences> {
+            override suspend fun shouldMigrate(currentData: Preferences): Boolean =
+                (currentData[STORE_SCHEMA_VERSION] ?: 0) < STORE_SCHEMA
+
+            override suspend fun migrate(currentData: Preferences): Preferences =
+                currentData.toMutablePreferences().also(::migrateStore).toPreferences()
+
+            override suspend fun cleanUp() = Unit
+        }
+
+        /** For the instrumented upgrade test, which opens a DataStore of its own on a 2.5.3 file. */
+        internal val storeMigrations: DataMigration<Preferences> get() = StoreMigrations
+
+        /**
+         * The numbered store steps (M-38's rules): each runs once, while the stored version is below it, and derives from
+         * the data it finds. A fresh install runs every step on an empty store.
+         */
+        internal fun migrateStore(prefs: MutablePreferences) {
+            val from = prefs[STORE_SCHEMA_VERSION] ?: 0
+            if (from >= STORE_SCHEMA) return
+            // a step that throws would fail every read of the store, so a value it cannot handle only skips that step
+            fun step(action: () -> Unit) = runCatching(action)
+            if (from < 1) {
+                // 2.6.0. «Экстра потоки» needs no step: 2.5.3 wrote false at every start, so no choice is left to recover
+                prefs.remove(stringPreferencesKey("ui_design"))
+                step { decideDefaultRole(prefs) }
+                for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
+                    step { normalizeVkModes(prefs, profile) }
+                    step { dropLinkHashesFromOwn(prefs, profile) }
+                    step {
+                        // what the core runs: 18 and 5 ran as 10
+                        val key = getProfileKey(WORKERS_PER_HASH, profile)
+                        prefs[key]?.let { prefs[key] = WorkerCountPolicy.normalize(it) }
+                    }
+                }
+            }
+            prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
+        }
+
+        /**
+         * A fresh install starts as «Участник»: most people get a link or a QR code, not a server. Decided once, under its
+         * own flag, by what is stored: an install that holds a connection, a link, a subscription, hashes, a deployed
+         * server or a chosen role keeps its role (a 2.5.3 install has the flag, so its link modes stay as they are).
+         */
+        private fun decideDefaultRole(prefs: MutablePreferences) {
+            if (prefs[DEFAULT_ROLE_DECIDED] == true) return
+            prefs[DEFAULT_ROLE_DECIDED] = true
+            val configured = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).any { profile ->
+                listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, VK_HASHES, DEPLOY_IP, CONNECTION_PASSWORD,
+                    CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD_LOCAL)
+                    .any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
+                    prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != null
+            }
+            if (!configured) {
+                prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] = true
+            }
+        }
+
+        /** A stored mode becomes the value its reader already maps it to («auto» was auto_api), so nothing behaves otherwise. */
+        private fun normalizeVkModes(prefs: MutablePreferences, profile: Int) {
+            val hashKey = getProfileKey(VK_HASH_MODE, profile)
+            prefs[hashKey]?.let { mode ->
+                prefs[hashKey] = when (mode) {
+                    "auto", CsqttConstants.VkAutoHash.MODE_AUTO_API -> CsqttConstants.VkAutoHash.MODE_AUTO_API
+                    CsqttConstants.VkAutoHash.MODE_AUTO_JS -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
+                    else -> CsqttConstants.VkAutoHash.MODE_MANUAL
+                }
+            }
+            val authKey = getProfileKey(VK_AUTH_MODE, profile)
+            prefs[authKey]?.let { mode ->
+                prefs[authKey] = when (mode) {
+                    CsqttConstants.VkAuth.MODE_CAPTCHA -> CsqttConstants.VkAuth.MODE_CAPTCHA
+                    CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_AUTO_JS
+                    else -> CsqttConstants.VkAuth.MODE_CALLS
+                }
+            }
+        }
+
+        /**
+         * A participant's own hashes never repeat the link's: those come from the link, minus the ones taken out, and a
+         * copy in the own list kept a taken-out owner hash in use (older imports stored the owner's hashes as the
+         * participant's own, plan §13.2 item 2).
+         */
+        private fun dropLinkHashesFromOwn(prefs: MutablePreferences, profile: Int) {
+            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) return
+            val linkHashes = parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty())?.hashes.orEmpty()
+            if (linkHashes.isEmpty()) return
+            val key = getProfileKey(VK_HASHES, profile)
+            val own = prefs[key]?.split(Regex("[,\\s\\n]+"))?.map(String::trim)?.filter(String::isNotEmpty) ?: return
+            val kept = own.filterNot { it in linkHashes }
+            if (kept.size == own.size) return
+            if (kept.isEmpty()) prefs.remove(key) else prefs[key] = kept.joinToString(",")
+        }
 
         private fun <T> getProfileKey(baseKey: Preferences.Key<T>, profile: Int): Preferences.Key<T> {
             if (profile == 0) return baseKey
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
-            return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, EXCLUDED_APPS, WHITELIST_APPS, DIRECT_DOMAINS, DIRECT_DOMAINS_BLACK, DIRECT_DOMAINS_WHITE, DIRECT_IPS_BLACK, DIRECT_IPS_WHITE, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD_LOCAL, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_WEB_LOGIN, DEPLOY_WEB_PASSWORD, DEPLOY_WEB_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, SRTP_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, SSH_PRIVATE_KEY, SSH_PRIVATE_KEY_ENCRYPTED, SSH_KEY_PASSPHRASE, SSH_KEY_PASSPHRASE_ENCRYPTED, SSH_CERTIFICATE, SSH_CERTIFICATE_ENCRYPTED, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET, SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE -> stringPreferencesKey(newName) as Preferences.Key<T>
-                WORKERS_PER_HASH, LISTEN_PORT, SERVER_PEER_PORT, PROXY_PORT, SERVER_WEB_PORT, SUBSCRIPTION_POWER -> intPreferencesKey(newName) as Preferences.Key<T>
-                MANUAL_PORTS_ENABLED, NO_DNS, IS_WHITELIST, CSQTT_LINK_MODE, DETAILED_LOGS, SSH_KEYS_MODE, DOCKER_INSTALL, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED, DOMAIN_ROUTING_ENABLED, DOMAIN_IS_WHITELIST, EXCLUDE_RU_ZONES_ENABLED, TEMPLATE_DOMAINS_ENABLED, IP_ROUTING_ENABLED, IP_IS_WHITELIST, DEPLOY_SERVER_CONFIGURED -> booleanPreferencesKey(newName) as Preferences.Key<T>
-                CONNECTION_GENERATION -> longPreferencesKey(newName) as Preferences.Key<T>
-                else -> stringPreferencesKey(newName) as Preferences.Key<T>
+            val make = perProfileKeys[baseKey.name]?.make as ((String) -> Preferences.Key<T>)?
+            // a key not declared per profile is a mistake ProfileDeleteClearsAllKeysTest catches; the string key is 2.5.3's fallback
+            @Suppress("UNCHECKED_CAST")
+            return make?.invoke(newName) ?: stringPreferencesKey(newName) as Preferences.Key<T>
+        }
+
+        /** The per-profile key names and their groups, for the tests. */
+        internal val perProfileKeyGroups: Map<String, ProfileKeyGroup>
+            get() = perProfileKeys.mapValues { it.value.group }
+
+        /** Removes every key of [group] from [profile]'s slot: profile 0's are the base keys. */
+        internal fun clearProfileKeys(prefs: MutablePreferences, profile: Int, group: ProfileKeyGroup) {
+            for ((name, key) in perProfileKeys) {
+                if (key.group == group) prefs.remove(key.make(if (profile == 0) name else "${name}_$profile"))
             }
         }
+
     }
 
     private val dataStore = appContext.dataStore
@@ -462,7 +607,7 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
     val workersMaximum: Flow<Int> = dataStore.data.map { prefs -> workersMaximum(prefs) }
     val workersPerHash: Flow<Int> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
-        val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: 18
+        val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS
         WorkerCountPolicy.normalize(current, maximum = workersMaximum(prefs))
     }
     val protocol: Flow<String> = dataStore.data.map { prefs ->
@@ -834,7 +979,7 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
                 connectionPassword = secret.value,
                 connectionPasswordState = secret.state,
                 workersPerHash = WorkerCountPolicy.normalize(
-                    prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: 18,
+                    prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS,
                 ),
                 extraWorkers = prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false,
                 csqttLink = prefs[getProfileKey(CSQTT_LINK, profile)] ?: "",
@@ -880,66 +1025,6 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         dataStore.edit { prefs ->
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = enabled
         }
-    }
-
-    /**
-     * Materializes an imported csqtt:// link into profile fields: peer/port, tunnel password,
-     * VK hashes or token, worker limit and name. Participant mode is disabled and the raw link
-     * plus subscription metadata are removed so the profile connects as a regular owner profile.
-     */
-    /** False, and nothing written, without a host, a valid port or a tunnel password. */
-    internal suspend fun saveImportedConnection(profile: Int, imported: ImportedConnectionSettings): Boolean {
-        val host = imported.host.trim().removePrefix("[").removeSuffix("]")
-        if (host.isEmpty() || imported.port !in 1..65535 || imported.password.isBlank()) return false
-        dataStore.edit { prefs ->
-            prefs[getProfileKey(PEER, profile)] =
-                if (host.contains(':')) "[$host]:${imported.port}" else host
-            prefs[getProfileKey(SERVER_PEER_PORT, profile)] = imported.port
-
-            val localKey = getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)
-            prefs[localKey] = imported.password
-            prefs.remove(getProfileKey(CONNECTION_PASSWORD, profile))
-            prefs.remove(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile))
-
-            prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = false
-            prefs.remove(getProfileKey(CSQTT_LINK, profile))
-            prefs.remove(getProfileKey(SUBSCRIPTION_URL, profile))
-            prefs.remove(getProfileKey(SUBSCRIPTION_TITLE, profile))
-            prefs.remove(getProfileKey(SUBSCRIPTION_UUID, profile))
-            prefs.remove(getProfileKey(SUBSCRIPTION_NODE, profile))
-            prefs.remove(getProfileKey(SUBSCRIPTION_POWER, profile))
-
-            val power = imported.power?.takeIf { it > 0 }?.coerceIn(10, 100)
-            if (power != null) {
-                prefs[getProfileKey(WORKERS_PER_HASH, profile)] =
-                    WorkerCountPolicy.normalize(power, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
-            }
-
-            val hashes = imported.hashes
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .distinct()
-            if (hashes.isNotEmpty()) {
-                prefs[getProfileKey(VK_HASHES, profile)] = hashes.joinToString(",")
-                prefs[getProfileKey(VK_HASH_MODE, profile)] = CsqttConstants.VkAutoHash.MODE_MANUAL
-                prefs[getProfileKey(VK_AUTH_MODE, profile)] = CsqttConstants.VkAuth.MODE_CALLS
-            }
-
-            if (imported.vkAccessToken.isNotBlank()) {
-                prefs.putSecret(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, imported.vkAccessToken, profile)
-                prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] = ""
-                prefs[getProfileKey(VK_AUTH_MODE, profile)] = CsqttConstants.VkAuth.MODE_CALLS
-                prefs[getProfileKey(VK_HASH_MODE, profile)] = CsqttConstants.VkAutoHash.MODE_AUTO_API
-            }
-
-            val name = imported.name?.trim().orEmpty()
-            if (name.isEmpty() || name == defaultProfileName(profile)) {
-                prefs.remove(getProfileKey(PROFILE_NAME, profile))
-            } else {
-                prefs[getProfileKey(PROFILE_NAME, profile)] = name
-            }
-        }
-        return true
     }
 
     suspend fun saveProfileWorkersPerHash(profile: Int, workersPerHash: Int) {
@@ -1043,15 +1128,13 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         }
     }.first()
 
-    /** Wipes every connection-related key of a profile slot, making it free again. */
+    /**
+     * Wipes every connection key of a profile slot (hashes, token, modes, routing and app lists, subscription), making it
+     * free again; a VPS saved in the slot stays (M-40).
+     */
     suspend fun clearProfile(profile: Int) {
         dataStore.edit { prefs ->
-            listOf(
-                PROFILE_NAME, PEER, SERVER_PEER_PORT, WORKERS_PER_HASH,
-                CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD_LOCAL,
-                CSQTT_LINK, CSQTT_LINK_MODE, LINK_HASHES_REMOVED, SUBSCRIPTION_URL, SUBSCRIPTION_TITLE,
-                SUBSCRIPTION_UUID, SUBSCRIPTION_NODE, SUBSCRIPTION_POWER,
-            ).forEach { key -> prefs.remove(getProfileKey(key, profile)) }
+            clearProfileKeys(prefs, profile, CONNECTION)
             val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
             if (active == profile) {
                 val fallback = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
@@ -1274,25 +1357,16 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
     // other threads at once. Above the flows they read, a collector could run before its flow was assigned and call
     // collect on null, which crashed the app at launch on slower phones (Redmi).
     init {
-        if (migrationsStarted.compareAndSet(false, true)) {
+        if (uiCacheStarted.compareAndSet(false, true)) {
+            // the numbered steps ran already (StoreMigrations); these need the keystore or the package list
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-                migrateDefaultRole()
                 migrateConnectionPasswordsToLocalStorage()
                 migrateSecretsToKeystore()
                 migrateLegacyWhitelistMode()
                 migrateSubscriptionMeta()
                 migrateDeployServerNames()
             }
-        }
-        if (uiCacheStarted.compareAndSet(false, true)) {
             CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
-                launch {
-                    dataStore.edit { prefs ->
-                        for (p in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                            prefs[getProfileKey(EXTRA_WORKERS, p)] = false
-                        }
-                    }
-                }
                 launch { vkHashMode.collect { cachedVkHashMode = it } }
                 launch { vkAccessToken.collect { cachedVkAccessToken = it } }
                 launch { obfsMode.collect { cachedObfsMode = it } }
@@ -1302,7 +1376,6 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
                 launch { workersPerHash.collect { cachedWorkersPerHash = it } }
                 launch { manualPortsEnabled.collect { cachedManualPortsEnabled = it } }
                 launch { serverPeerPort.collect { cachedServerPeerPort = it } }
-                cachedExtraWorkers = false
                 launch { customTurnIps.collect { cachedCustomTurnIps = it } }
                 launch { excludedApps.collect { cachedExcludedApps = it } }
                 launch { whitelistApps.collect { cachedWhitelistApps = it } }
@@ -1571,15 +1644,14 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         }
     }
 
+    /**
+     * The deploy form's «Ручные порты». Off, a deploy uses 46000/46002; the profile's stored ports are what the tunnel
+     * dials, so they change only when a deploy succeeds (saveDeployedServer), never on the switch (M-85).
+     */
     suspend fun saveManualPortsEnabled(enabled: Boolean) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(MANUAL_PORTS_ENABLED, profile)] = enabled
-            // The SSH port is the server's own setting, not one of the manual ports: it stays as saved.
-            if (!enabled) {
-                prefs[getProfileKey(SERVER_PEER_PORT, profile)] = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT
-                prefs[getProfileKey(SERVER_WEB_PORT, profile)] = CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT
-            }
         }
     }
 
@@ -1651,46 +1723,10 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         }
     }
 
-    /** Removes every stored deploy setting and secret for the active profile. */
+    /** Removes every stored deploy setting and secret of the active profile; its connection, password and port stay. */
     suspend fun clearDeployProfile() {
         val profile = activeProfile.first()
-        dataStore.edit { prefs ->
-            prefs.remove(getProfileKey(DEPLOY_IP, profile))
-            prefs.remove(getProfileKey(DEPLOY_SERVER_NAME, profile))
-            prefs.remove(getProfileKey(DEPLOY_LOGIN, profile))
-            prefs.remove(getProfileKey(DEPLOY_PASSWORD, profile))
-            prefs.remove(getProfileKey(DEPLOY_PASSWORD_ENCRYPTED, profile))
-            prefs.remove(getProfileKey(DEPLOY_MAIN_PASSWORD, profile))
-            prefs.remove(getProfileKey(DEPLOY_MAIN_PASSWORD_ENCRYPTED, profile))
-            prefs.remove(getProfileKey(DEPLOY_WEB_LOGIN, profile))
-            prefs.remove(getProfileKey(DEPLOY_WEB_PASSWORD, profile))
-            prefs.remove(getProfileKey(DEPLOY_WEB_PASSWORD_ENCRYPTED, profile))
-            prefs.remove(getProfileKey(DEPLOY_SSH_PORT, profile))
-            prefs.remove(getProfileKey(SERVER_PEER_PORT, profile))
-            prefs.remove(getProfileKey(SERVER_WEB_PORT, profile))
-            prefs.remove(getProfileKey(MANUAL_PORTS_ENABLED, profile))
-            prefs.remove(getProfileKey(SSH_KEYS_MODE, profile))
-            prefs.remove(getProfileKey(DOCKER_INSTALL, profile))
-            prefs.remove(getProfileKey(DEPLOY_SECRET_PATH_ENABLED, profile))
-            prefs.remove(getProfileKey(DEPLOY_SECRET_PATH_UUID, profile))
-            prefs.remove(getProfileKey(DEPLOY_SERVER_CONFIGURED, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_AT, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_OK, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_ARCH, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_SERVICE, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_VERSION, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_MESSAGE, profile))
-            prefs.remove(getProfileKey(DEPLOY_LAST_INSPECTION_PANEL, profile))
-            prefs.remove(getProfileKey(SSH_PRIVATE_KEY, profile))
-            prefs.remove(getProfileKey(SSH_PRIVATE_KEY_ENCRYPTED, profile))
-            prefs.remove(getProfileKey(SSH_KEY_PASSPHRASE, profile))
-            prefs.remove(getProfileKey(SSH_KEY_PASSPHRASE_ENCRYPTED, profile))
-            prefs.remove(getProfileKey(SSH_CERTIFICATE, profile))
-            prefs.remove(getProfileKey(SSH_CERTIFICATE_ENCRYPTED, profile))
-            prefs.remove(getProfileKey(CONNECTION_PASSWORD_LOCAL, profile))
-            prefs.remove(getProfileKey(CONNECTION_PASSWORD, profile))
-            prefs.remove(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile))
-        }
+        dataStore.edit { prefs -> clearProfileKeys(prefs, profile, VPS) }
     }
 
     suspend fun saveSshKeys(privateKey: String, keyPassphrase: String, certificate: String) {
@@ -1819,6 +1855,8 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
     // [forProfile]: a deploy writes into the profile that started it, as saveDeployedServer does — the active one may
     // have changed during the minutes it ran
     suspend fun saveConnectionPassword(password: String, forProfile: Int? = null) {
+        // one rule for every field (M-99): a password GETCONF cannot carry is never stored
+        if (password.isNotBlank() && !isValidTunnelPassword(password)) return
         dataStore.edit { prefs ->
             val profile = forProfile ?: prefs[ACTIVE_PROFILE] ?: 0
             val localKey = getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)
@@ -1965,7 +2003,7 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(EXTRA_WORKERS, profile)] = enabled
             if (!enabled) {
-                val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: 18
+                val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS
                 val maximum = WorkerCountPolicy.defaultMaximum(extraWorkers = false)
                 if (current > maximum) {
                     prefs[getProfileKey(WORKERS_PER_HASH, profile)] =
@@ -2187,27 +2225,6 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
      * deploy-only profiles show up as named owner profiles. Move that name to its own
      * deploy key and clear the connection profile name for server-only slots.
      */
-    /**
-     * A fresh install starts as «Участник»: most people get a link or a QR code, not a server. Decided once, by what is
-     * stored rather than by what was written first (other startup code writes settings at the same time): an install
-     * that holds a connection, a link, a subscription, hashes, a deployed server or a chosen role keeps its role.
-     */
-    private suspend fun migrateDefaultRole() {
-        dataStore.edit { prefs ->
-            if (prefs[DEFAULT_ROLE_DECIDED] == true) return@edit
-            prefs[DEFAULT_ROLE_DECIDED] = true
-            val configured = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX).any { profile ->
-                listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, VK_HASHES, DEPLOY_IP, CONNECTION_PASSWORD,
-                    CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD_LOCAL)
-                    .any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
-                    prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != null
-            }
-            if (!configured) {
-                prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] = true
-            }
-        }
-    }
-
     private suspend fun migrateDeployServerNames() {
         val current = dataStore.data.first()
         if (current[DEPLOY_PROFILE_NAMES_CLEANED] == true) return
@@ -2353,17 +2370,13 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
         legacyKey: Preferences.Key<String>,
         value: String,
         profile: Int
-    ) {
-        val profEncryptedKey = getProfileKey(encryptedKey, profile)
-        val profLegacyKey = getProfileKey(legacyKey, profile)
-        if (value.isBlank()) {
-            remove(profEncryptedKey)
-            remove(profLegacyKey)
-        } else {
-            this[profEncryptedKey] = secureStore.encrypt(value)
-            remove(profLegacyKey)
-        }
-    }
+    ) = putSecretValue(
+        getProfileKey(encryptedKey, profile),
+        getProfileKey(legacyKey, profile),
+        value,
+        secureStore::encrypt,
+        secureStore::decrypt,
+    )
 
     private fun MutablePreferences.migrateSecret(
         encryptedKey: Preferences.Key<String>,
@@ -2427,7 +2440,7 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
             deploy.put("vk_hash_mode", prefs[getProfileKey(VK_HASH_MODE, p)] ?: CsqttConstants.VkAutoHash.MODE_MANUAL)
             // the VK access token is a VK account credential: it stays on this device (an export goes to the clipboard
             // and Downloads). Exports before 2.5.2 carried it blank in practice; the import below leaves a stored one alone.
-            deploy.put("workers_per_hash", prefs[getProfileKey(WORKERS_PER_HASH, p)] ?: 18)
+            deploy.put("workers_per_hash", prefs[getProfileKey(WORKERS_PER_HASH, p)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS)
             deploy.put("extra_workers", prefs[getProfileKey(EXTRA_WORKERS, p)] ?: false)
             deploy.put("csqtt_link", prefs[getProfileKey(CSQTT_LINK, p)] ?: "")
             deploy.put("csqtt_link_mode", prefs[getProfileKey(CSQTT_LINK_MODE, p)] ?: false)
@@ -2493,9 +2506,9 @@ private val DEPLOY_LAST_INSPECTION_PANEL = booleanPreferencesKey("deploy_last_in
                     if (tunnel.has("manual_ports_enabled")) mutable[getProfileKey(MANUAL_PORTS_ENABLED, p)] = tunnel.getBoolean("manual_ports_enabled")
                     if (tunnel.has("server_peer_port")) mutable[getProfileKey(SERVER_PEER_PORT, p)] = tunnel.getInt("server_peer_port")
                     // a blank password in an export is "none in that export" (older exports carried a stored one blank):
-                    // it never wipes the password this profile has
+                    // it never wipes the password this profile has; nor does one that breaks the password rule
                     val pw = if (tunnel.has("connection_password")) tunnel.getString("connection_password") else ""
-                    if (pw.isNotBlank()) {
+                    if (pw.isNotBlank() && isValidTunnelPassword(pw)) {
                         // as saveConnectionPassword stores it
                         mutable[getProfileKey(CONNECTION_PASSWORD_LOCAL, p)] = pw
                         mutable.remove(getProfileKey(CONNECTION_PASSWORD, p))
