@@ -222,14 +222,33 @@ struct OutboundQueue {
     queue: ArrayQueue<PacketBuf>,
     waiter: Notify,
     space: Notify,
+    /// Set while the writer drains the queue: a popped packet is not yet sent, so an empty queue
+    /// alone does not mean flushed. `deallocate` waits for both before its Refresh(0).
+    busy: AtomicBool,
     shared: Arc<DriverShared>,
     socket: Arc<UdpSocket>,
+    #[cfg(test)]
+    send_delay_ms: AtomicU64,
+}
+
+impl OutboundQueue {
+    fn flushed(&self) -> bool {
+        self.queue.is_empty() && !self.busy.load(Ordering::SeqCst)
+    }
 }
 
 async fn outbound_writer_loop(queue: Arc<OutboundQueue>) {
     loop {
+        queue.busy.store(true, Ordering::SeqCst);
         while let Some(mut packet) = queue.queue.pop() {
             queue.space.notify_one();
+            #[cfg(test)]
+            {
+                let delay = queue.send_delay_ms.load(Ordering::Relaxed);
+                if delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            }
             if queue.shared.closing.load(Ordering::Acquire) {
                 drop(packet);
                 continue;
@@ -280,6 +299,8 @@ async fn outbound_writer_loop(queue: Arc<OutboundQueue>) {
             }
             drop(packet);
         }
+        queue.busy.store(false, Ordering::SeqCst);
+        queue.space.notify_one();
         if queue.shared.closing.load(Ordering::Acquire) {
             return;
         }
@@ -395,8 +416,11 @@ impl TurnAllocation {
                     queue: ArrayQueue::new(OUTBOUND_QUEUE_CAPACITY),
                     waiter: Notify::new(),
                     space: Notify::new(),
+                    busy: AtomicBool::new(false),
                     shared: shared.clone(),
                     socket: socket.clone(),
+                    #[cfg(test)]
+                    send_delay_ms: AtomicU64::new(0),
                 });
                 let writer_task = tokio::spawn(outbound_writer_loop(queue.clone()));
                 (Some(queue), Some(writer_task))
@@ -613,10 +637,10 @@ impl TurnAllocation {
         if let Some(queue) = &self.outbound_queue {
             queue.waiter.notify_one();
             let flush_deadline = Instant::now() + OUTBOUND_FLUSH_WAIT;
-            while !queue.queue.is_empty() && Instant::now() < flush_deadline {
+            while !queue.flushed() && Instant::now() < flush_deadline {
                 let remaining = flush_deadline.saturating_duration_since(Instant::now());
                 let space = queue.space.notified();
-                if queue.queue.is_empty() {
+                if queue.flushed() {
                     break;
                 }
                 let _ = tokio::time::timeout(remaining, space).await;
@@ -722,6 +746,15 @@ impl TurnAllocation {
         })
         .await
         .with_context(|| format!("TURN {} hard timeout", method_name(method)))?
+    }
+
+    #[cfg(test)]
+    fn set_outbound_send_delay(&self, delay: Duration) {
+        if let Some(queue) = &self.outbound_queue {
+            queue
+                .send_delay_ms
+                .store(delay.as_millis() as u64, Ordering::Relaxed);
+        }
     }
 
     #[cfg(test)]

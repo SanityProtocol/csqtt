@@ -485,6 +485,9 @@ async fn authenticated_flow_survives_pool_deficit_and_keeps_channel_data_zero_co
     let server_address = server.local_addr().unwrap();
     let peer: SocketAddr = "127.0.0.1:39001".parse().unwrap();
     let relay: SocketAddr = "127.0.0.1:49001".parse().unwrap();
+    // The writer returns the outbound buffer to the pool only after its send, and loopback can
+    // deliver the reply before that: with a one-buffer pool the reply would take the deficit path.
+    let (buffer_released, wait_buffer_released) = oneshot::channel();
     let server_task = tokio::spawn({
         let server = server.clone();
         async move {
@@ -514,6 +517,7 @@ async fn authenticated_flow_survives_pool_deficit_and_keeps_channel_data_zero_co
             let (outbound, outbound_client) = recv_datagram(&server).await;
             assert_eq!(outbound_client, client);
             assert_eq!(outbound, channel_data(channel, b"outbound"));
+            wait_buffer_released.await.unwrap();
 
             let wrong_channel = if channel == 0x7fff {
                 channel - 1
@@ -565,6 +569,14 @@ async fn authenticated_flow_survives_pool_deficit_and_keeps_channel_data_zero_co
     held.read_area()[..8].copy_from_slice(b"outbound");
     held.set_read_len(8).unwrap();
     allocation.send(held).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while pool.available() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    buffer_released.send(()).unwrap();
 
     let mut inbound = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
         .await
@@ -698,6 +710,66 @@ async fn data_packets_preserve_channel_order_and_release_idle_pool_leases() {
         .unwrap();
     drop(receiver);
     assert_eq!(pool.available(), pool.capacity());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deallocate_flushes_a_packet_the_writer_already_popped() {
+    let server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_address = server.local_addr().unwrap();
+    let peer: SocketAddr = "127.0.0.1:39013".parse().unwrap();
+    let relay: SocketAddr = "127.0.0.1:49013".parse().unwrap();
+    let server_task = tokio::spawn({
+        let server = server.clone();
+        async move {
+            let client = receive_challenged_allocate(&server, relay).await;
+            receive_create_permission(&server, client, peer).await;
+            let (channel_wire, _) = recv_datagram(&server).await;
+            let channel_request = assert_authenticated_request(&channel_wire, CHANNEL_BIND_REQUEST);
+            let channel = channel_number(&channel_request);
+            server
+                .send_to(
+                    &empty_authenticated_success(
+                        CHANNEL_BIND_SUCCESS,
+                        channel_request.transaction(),
+                    ),
+                    client,
+                )
+                .await
+                .unwrap();
+
+            // The data the writer had popped must reach the server before the Refresh(0).
+            let (data, _) = recv_datagram(&server).await;
+            assert_eq!(data, channel_data(channel, b"last-packet"));
+            let (refresh_wire, _) = recv_datagram(&server).await;
+            let refresh = assert_authenticated_request(&refresh_wire, REFRESH_REQUEST);
+            assert_eq!(attribute_u32(&refresh, ATTR_LIFETIME), 0);
+            server
+                .send_to(&refresh_zero_success(refresh.transaction()), client)
+                .await
+                .unwrap();
+        }
+    });
+
+    let pool = PacketPool::new(4);
+    let allocation = connect(server_address, peer, pool.clone()).await;
+    tokio::time::timeout(Duration::from_secs(5), allocation.prepare_channel())
+        .await
+        .unwrap()
+        .unwrap();
+    // The writer holds the packet between its pop and its send for this long; the flush wait
+    // (OUTBOUND_FLUSH_WAIT, 250 ms) covers it.
+    allocation.set_outbound_send_delay(Duration::from_millis(100));
+    let mut packet = pool.acquire();
+    packet.read_area()[..11].copy_from_slice(b"last-packet");
+    packet.set_read_len(11).unwrap();
+    allocation.send(packet).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), allocation.deallocate())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
