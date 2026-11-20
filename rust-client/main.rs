@@ -248,11 +248,22 @@ async fn run(arguments: Arguments) -> Result<i32> {
     let wrap_key = derive_wrap_key(&password)?;
     let client_wrap_key = wrap_key;
     let session_profile = profiles::random_profile(&arguments.fingerprint);
+    let events = Events::from_env();
     let mut js_calls = None;
     let mut js_credential_broker = None;
     let hash_source = if js_hash_mode {
         let bootstrap = read_vk_js_bootstrap(&mut stdin).await?;
-        let started = vk_js_calls::start(bootstrap, js_auth_mode, &session_profile).await?;
+        let started = match vk_js_calls::start(bootstrap, js_auth_mode, &session_profile).await {
+            Ok(started) => started,
+            Err(error) => {
+                // The hashes come from this account: without it there is no tunnel. A fatal event
+                // makes the app stop instead of restarting forever (M-47, amurcanov #48).
+                if let Some(unusable) = error.downcast_ref::<vk_js_calls::VkAccountUnusable>() {
+                    events.error(&unusable.event_code(), &unusable.user_message(), true);
+                }
+                return Err(error);
+            }
+        };
         let hashes = started.hashes.join(",");
         js_calls = Some(started.active);
         js_credential_broker = Some(started.credential_broker);
@@ -275,7 +286,6 @@ async fn run(arguments: Arguments) -> Result<i32> {
     let groups = workers.div_ceil(WORKERS_PER_GROUP);
     let cancel = CancellationToken::new();
     let captcha = CaptchaSolver::new(&arguments.captcha_mode, cancel.clone());
-    let events = Events::from_env();
     let client_ids: Vec<_> = arguments
         .client_ids
         .split(',')
@@ -289,6 +299,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
         &client_ids,
         captcha.clone(),
         js_credential_broker,
+        events.clone(),
     ));
     let stats = Arc::new(Stats::default());
     let paused = Arc::new(PauseGate::new());
@@ -309,12 +320,14 @@ async fn run(arguments: Arguments) -> Result<i32> {
         }
     }
     direct_domains.truncate(1024);
+    let (direct_domains, forced_domains) = crate::sni::split_forced_domains(direct_domains);
     let ip_rules = crate::sni::parse_ip_rules(&arguments.direct_ips);
     let domain_routing = dispatcher::DomainRoutingConfig {
         enabled: arguments.domain_routing,
         exclude_ru_zones: arguments.exclude_ru_zones,
         template_domains: arguments.template_domains,
         direct_domains: Arc::new(direct_domains),
+        forced_domains: Arc::new(forced_domains),
         is_whitelist: arguments.domain_whitelist,
         ip_routing_enabled: arguments.ip_routing,
         ip_is_whitelist: arguments.ip_whitelist,

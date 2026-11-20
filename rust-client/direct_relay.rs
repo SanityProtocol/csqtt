@@ -546,6 +546,7 @@ impl DirectRelay {
                         config.exclude_ru_zones,
                         config.template_domains,
                         &config.direct_domains,
+                        &config.forced_domains,
                     );
                     if is_direct {
                         self.handle_dns_query(slice, &domain, true);
@@ -672,12 +673,21 @@ impl DirectRelay {
             config.exclude_ru_zones,
             config.template_domains,
             &config.direct_domains,
+            &config.forced_domains,
             config.ip_routing_enabled,
             config.ip_is_whitelist,
             &config.ip_rules,
         );
 
-        let is_candidate_direct = if self.is_direct_ip(&dst_ip) {
+        // A `!domain` wins over an IP cached as direct earlier (M-31).
+        let forced = config.enabled
+            && !config.forced_domains.is_empty()
+            && domain
+                .as_deref()
+                .is_some_and(|d| crate::sni::is_domain_in_list(d, &config.forced_domains));
+        let is_candidate_direct = if forced {
+            false
+        } else if self.is_direct_ip(&dst_ip) {
             if config.ip_routing_enabled && config.ip_is_whitelist && !config.ip_rules.is_empty() {
                 !config.ip_rules.iter().any(|r| r.matches(&dst_ip))
             } else {
@@ -1313,6 +1323,7 @@ mod tests {
                 exclude_ru_zones: true,
                 template_domains: false,
                 direct_domains: vec!["example.com".to_string()].into(),
+                forced_domains: vec![].into(),
                 ip_routing_enabled: false,
                 ip_is_whitelist: false,
                 ip_rules: vec![].into(),
@@ -1400,6 +1411,7 @@ mod tests {
                 exclude_ru_zones: true,
                 template_domains: false,
                 direct_domains: vec!["example.com".to_string()].into(),
+                forced_domains: vec![].into(),
                 ip_routing_enabled: false,
                 ip_is_whitelist: false,
                 ip_rules: vec![].into(),
@@ -1437,6 +1449,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vpn_exception_overrides_cached_direct_ip() {
+        // The domain resolved direct once (its IP is cached), then the user `!`-listed it: its
+        // packets now go to the tunnel (M-31, as csqtt-win).
+        let domain_routing = Arc::new(ArcSwap::from_pointee(
+            crate::dispatcher::DomainRoutingConfig {
+                enabled: true,
+                is_whitelist: false,
+                exclude_ru_zones: false,
+                template_domains: false,
+                direct_domains: vec![].into(),
+                forced_domains: vec!["panel.example.com".to_string()].into(),
+                ip_routing_enabled: false,
+                ip_is_whitelist: false,
+                ip_rules: vec![].into(),
+            },
+        ));
+        let target_ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let direct_ips = Arc::new(ArcSwap::from_pointee(
+            std::iter::once(target_ip).collect::<std::collections::HashSet<IpAddr>>(),
+        ));
+        let dns_domain_map = Arc::new(crate::sni::DnsDomainMap::default());
+        dns_domain_map.insert(target_ip, "www.panel.example.com".to_string());
+        let pool = PacketPool::new(16);
+        let (inbound_tx, _inbound_rx) = mpsc::channel(64);
+        let relay = DirectRelay::new(
+            domain_routing,
+            direct_ips,
+            dns_domain_map,
+            pool.clone(),
+            inbound_tx,
+        )
+        .expect("smoltcp test stack must initialize");
+
+        let syn = build_tcp_packet(
+            "10.66.67.2:40000".parse().unwrap(),
+            SocketAddr::new(target_ip, 443),
+            1,
+            0,
+            0x02,
+            b"",
+        )
+        .unwrap();
+        let mut packet = pool.try_acquire().unwrap();
+        packet.extend_tail(syn.len()).unwrap().copy_from_slice(&syn);
+        assert!(!relay.try_handle(&packet).await);
+        assert!(relay.is_direct_ip(&target_ip));
+    }
+
+    #[tokio::test]
     async fn test_direct_relay_bypasses_icmp_cleanly() {
         let domain_routing = Arc::new(ArcSwap::from_pointee(
             crate::dispatcher::DomainRoutingConfig {
@@ -1445,6 +1506,7 @@ mod tests {
                 exclude_ru_zones: true,
                 template_domains: false,
                 direct_domains: vec!["example.com".to_string()].into(),
+                forced_domains: vec![].into(),
                 ip_routing_enabled: false,
                 ip_is_whitelist: false,
                 ip_rules: vec![].into(),
@@ -1493,6 +1555,7 @@ mod tests {
                 exclude_ru_zones: true,
                 template_domains: false,
                 direct_domains: vec![].into(),
+                forced_domains: vec![].into(),
                 ip_routing_enabled: false,
                 ip_is_whitelist: false,
                 ip_rules: vec![].into(),

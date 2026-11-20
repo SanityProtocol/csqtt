@@ -2364,6 +2364,28 @@ mod tests {
         }
     }
 
+    /// A TCP packet behind a 24-byte CQF1 frame (magic + sender + flow + sequence), as pre-2.5 servers sent
+    /// downlink TCP. 0x43 alone reads as IPv4 with IHL 3, which is how #39's filter dropped every framed TCP
+    /// packet (#40); the filter must look past the frame (M-24).
+    fn framed_tcp_packet() -> Vec<u8> {
+        let mut tcp = vec![0u8; 40];
+        tcp[0] = 0x45;
+        tcp[2..4].copy_from_slice(&40u16.to_be_bytes());
+        tcp[9] = 6;
+        tcp[33] = 0x12; // SYN-ACK
+        let mut framed = b"CQF1".to_vec();
+        framed.extend_from_slice(&[0x11; 20]);
+        framed.extend_from_slice(&tcp);
+        framed
+    }
+
+    #[test]
+    fn framed_tcp_survives_ip_filter() {
+        let framed = framed_tcp_packet();
+        assert!(!is_plain_ip_packet(&framed));
+        assert!(is_ip_packet(&framed));
+    }
+
     #[test]
     fn ip_filter_rejects_server_control_bytes() {
         assert!(!is_ip_packet(&[0xff]));

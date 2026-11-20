@@ -1,9 +1,10 @@
 use crate::{
     captcha::{CaptchaSolver, VkCaptchaError},
     dns,
+    events::Events,
     namegen::generate_name,
     profiles::{Profile, load_saved_profile, random_profile},
-    vk_js_calls::{CredentialBroker, MAX_ACCOUNT_CREDENTIALS},
+    vk_js_calls::{CredentialBroker, MAX_ACCOUNT_CREDENTIALS, VkAccountUnusable},
 };
 use anyhow::{Context, Result, bail};
 use primp::{Client, Impersonate, ImpersonateOS, PseudoId, PseudoOrder, cookie::Jar, header};
@@ -11,7 +12,7 @@ use serde_json::Value;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -119,6 +120,10 @@ pub struct VkAuth {
     captcha: Arc<CaptchaSolver>,
     captcha_lockout_until: AtomicI64,
     rate_limit_lockout_until: AtomicI64,
+    /// Set once Auto JS's account came back unusable (VkAccountUnusable): later streams go straight
+    /// to the anonymous fallback, and the ERROR event is sent only the first time.
+    auto_js_account_dead: AtomicBool,
+    events: Events,
 }
 
 struct LegacyAttempt<'a> {
@@ -135,6 +140,7 @@ impl VkAuth {
         client_ids: &[String],
         captcha: Arc<CaptchaSolver>,
         auto_js: Option<Arc<CredentialBroker>>,
+        events: Events,
     ) -> Self {
         let mode = if mode.eq_ignore_ascii_case("auto_js") {
             "auto_js"
@@ -151,6 +157,8 @@ impl VkAuth {
             captcha,
             captcha_lockout_until: AtomicI64::new(0),
             rate_limit_lockout_until: AtomicI64::new(0),
+            auto_js_account_dead: AtomicBool::new(false),
+            events,
         }
     }
 
@@ -162,13 +170,30 @@ impl VkAuth {
             .join(", ")
     }
 
+    /// An unusable account is remembered, so later streams skip it, and reported once. Not fatal:
+    /// the anonymous fallback keeps the tunnel up without the account.
+    fn note_auto_js_failure(&self, error: &anyhow::Error) {
+        if let Some(unusable) = error.downcast_ref::<VkAccountUnusable>()
+            && !self.auto_js_account_dead.swap(true, Ordering::AcqRel)
+        {
+            self.events
+                .error(&unusable.event_code(), &unusable.user_message(), false);
+        }
+    }
+
     pub async fn get_credentials(&self, link: &str, stream_id: usize) -> Result<TurnCredentials> {
         if self.mode.as_ref() == "auto_js" {
             let credential_id = stream_id / 100;
             let auto_js_result = match self.auto_js.as_ref() {
+                _ if self.auto_js_account_dead.load(Ordering::Acquire) => {
+                    Err(anyhow::anyhow!("аккаунт VK недоступен"))
+                }
                 Some(broker) => broker.get_credentials(credential_id).await,
                 None => Err(anyhow::anyhow!("Auto JS credential broker отсутствует")),
             };
+            if let Err(error) = &auto_js_result {
+                self.note_auto_js_failure(error);
+            }
             return match auto_js_result {
                 Ok(credentials) => Ok(credentials),
                 Err(auto_js_error) => {
@@ -229,7 +254,7 @@ impl VkAuth {
                         return Err(error);
                     }
                     crate::log_error!(
-                        "[STREAM {stream_id}] [VK Auth] VK Calls path failed after 2 attempts ({error}), falling back to auto captcha"
+                        "[STREAM {stream_id}] [VK Auth] VK Calls path failed after {VK_CALLS_ATTEMPTS} attempts ({error}), falling back to auto captcha"
                     );
                 }
             }
@@ -317,11 +342,11 @@ impl VkAuth {
 
     async fn vk_calls_with_retries(&self, link: &str, stream_id: usize) -> Result<TurnCredentials> {
         let mut last_error = None;
-        for attempt in 1..=2 {
+        for attempt in 1..=VK_CALLS_ATTEMPTS {
             match self.vk_calls_path(link, stream_id).await {
                 Ok(credentials) => {
                     crate::log_error!(
-                        "[STREAM {stream_id}] [VK Auth] Success via VK Calls path (attempt {attempt}/2)"
+                        "[STREAM {stream_id}] [VK Auth] Success via VK Calls path (attempt {attempt}/{VK_CALLS_ATTEMPTS})"
                     );
                     return Ok(credentials);
                 }
@@ -338,12 +363,12 @@ impl VkAuth {
                     return Err(error);
                 }
                 Err(error) => {
-                    if is_network_or_dns_error(&error) {
-                        return Err(error);
-                    }
+                    // A network/DNS error is retried too, after a longer pause; when the attempts run
+                    // out it still returns (the caller never falls through to captcha on it).
+                    let delay = vk_calls_retry_delay(attempt, is_network_or_dns_error(&error));
                     last_error = Some(error);
-                    if attempt < 2 {
-                        random_delay(300, 500).await;
+                    if let Some((minimum_ms, maximum_ms)) = delay {
+                        random_delay(minimum_ms, maximum_ms).await;
                     }
                 }
             }
@@ -1054,6 +1079,22 @@ fn query_escape(value: &str) -> String {
     output
 }
 
+const VK_CALLS_ATTEMPTS: u32 = 3;
+
+/// The pause after a failed VK Calls attempt, as a (min, max) range in ms; None after the last one.
+/// A network/DNS error waits 1 s, then 2 s; any other error 300–500 ms.
+fn vk_calls_retry_delay(attempt: u32, network: bool) -> Option<(u64, u64)> {
+    if attempt >= VK_CALLS_ATTEMPTS {
+        return None;
+    }
+    Some(if network {
+        let ms = 1000 * u64::from(attempt);
+        (ms, ms)
+    } else {
+        (300, 500)
+    })
+}
+
 async fn random_delay(minimum_ms: u64, maximum_ms: u64) {
     let delay = minimum_ms + rand::random::<u64>() % (maximum_ms - minimum_ms + 1);
     tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -1114,6 +1155,53 @@ fn load_credentials(client_ids: &[String]) -> Vec<VkCredentials> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vk_api_18_is_fatal_account() {
+        let events = Events::new(true);
+        let auth = VkAuth::new(
+            "auto_js",
+            random_profile("chrome"),
+            &[],
+            CaptchaSolver::new("auto", tokio_util::sync::CancellationToken::new()),
+            None,
+            events.clone(),
+        );
+        // an ordinary error does not mark the account
+        auth.note_auto_js_failure(&anyhow::anyhow!("API 6: Too many requests per second"));
+        assert!(!auth.auto_js_account_dead.load(Ordering::Acquire));
+        // a dead account, seen by two streams (with the broker's context around it): one event
+        for stream in 1..=2 {
+            let error = anyhow::Error::from(VkAccountUnusable {
+                code: 18,
+                message: "User was deleted or banned".to_owned(),
+            })
+            .context(format!("Auto JS session #{stream}"));
+            auth.note_auto_js_failure(&error);
+        }
+        assert!(auth.auto_js_account_dead.load(Ordering::Acquire));
+        let errors: Vec<_> = events
+            .captured()
+            .into_iter()
+            .filter(|(kind, _)| kind == "ERROR")
+            .collect();
+        assert_eq!(errors.len(), 1);
+        let payload: Value = serde_json::from_str(&errors[0].1).unwrap();
+        assert_eq!(payload["code"], "VK_ACCOUNT_18");
+        assert_eq!(payload["fatal"], false);
+        assert!(payload["message"].as_str().unwrap().contains("API 18"));
+    }
+
+    #[test]
+    fn vk_calls_retry_backoff() {
+        assert_eq!(vk_calls_retry_delay(1, true), Some((1000, 1000)));
+        assert_eq!(vk_calls_retry_delay(2, true), Some((2000, 2000)));
+        assert_eq!(vk_calls_retry_delay(3, true), None);
+        assert_eq!(vk_calls_retry_delay(1, false), Some((300, 500)));
+        assert_eq!(vk_calls_retry_delay(2, false), Some((300, 500)));
+        assert_eq!(vk_calls_retry_delay(3, false), None);
+        assert!(vk_calls_retry_delay(VK_CALLS_ATTEMPTS + 1, false).is_none());
+    }
 
     #[test]
     fn query_escape_matches_go() {

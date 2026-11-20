@@ -20,6 +20,57 @@ const DEFAULT_OK_API: &str = "https://calls.okcdn.ru/fb.do";
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_ACCOUNT_CREDENTIALS: usize = 15;
 
+/// The VK account behind Auto JS cannot be used until its owner acts: VK API 5 (authorization
+/// failed, the token is dead), 17 (validation required) or 18 (the page is deleted or banned).
+/// Retrying it cannot help, so the caller stops asking VK and says so once (M-47).
+#[derive(Debug)]
+pub struct VkAccountUnusable {
+    pub code: i64,
+    pub message: String,
+}
+
+impl VkAccountUnusable {
+    fn from_response(value: &Value) -> Option<Self> {
+        let error = value.get("error").filter(|error| error.is_object())?;
+        let code = error
+            .get("error_code")
+            .and_then(json_scalar_string)?
+            .parse::<i64>()
+            .ok()?;
+        matches!(code, 5 | 17 | 18).then(|| Self {
+            code,
+            message: error
+                .get("error_msg")
+                .and_then(Value::as_str)
+                .unwrap_or("API error")
+                .to_owned(),
+        })
+    }
+
+    /// The ERROR event's code, e.g. `VK_ACCOUNT_18`.
+    pub fn event_code(&self) -> String {
+        format!("VK_ACCOUNT_{}", self.code)
+    }
+
+    /// What the user reads and what they can do about it.
+    pub fn user_message(&self) -> String {
+        let action = match self.code {
+            5 => "вход в аккаунт VK больше не действует — войдите в VK заново",
+            17 => "VK требует подтвердить аккаунт — откройте VK и подтвердите вход",
+            _ => "аккаунт VK удалён или заблокирован — войдите в другой аккаунт",
+        };
+        format!("Аккаунт VK недоступен: {action} (API {}: {})", self.code, self.message)
+    }
+}
+
+impl std::fmt::Display for VkAccountUnusable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "API {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for VkAccountUnusable {}
+
 #[derive(Deserialize)]
 pub struct Bootstrap {
     pub token: String,
@@ -229,6 +280,9 @@ async fn open_account_session(
     })
     .await
     .context("messages.getCallToken")?;
+    if let Some(unusable) = VkAccountUnusable::from_response(&token_response) {
+        return Err(unusable.into());
+    }
     check_api_error(&token_response)?;
     let response = token_response
         .get("response")
@@ -598,6 +652,32 @@ mod tests {
             form(&fields),
             "conversationId=call-id&method=vchat.getConversationParams&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=session-key"
         );
+    }
+
+    #[test]
+    fn vk_account_errors_are_classified() {
+        for code in [5, 17, 18] {
+            let response = serde_json::json!({
+                "error": {"error_code": code, "error_msg": "User was deleted or banned"}
+            });
+            let unusable = VkAccountUnusable::from_response(&response).unwrap();
+            assert_eq!(unusable.event_code(), format!("VK_ACCOUNT_{code}"));
+            assert_eq!(unusable.to_string(), format!("API {code}: User was deleted or banned"));
+        }
+        // a string code, as VK sometimes sends
+        assert!(
+            VkAccountUnusable::from_response(&serde_json::json!({"error": {"error_code": "18"}}))
+                .is_some()
+        );
+        // transient or call errors stay ordinary API errors
+        for response in [
+            serde_json::json!({"error": {"error_code": 6, "error_msg": "Too many requests per second"}}),
+            serde_json::json!({"error": {"error_code": 951, "error_msg": "Call not found"}}),
+            serde_json::json!({"response": {"token": "t"}}),
+            serde_json::json!({"error": false}),
+        ] {
+            assert!(VkAccountUnusable::from_response(&response).is_none());
+        }
     }
 
     #[test]

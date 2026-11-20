@@ -481,6 +481,8 @@ pub struct DomainRoutingConfig {
     pub exclude_ru_zones: bool,
     pub template_domains: bool,
     pub direct_domains: Arc<Vec<String>>,
+    /// `!domain` entries without the `!` (M-31): always the tunnel.
+    pub forced_domains: Arc<Vec<String>>,
     pub is_whitelist: bool,
     pub ip_routing_enabled: bool,
     pub ip_is_whitelist: bool,
@@ -1257,11 +1259,13 @@ impl Dispatcher {
             }
         }
         domains.truncate(1024);
+        let (domains, forced) = crate::sni::split_forced_domains(domains);
         let new_config = DomainRoutingConfig {
             enabled,
             exclude_ru_zones: ru,
             template_domains: template,
             direct_domains: Arc::new(domains.clone()),
+            forced_domains: Arc::new(forced),
             is_whitelist,
             ip_routing_enabled,
             ip_is_whitelist,
@@ -1303,6 +1307,7 @@ impl Dispatcher {
                     config.exclude_ru_zones,
                     config.template_domains,
                     &config.direct_domains,
+                    &config.forced_domains,
                 )
             {
                 self.direct_ips.rcu(|current| {
@@ -1328,6 +1333,7 @@ impl Dispatcher {
                     config.exclude_ru_zones,
                     config.template_domains,
                     &config.direct_domains,
+                    &config.forced_domains,
                 )
                 && !self.direct_ips.load().contains(&ip)
             {
@@ -1749,9 +1755,15 @@ fn strip_legacy_downlink_prefix(packet: &mut PacketBuf) {
     }
 }
 
+/// The version nibble, and for IPv4 a header of at least 20 bytes (IHL ≥ 5). The IHL check matters: a
+/// CQF1 frame starts with 0x43, which reads as IPv4 with IHL 3 (#40, M-24).
 #[inline(always)]
 fn is_ip_packet(packet: &[u8]) -> bool {
-    matches!(packet.first().copied().map(|byte| byte >> 4), Some(4 | 6))
+    match packet.first().copied() {
+        Some(byte) if byte >> 4 == 4 => byte & 0x0f >= 5,
+        Some(byte) => byte >> 4 == 6,
+        None => false,
+    }
 }
 
 fn spawn_critical<F>(
@@ -1832,6 +1844,27 @@ async fn bind_udp(address: &str) -> Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framed_tcp_prefix_is_stripped_before_the_tun() {
+        // M-24: a TCP packet behind a 24-byte CQF1 frame (session.rs framed_tcp_survives_ip_filter lets it
+        // through) reaches the TUN writer as the bare IP packet.
+        let tcp = ipv4_packet(6, 443, 40000, 40);
+        let mut framed = b"CQF1".to_vec();
+        framed.extend_from_slice(&[0x11; 20]);
+        framed.extend_from_slice(&tcp);
+        let pool = PacketPool::new(1);
+        let mut packet = pool.acquire();
+        packet.extend_tail(framed.len()).unwrap().copy_from_slice(&framed);
+        strip_legacy_downlink_prefix(&mut packet);
+        assert_eq!(packet.as_slice(), tcp.as_slice());
+        // a plain packet is left as it is
+        drop(packet);
+        let mut plain = pool.acquire();
+        plain.extend_tail(tcp.len()).unwrap().copy_from_slice(&tcp);
+        strip_legacy_downlink_prefix(&mut plain);
+        assert_eq!(plain.as_slice(), tcp.as_slice());
+    }
 
     fn ipv4_packet(proto: u8, sport: u16, dport: u16, len: usize) -> Vec<u8> {
         let mut packet = vec![0u8; len];
@@ -2298,6 +2331,7 @@ mod tests {
                 exclude_ru_zones: true,
                 template_domains: false,
                 direct_domains: vec!["example.com".to_string()].into(),
+                forced_domains: vec![].into(),
                 ip_routing_enabled: false,
                 ip_is_whitelist: false,
                 ip_rules: vec![].into(),

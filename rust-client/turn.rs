@@ -839,7 +839,7 @@ async fn connect_transport(
         {
             Ok(result) => result,
             Err(_) => Err(anyhow!(
-                "TURN {} transport setup timed out after {} seconds",
+                "TURN {} transport setup to {authority} timed out after {} seconds",
                 endpoint.transport.as_str(),
                 TRANSPORT_CONNECT_TIMEOUT.as_secs()
             )),

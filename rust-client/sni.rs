@@ -321,14 +321,19 @@ pub fn is_direct_domain(
     is_domain_in_list(sni_trimmed, direct_domains)
 }
 
+/// `forced_domains` are the `!domain` entries (M-31), stored without the `!`: they never go direct.
 pub fn is_direct_domain_mode(
     sni: &str,
     is_whitelist: bool,
     exclude_ru_zones: bool,
     template_domains: bool,
     direct_domains: &[String],
+    forced_domains: &[String],
 ) -> bool {
     let sni_trimmed = sni.trim_end_matches('.');
+    if is_domain_in_list(sni_trimmed, forced_domains) {
+        return false;
+    }
     if is_whitelist {
         !is_domain_in_list(sni_trimmed, direct_domains)
     } else {
@@ -428,11 +433,21 @@ pub fn evaluate_route(
     exclude_ru_zones: bool,
     template_domains: bool,
     direct_domains: &[String],
+    forced_domains: &[String],
     ip_routing_enabled: bool,
     ip_is_whitelist: bool,
     ip_rules: &[IpRule],
 ) -> RouteVerdict {
     if !domain_routing_enabled && !ip_routing_enabled {
+        return RouteVerdict::Tunnel;
+    }
+
+    // `!domain` (M-31) goes through the tunnel ahead of the RU zones, the template, the lists and
+    // the IP rules. An empty list (the usual case) costs nothing here.
+    if domain_routing_enabled
+        && let Some(d) = domain
+        && is_domain_in_list(d, forced_domains)
+    {
         return RouteVerdict::Tunnel;
     }
 
@@ -536,10 +551,26 @@ impl Default for DnsDomainMap {
     }
 }
 
+/// Splits a parsed list into (plain, forced): a `!domain` entry goes to the forced list without its `!`.
+pub fn split_forced_domains(domains: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let (forced, plain): (Vec<String>, Vec<String>) =
+        domains.into_iter().partition(|domain| domain.starts_with('!'));
+    let forced = forced
+        .into_iter()
+        .map(|domain| domain[1..].to_owned())
+        .collect();
+    (plain, forced)
+}
+
+/// A leading `!` marks a force-tunnel entry (M-31); it is kept, and the rest is cleaned like any entry.
 pub fn parse_direct_domains(input: &str) -> Vec<String> {
     let mut result = Vec::new();
     for token in input.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
         let mut cleaned = token.trim();
+        let forced = cleaned.starts_with('!');
+        if forced {
+            cleaned = cleaned[1..].trim_start();
+        }
         if cleaned.is_empty() {
             continue;
         }
@@ -555,9 +586,15 @@ pub fn parse_direct_domains(input: &str) -> Vec<String> {
         if cleaned.to_ascii_lowercase().starts_with("www.") {
             cleaned = &cleaned[4..];
         }
-        let cleaned_domain = cleaned
+        let mut cleaned_domain = cleaned
             .trim_matches(|c: char| c == '.' || c == ',' || c == ';' || c.is_whitespace())
             .to_lowercase();
+        if cleaned_domain.contains('!') {
+            continue;
+        }
+        if forced {
+            cleaned_domain.insert(0, '!');
+        }
         if cleaned_domain.len() >= 3
             && cleaned_domain.contains('.')
             && !result.contains(&cleaned_domain)
@@ -801,6 +838,47 @@ mod tests {
     }
 
     #[test]
+    fn force_tunnel_beats_ru_zone() {
+        let parsed = parse_direct_domains("!https://www.Panel.Example.ru/login, site.ru; ! , !nodot, foo!bar.ru");
+        assert_eq!(parsed, vec!["!panel.example.ru".to_string(), "site.ru".to_string()]);
+        let (plain, forced) = split_forced_domains(parsed);
+        assert_eq!(plain, vec!["site.ru".to_string()]);
+        assert_eq!(forced, vec!["panel.example.ru".to_string()]);
+
+        let ip: IpAddr = "95.0.0.1".parse().unwrap();
+        let every_ip = parse_ip_rules("0.0.0.0/0");
+        let route = |domain: &str| {
+            evaluate_route(
+                &ip,
+                Some(domain),
+                true,
+                false,
+                true,
+                true,
+                &plain,
+                &forced,
+                true,
+                false,
+                &every_ip,
+            )
+        };
+        // ahead of the RU zone, the plain list and an IP rule that sends everything direct
+        assert_eq!(route("panel.example.ru"), RouteVerdict::Tunnel);
+        assert_eq!(route("api.panel.example.ru."), RouteVerdict::Tunnel);
+        assert_eq!(route("other.example.ru"), RouteVerdict::Direct);
+        assert_eq!(route("site.ru"), RouteVerdict::Direct);
+        // in the whitelist mode too
+        assert_eq!(
+            evaluate_route(&ip, Some("panel.example.ru"), true, true, false, false, &[], &forced, false, false, &[]),
+            RouteVerdict::Tunnel
+        );
+        // DNS/SNI learning never marks it direct
+        assert!(!is_direct_domain_mode("panel.example.ru", false, true, true, &plain, &forced));
+        assert!(!is_direct_domain_mode("panel.example.ru", true, false, false, &[], &forced));
+        assert!(is_direct_domain_mode("other.example.ru", false, true, false, &plain, &forced));
+    }
+
+    #[test]
     fn test_parse_direct_domains() {
         let newline_input = "yandex.ru\nmail.ru\nkinopoisk.ru";
         let parsed = parse_direct_domains(newline_input);
@@ -1023,35 +1101,40 @@ mod tests {
             true,
             false,
             false,
-            &white_domains
+            &white_domains,
+            &[]
         ));
         assert!(!is_direct_domain_mode(
             "sub.special.com",
             true,
             false,
             false,
-            &white_domains
+            &white_domains,
+            &[]
         ));
         assert!(!is_direct_domain_mode(
             "vpn-only.org",
             true,
             false,
             false,
-            &white_domains
+            &white_domains,
+            &[]
         ));
         assert!(is_direct_domain_mode(
             "google.com",
             true,
             false,
             false,
-            &white_domains
+            &white_domains,
+            &[]
         ));
         assert!(is_direct_domain_mode(
             "yandex.ru",
             true,
             false,
             false,
-            &white_domains
+            &white_domains,
+            &[]
         ));
     }
 
@@ -1063,21 +1146,24 @@ mod tests {
             false,
             false,
             false,
-            &black_domains
+            &black_domains,
+            &[]
         ));
         assert!(is_direct_domain_mode(
             "sub.blocked.com",
             false,
             false,
             false,
-            &black_domains
+            &black_domains,
+            &[]
         ));
         assert!(!is_direct_domain_mode(
             "normal.com",
             false,
             false,
             false,
-            &black_domains
+            &black_domains,
+            &[]
         ));
     }
 
@@ -1105,6 +1191,7 @@ mod tests {
             false,
             false,
             false,
+            &[],
             &[],
             enabled,
             whitelist,
@@ -1227,6 +1314,7 @@ mod tests {
                 false,
                 false,
                 &[],
+                &[],
                 false,
                 false,
                 &[]
@@ -1243,6 +1331,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1258,6 +1347,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1273,6 +1363,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1288,6 +1379,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1303,6 +1395,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1318,6 +1411,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1333,6 +1427,7 @@ mod tests {
                 true,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1349,6 +1444,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 false,
                 &ip_rules
@@ -1364,6 +1460,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 false,
                 &ip_rules
@@ -1379,6 +1476,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 false,
                 &ip_rules
@@ -1395,6 +1493,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1410,6 +1509,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1425,6 +1525,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1441,6 +1542,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 false,
                 &ip_rules
@@ -1456,6 +1558,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 false,
                 &ip_rules
@@ -1471,6 +1574,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 false,
                 &ip_rules
@@ -1497,6 +1601,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1513,6 +1618,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1530,6 +1636,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1547,6 +1654,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules
@@ -1563,6 +1671,7 @@ mod tests {
                 false,
                 false,
                 &direct_domains,
+                &[],
                 true,
                 true,
                 &ip_rules

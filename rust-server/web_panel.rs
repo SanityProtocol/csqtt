@@ -11856,6 +11856,9 @@ const PANEL_HTML: &str = r##"
             for (let raw of rawDomains) {
                 let s = raw.trim();
                 if (!s) continue;
+                // `!domain`: always through the tunnel, ahead of every direct rule (client 2.6, M-31)
+                const forced = s.startsWith('!');
+                if (forced) s = s.slice(1).trim();
                 s = s.replace(/^[a-zA-Z]+:\/\//, '');
                 s = s.split(/[/?#]/)[0];
                 s = s.replace(/:\d+$/, '');
@@ -11867,7 +11870,7 @@ const PANEL_HTML: &str = r##"
                 const isIpv6 = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/.test(s);
                 const isSimple = /^[a-zA-Z0-9\u0400-\u04FF\-_\.]+$/.test(s) && (s.includes('.') || s === 'localhost');
                 if (isWildcardDomain || isIpv4 || isIpv6 || isSimple) {
-                    const norm = s.toLowerCase();
+                    const norm = (forced ? '!' : '') + s.toLowerCase();
                     if (!seen.has(norm)) {
                         seen.add(norm);
                         domains.push(norm);

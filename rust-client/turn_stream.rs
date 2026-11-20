@@ -59,7 +59,12 @@ pub async fn connect(
 )> {
     let socket = timeout(STREAM_CONNECT_TIMEOUT, TcpStream::connect(server))
         .await
-        .context("TURN TCP connect timed out")?
+        .with_context(|| {
+            format!(
+                "TURN {} connect {server} timed out",
+                endpoint.transport.as_str()
+            )
+        })?
         .with_context(|| format!("TURN {} connect {server}", endpoint.transport.as_str()))?;
     socket
         .set_nodelay(true)
@@ -81,8 +86,10 @@ pub async fn connect(
                 connector.connect(server_name, socket),
             )
             .await
-            .with_context(|| format!("TURN TLS handshake to {} timed out", endpoint.host))?
-            .with_context(|| format!("TURN TLS handshake to {} failed", endpoint.host))?;
+            .with_context(|| {
+                format!("TURN TLS handshake to {} ({server}) timed out", endpoint.host)
+            })?
+            .with_context(|| format!("TURN TLS handshake to {} ({server}) failed", endpoint.host))?;
             Box::new(stream)
         }
         TurnWireTransport::Udp => bail!("UDP endpoint cannot create a TURN stream"),
@@ -304,6 +311,30 @@ fn tls_config() -> Arc<ClientConfig> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_connect_error_names_endpoint() {
+        // A peer that accepts and never answers the ClientHello: the handshake times out (the paused
+        // clock runs the 10 s at once), and the error names both the host and the address dialled.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        let _peer = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let endpoint = TurnEndpoint {
+            host: Arc::from("turn.example"),
+            port: server.port(),
+            transport: TurnWireTransport::Tls,
+        };
+        let error = match connect(&endpoint, server).await {
+            Ok(_) => panic!("a silent peer completed a TLS handshake"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("turn.example"), "{error}");
+        assert!(error.contains(&server.to_string()), "{error}");
+    }
 
     #[tokio::test]
     async fn stream_data_rejects_when_queue_full() {
