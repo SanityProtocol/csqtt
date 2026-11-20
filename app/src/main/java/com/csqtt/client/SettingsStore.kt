@@ -148,6 +148,8 @@ internal data class SubscriptionMeta(
      */
     val certSha256: String = "",
     val certNotAfter: Long = 0L,
+    /** That leaf's chain was CA-validated: no certificate the platform refuses replaces it (the operator, 2026-11-20). */
+    val certFromCa: Boolean = false,
 ) {
     fun needsUpdate(now: Long): Boolean {
         if (autoUpdateMinutes <= 0 || url.isBlank()) return false
@@ -177,6 +179,7 @@ private fun decodeSubscriptionMeta(raw: String?): Map<String, SubscriptionMeta> 
             allowHttp = entry.optBoolean("allowHttp", false),
             certSha256 = entry.optString("certSha256").trim(),
             certNotAfter = entry.optLong("certNotAfter", 0L).coerceAtLeast(0L),
+            certFromCa = entry.optBoolean("certFromCa", false),
         )
     }
     return result
@@ -198,6 +201,7 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
                 if (value.certSha256.isNotBlank()) {
                     put("certSha256", value.certSha256)
                     put("certNotAfter", value.certNotAfter)
+                    put("certFromCa", value.certFromCa)
                 }
             },
         )
@@ -707,8 +711,8 @@ class SettingsStore(context: Context) {
         /**
          * A subscription node into its slot (M-170): the owner's link as served, in link mode, so its hashes stay the owner's
          * («от владельца», masked, never the profile's own) and a token link connects from the link. A slot that held the
-         * node in owner mode (2.5.3) loses the peer and password the link now carries, and of its hashes only the ones the
-         * link carries: a node without hashes left the participant's own hashes there (2.5.3 copied only non-empty ones).
+         * node in owner mode (2.5.3) loses the peer and password the link now carries; its stored hashes go only when the
+         * link carries hashes (2.5.3's rule: a node without hashes left the participant's own hashes there).
          */
         internal fun writeSubscriptionNode(prefs: MutablePreferences, write: SubscriptionProfileWrite) {
             val profile = write.profile
@@ -765,8 +769,9 @@ class SettingsStore(context: Context) {
 
         /**
          * [profile] connects through the owner's [link]. Coming from owner mode, the slot's connection fields go (the link
-         * carries peer, port and password), and its hashes the link also carries: those were the owner's. Any other hash
-         * stays the participant's own (review F1).
+         * carries peer, port and password), and its stored hashes follow 2.5.3's refresh rule (the operator, 2026-11-20):
+         * a link with hashes means the stored ones were the node's, so they go (a hash the owner revoked meanwhile must not
+         * survive as the participant's own); a link without hashes means they are the participant's own, so they stay.
          */
         private fun useParticipantLink(prefs: MutablePreferences, profile: Int, link: String) {
             if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) {
@@ -774,11 +779,7 @@ class SettingsStore(context: Context) {
                     PEER, SERVER_PEER_PORT, CONNECTION_PASSWORD_LOCAL, CONNECTION_PASSWORD,
                     CONNECTION_PASSWORD_ENCRYPTED, LINK_HASHES_REMOVED,
                 ).forEach { prefs.remove(getProfileKey(it, profile)) }
-                val ownKey = getProfileKey(VK_HASHES, profile)
-                val linkHashes = parseCsqttLink(link)?.hashes.orEmpty().toSet()
-                val own = prefs[ownKey].orEmpty().split(Regex("[,\\s]+")).map(String::trim)
-                    .filter { it.isNotEmpty() && it !in linkHashes }.distinct()
-                if (own.isEmpty()) prefs.remove(ownKey) else prefs[ownKey] = own.joinToString(",")
+                if (parseCsqttLink(link)?.hashes.orEmpty().isNotEmpty()) prefs.remove(getProfileKey(VK_HASHES, profile))
             }
             prefs[getProfileKey(CSQTT_LINK, profile)] = link
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
@@ -1398,6 +1399,7 @@ class SettingsStore(context: Context) {
                 allowHttp = allowHttp || existing?.allowHttp == true,
                 certSha256 = existing?.certSha256.orEmpty(),
                 certNotAfter = existing?.certNotAfter ?: 0L,
+                certFromCa = existing?.certFromCa ?: false,
             )
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
         }
@@ -1407,10 +1409,10 @@ class SettingsStore(context: Context) {
     internal suspend fun recordSubscriptionCertificate(url: String, cert: SubscriptionCertRecord) {
         if (cert.sha256.isBlank()) return
         updateSubscriptionMeta(url) { meta ->
-            if (meta.certSha256 == cert.sha256 && meta.certNotAfter == cert.notAfterMs) {
+            if (meta.certSha256 == cert.sha256 && meta.certNotAfter == cert.notAfterMs && meta.certFromCa == cert.fromCa) {
                 meta
             } else {
-                meta.copy(certSha256 = cert.sha256, certNotAfter = cert.notAfterMs)
+                meta.copy(certSha256 = cert.sha256, certNotAfter = cert.notAfterMs, certFromCa = cert.fromCa)
             }
         }
     }

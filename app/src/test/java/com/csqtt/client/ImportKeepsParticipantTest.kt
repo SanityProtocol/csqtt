@@ -95,14 +95,15 @@ class ImportKeepsParticipantTest {
     }
 
     @Test
-    fun `leaving owner mode drops only the hashes the link carries`() {
-        val own = "C".repeat(20)
+    fun `a link with hashes drops every stored hash, so one the owner revoked meanwhile cannot survive (2_5_3's rule)`() {
+        // the owner took C out after this phone's last 2.5.3 refresh: the served link carries A and B only
+        val revoked = "C".repeat(20)
         val prefs = load(
-            """{"strings": {"peer_2": "203.0.113.50", "vk_hashes_2": "${(ownerHashes + own).joinToString(",")}",
+            """{"strings": {"peer_2": "203.0.113.50", "vk_hashes_2": "${(ownerHashes + revoked).joinToString(",")}",
                             "subscription_url_2": "https://sub.example/s"}}""",
         )
         SettingsStore.writeSubscriptionNode(prefs, write(2, nodeLink))
-        assertEquals(own, prefs[s("vk_hashes", 2)])
+        assertNull(prefs[s("vk_hashes", 2)])
     }
 
     @Test

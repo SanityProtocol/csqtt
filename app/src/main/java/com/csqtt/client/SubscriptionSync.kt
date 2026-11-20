@@ -67,7 +67,8 @@ internal object SubscriptionSync {
         val pinned = meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
         val normalized = normalizeSubscriptionUrl(url, pinned)
         store.markSubscriptionAttempt(normalized)
-        val record = meta?.certSha256?.takeIf { it.isNotBlank() }?.let { SubscriptionCertRecord(it, meta.certNotAfter) }
+        val record = meta?.certSha256?.takeIf { it.isNotBlank() }
+            ?.let { SubscriptionCertRecord(it, meta.certNotAfter, meta.certFromCa) }
         return when (val result = SubscriptionImporter.fetch(normalized, SubscriptionTrust(pinned, record))) {
             is SubscriptionFetchResult.Success -> {
                 result.cert?.let { store.recordSubscriptionCertificate(normalized, it) }

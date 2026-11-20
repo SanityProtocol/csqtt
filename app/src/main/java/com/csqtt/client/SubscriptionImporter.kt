@@ -71,8 +71,11 @@ internal data class SubscriptionImportSummary(
 internal fun subscriptionTransportUrl(url: String): String =
     if (url.startsWith("http://", ignoreCase = true)) "https://" + url.substring(7) else url
 
-/** A leaf certificate as a marked subscription records it: SHA-256 (hex) and notAfter (epoch ms). */
-internal data class SubscriptionCertRecord(val sha256: String, val notAfterMs: Long)
+/**
+ * A leaf certificate as a marked subscription records it: SHA-256 (hex), notAfter (epoch ms), and whether its chain was
+ * CA-validated (whatever its name).
+ */
+internal data class SubscriptionCertRecord(val sha256: String, val notAfterMs: Long, val fromCa: Boolean = false)
 
 /**
  * How a subscription's own server is trusted (M-171). [pinned]: the user marked it (V2's «Скачивать по HTTP», or an
@@ -86,15 +89,24 @@ internal data class SubscriptionTrust(val pinned: Boolean = false, val record: S
  * the recorded leaf, when none is recorded yet (trust on first use), or when the recorded leaf has expired: the panels the
  * app deploys replace a certificate only once it has expired (a 365-day self-signed fallback, a lapsed Let's Encrypt one;
  * review F2). A recorded leaf without a known expiry never expires.
+ *
+ * But once the server has shown a CA-validated chain, a certificate whose chain the platform refuses never replaces it,
+ * expired or not (the operator, 2026-11-20: the short-lived Let's Encrypt certificates of the panels the app deploys
+ * expire between most refreshes, and an on-path self-signed certificate would otherwise get in then). A lapse of Let's
+ * Encrypt stops the refresh until a CA chain is back (said in the log); a panel that drops it for good needs P3's re-trust.
  */
-internal fun pinAccepts(record: SubscriptionCertRecord?, leaf: SubscriptionCertRecord, nowMs: Long): Boolean =
-    record == null || record.sha256.equals(leaf.sha256, ignoreCase = true) ||
+internal fun pinAccepts(record: SubscriptionCertRecord?, leaf: SubscriptionCertRecord, nowMs: Long): Boolean {
+    if (record?.fromCa == true && !leaf.fromCa) return false
+    return record == null || record.sha256.equals(leaf.sha256, ignoreCase = true) ||
         (record.notAfterMs > 0L && record.notAfterMs < nowMs)
+}
 
-internal fun certRecordOf(leaf: java.security.cert.X509Certificate): SubscriptionCertRecord = SubscriptionCertRecord(
-    sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(leaf.encoded).joinToString("") { "%02x".format(it) },
-    notAfterMs = leaf.notAfter.time,
-)
+internal fun certRecordOf(leaf: java.security.cert.X509Certificate, fromCa: Boolean): SubscriptionCertRecord =
+    SubscriptionCertRecord(
+        sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(leaf.encoded).joinToString("") { "%02x".format(it) },
+        notAfterMs = leaf.notAfter.time,
+        fromCa = fromCa,
+    )
 
 /**
  * One fetch's trust for a marked subscription's own host and port; any other host gets the platform's checks. A certificate
@@ -124,8 +136,9 @@ internal class SubscriptionCertPin(
     var refusedByPin: Boolean = false
         private set
 
-    private fun pinOrRefuse(leaf: java.security.cert.X509Certificate): Boolean {
-        val candidate = certRecordOf(leaf)
+    /** [chainFromCa]: the platform validated the chain and only the name failed (review F4). */
+    private fun pinOrRefuse(leaf: java.security.cert.X509Certificate, chainFromCa: Boolean): Boolean {
+        val candidate = certRecordOf(leaf, chainFromCa)
         if (!pinAccepts(record, candidate, nowMs)) {
             refusedByPin = true
             return false
@@ -145,10 +158,10 @@ internal class SubscriptionCertPin(
             byPin = false
             if (runCatching { platform.checkServerTrusted(chain, authType) }.isSuccess) {
                 // recorded once the fetch succeeds, i.e. once its name passed too (a mismatch goes to the pin rule)
-                observed = certRecordOf(leaf)
+                observed = certRecordOf(leaf, fromCa = true)
                 return
             }
-            if (!pinOrRefuse(leaf)) throw java.security.cert.CertificateException(MISMATCH)
+            if (!pinOrRefuse(leaf, chainFromCa = false)) throw java.security.cert.CertificateException(MISMATCH)
         }
 
         override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = platform.acceptedIssuers
@@ -161,7 +174,7 @@ internal class SubscriptionCertPin(
     val hostnameVerifier = javax.net.ssl.HostnameVerifier { name, session ->
         byPin || javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(name, session) ||
             runCatching { session.peerCertificates.first() as java.security.cert.X509Certificate }
-                .getOrNull()?.let(::pinOrRefuse) == true
+                .getOrNull()?.let { pinOrRefuse(it, chainFromCa = true) } == true
     }
 
     val socketFactory: javax.net.ssl.SSLSocketFactory by lazy {
@@ -221,7 +234,7 @@ internal object SubscriptionImporter {
     private const val HTTP_ONLY_MESSAGE =
         "Подписка только по HTTP не поддерживается: она передаёт пароль подключения открытым текстом. Нужен HTTPS"
     private const val PIN_MISMATCH_MESSAGE =
-        "Сертификат сервера подписки изменился раньше срока прежнего: обновление отклонено"
+        "Сертификат сервера подписки не совпадает с принятым ранее: обновление отклонено"
 
     private sealed interface ParseResult {
         data class Success(val preview: SubscriptionPreview) : ParseResult

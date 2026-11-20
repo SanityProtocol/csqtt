@@ -55,12 +55,21 @@ class SubscriptionTlsTest {
 
         val changed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(future)))
         assertTrue(changed is SubscriptionFetchResult.Failure)
-        assertTrue((changed as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки изменился"))
+        assertTrue((changed as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки не совпадает"))
 
         // the panels the app deploys replace an expired certificate (a 365-day fallback, a lapsed Let's Encrypt one)
         val renewed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(past)))
         assertTrue(renewed is SubscriptionFetchResult.Success)
         assertEquals(SubscriptionTestServers.fixtureSha256, (renewed as SubscriptionFetchResult.Success).cert!!.sha256)
+        assertFalse(renewed.cert!!.fromCa)
+    }
+
+    @Test
+    fun `a server that showed a CA chain is never displaced by a self-signed certificate, even after expiry`() = withHttps { port ->
+        val caRecord = SubscriptionCertRecord("ab".repeat(32), past, fromCa = true)
+        val result = SubscriptionImporter.fetch("https://127.0.0.1:$port/sub", SubscriptionTrust(true, caRecord))
+        assertTrue(result is SubscriptionFetchResult.Failure)
+        assertTrue((result as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки не совпадает"))
     }
 
     @Test
@@ -157,6 +166,7 @@ class SubscriptionTlsTest {
         assertEquals(200, through(pin, "https://127.0.0.1:$port/sub"))
         assertFalse(pin.byPin)
         assertEquals(SubscriptionTestServers.fixtureSha256, pin.observed?.sha256)
+        assertTrue(pin.observed!!.fromCa)
     }
 
     @Test
@@ -165,6 +175,11 @@ class SubscriptionTlsTest {
         val first = SubscriptionCertPin("localhost", port, null, platform = acceptAll)
         assertEquals(200, through(first, "https://localhost:$port/sub"))
         assertTrue(first.byPin)
+        assertTrue("its chain is a CA's: it is recorded as such", first.observed!!.fromCa)
+
+        // a CA chain for another name keeps the expiry rule, also after a CA record (the renewal of an IP certificate)
+        val renewal = SubscriptionCertPin("localhost", port, other(past).copy(fromCa = true), platform = acceptAll)
+        assertEquals(200, through(renewal, "https://localhost:$port/sub"))
 
         val refused = SubscriptionCertPin("localhost", port, other(future), platform = acceptAll)
         assertNull(through(refused, "https://localhost:$port/sub"))
@@ -180,6 +195,9 @@ class SubscriptionTlsTest {
         assertFalse(pinAccepts(SubscriptionCertRecord("ab".repeat(32), now + 5), leaf, now))
         assertTrue(pinAccepts(SubscriptionCertRecord("ab".repeat(32), now - 5), leaf, now))
         assertFalse("an unknown expiry never expires", pinAccepts(SubscriptionCertRecord("ab".repeat(32), 0L), leaf, now))
+        val ca = SubscriptionCertRecord("ab".repeat(32), now - 5, fromCa = true)
+        assertFalse("after a CA chain, a refused chain never replaces it", pinAccepts(ca, leaf, now))
+        assertTrue("a CA chain for another name keeps the expiry rule", pinAccepts(ca, leaf.copy(fromCa = true), now))
         assertNull(SubscriptionCertPin.forUrl("https://h/x", SubscriptionTrust()))
     }
 
