@@ -166,6 +166,7 @@ internal object StoreBackup {
             }
             putTyped(prefs, key, kind, settings.get(name))
         }
+        SettingsStore.bumpProfileEpoch(prefs)
         val activeKey = intPreferencesKey("active_profile")
         prefs[activeKey]?.let { if (it !in indices) prefs[activeKey] = CsqttConstants.Profiles.MIN_INDEX }
     }

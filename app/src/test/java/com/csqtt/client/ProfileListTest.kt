@@ -4,6 +4,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.csqtt.client.Store253Snapshots.load
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -72,5 +73,54 @@ class ProfileListTest {
         // a slot in use is never cleared
         SettingsStore.startCleanIfFree(prefs, 1)
         assertEquals(1, SettingsStore.linkedVps(prefs, 1))
+    }
+
+    @Test
+    fun `an added profile stays listed before it has an address, and a delete keeps the role of the last profile`() {
+        val prefs = load("""{"strings": {"peer": "p"}, "ints": {"active_profile": 0}}""")
+        val added = SettingsStore.addProfileKeys(prefs, linkMode = false)!!
+        prefs[intPreferencesKey("active_profile")] = 0
+        assertTrue(SettingsStore.profileInUse(prefs, added))
+        assertEquals(listOf(0, added), SettingsStore.profileList(prefs).map { it.first })
+        assertEquals(added + 1, SettingsStore.addProfileKeys(prefs, linkMode = false))
+
+        // a participant deletes their only profile: the emptied slot stays active, still a participant
+        val single = load(
+            """{"strings": {"csqtt_link": "${Store253Snapshots.participantLink}"}, "ints": {"active_profile": 0},
+                "booleans": {"csqtt_link_mode": true}}""",
+        )
+        SettingsStore.deleteProfileKeys(single, 0)
+        assertEquals(0, single[intPreferencesKey("active_profile")])
+        assertEquals(true, single[booleanPreferencesKey("csqtt_link_mode")])
+        assertNull(single[stringPreferencesKey("csqtt_link")])
+    }
+
+    @Test
+    fun `deleting, adding and restoring change the epoch the tabs key their saved form state on`() {
+        val epoch = intPreferencesKey("profile_records_epoch")
+        val prefs = load("""{"strings": {"peer": "p", "peer_1": "q"}, "ints": {"active_profile": 1}}""")
+        SettingsStore.deleteProfileKeys(prefs, 1)
+        assertEquals(1, prefs[epoch])
+        SettingsStore.addProfileKeys(prefs, linkMode = false)
+        assertEquals(2, prefs[epoch])
+        val backup = StoreBackup.encode(prefs, serverSecrets = false, decrypt = { it }, exportedAt = 0L)
+        StoreBackup.restore(prefs, backup, encrypt = { it }, decrypt = { it })
+        assertEquals(3, prefs[epoch])
+    }
+
+    @Test
+    fun `the last profile of a subscription takes its metadata, so an auto-update does not bring it back`() {
+        val meta = """{"https://s.invalid/a": {"url": "https://s.invalid/a", "title": "A", "autoUpdateMinutes": 60}}"""
+        val prefs = load(
+            """{"strings": {"peer_1": "a1", "subscription_url_1": "https://s.invalid/a",
+                            "peer_2": "a2", "subscription_url_2": "https://s.invalid/a",
+                            "subscription_meta_v1": ${JSONObject.quote(meta)}},
+                "ints": {"active_profile": 1}}""",
+        )
+        val metaKey = stringPreferencesKey("subscription_meta_v1")
+        SettingsStore.deleteProfileKeys(prefs, 1)
+        assertTrue(prefs[metaKey]!!.contains("s.invalid"))
+        SettingsStore.deleteProfileKeys(prefs, 2)
+        assertFalse(prefs[metaKey]!!.contains("s.invalid"))
     }
 }

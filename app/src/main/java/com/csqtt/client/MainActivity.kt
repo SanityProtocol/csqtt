@@ -376,6 +376,7 @@ fun MainScreen(
         navItems.filter { it.id in allowedIds }
     }
     val tabStateHolder = rememberSaveableStateHolder()
+    val profileEpoch by settingsStore.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
     LaunchedEffect(csqttLinkMode, participantShowLogs) {
         if (csqttLinkMode) {
             if (selectedTab == 2 || (selectedTab == 3 && !participantShowLogs)) {
@@ -527,10 +528,12 @@ fun MainScreen(
                     ) {
                         key(selectedTab) {
                             val tab = selectedTab
+                            // the epoch changes when a slot's profile is replaced (delete, add, restore): the
+                            // old profile's edited form must not come back, and autosave, into the new one
                             val tabStateKey: Any = when (tab) {
-                                0 -> "connection:${tunnelAuthSettings.profile}"
-                                1 -> "tunnel:${tunnelAuthSettings.profile}"
-                                2 -> "deploy:${deploySettings.profile}"
+                                0 -> "connection:${tunnelAuthSettings.profile}:$profileEpoch"
+                                1 -> "tunnel:${tunnelAuthSettings.profile}:$profileEpoch"
+                                2 -> "deploy:${deploySettings.profile}:${deploySettings.epoch}"
                                 else -> tab
                             }
                             tabStateHolder.SaveableStateProvider(tabStateKey) {

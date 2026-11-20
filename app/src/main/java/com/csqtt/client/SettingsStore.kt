@@ -61,8 +61,8 @@ internal fun MutablePreferences.putSecretValue(
 
 internal data class DeploySettingsSnapshot(
     val profile: Int = -1,
-    /** The profile's VPS record (B5b2); null until its first deploy-form write. */
-    val vps: Int? = null,
+    /** See PROFILE_EPOCH: the deploy tab's saved form state is keyed on it. */
+    val epoch: Int = 0,
     val ip: String = "",
     val serverName: String = "",
     val sshLogin: String = "",
@@ -247,6 +247,11 @@ class SettingsStore(context: Context) {
         private val SERVER_WEB_PORT = profileInt("server_web_port")
         // the index of the profile's VPS record (B5b2): the VPS keys with that suffix; absent when it has none
         private val VPS_REF = profileInt("vps_ref")
+        // set by «Добавить профиль», so a profile with no address or link yet stays listed and is never reused as free
+        private val PROFILE_ADDED = profileBoolean("profile_added")
+        // changes whenever a slot's profile is replaced (delete, add, restore): screens key their saved form state on it,
+        // so a form edited for the old profile never autosaves into the new one
+        private val PROFILE_EPOCH = intPreferencesKey("profile_records_epoch")
         private val SNI = profileString("sni")
         private val NO_DNS = profileBoolean("no_dns")
         private val CUSTOM_TURN_IPS = profileString("custom_turn_ips")
@@ -580,7 +585,7 @@ class SettingsStore(context: Context) {
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
-                TUNNEL_WAS_RUNNING,
+                TUNNEL_WAS_RUNNING, PROFILE_EPOCH,
             ).mapTo(HashSet()) { it.name }
         }
 
@@ -636,14 +641,33 @@ class SettingsStore(context: Context) {
         /** A profile the user has: a peer, a link, a subscription, a VPS record or a name they gave it (M-39). */
         internal fun profileInUse(prefs: Preferences, profile: Int): Boolean =
             listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, PROFILE_NAME).any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
-                linkedVps(prefs, profile) != null
+                linkedVps(prefs, profile) != null || prefs[getProfileKey(PROFILE_ADDED, profile)] == true
 
-        /** Deletes [profile]: every connection key, its VPS link with them; the VPS record stays (M-41). */
+        /** A slot's profile was replaced: saved form state of the old one must not reach it (see PROFILE_EPOCH). */
+        internal fun bumpProfileEpoch(prefs: MutablePreferences) {
+            prefs[PROFILE_EPOCH] = (prefs[PROFILE_EPOCH] ?: 0) + 1
+        }
+
+        /**
+         * Deletes [profile]: every connection key, its VPS link with them; the VPS record stays (M-41). The active profile
+         * moves to another in use; with none left it stays on the emptied slot in the role it had. The last profile of a
+         * subscription takes the subscription's metadata with it, so an auto-update does not bring the node back.
+         */
         internal fun deleteProfileKeys(prefs: MutablePreferences, profile: Int) {
+            val linkMode = prefs[getProfileKey(CSQTT_LINK_MODE, profile)]
+            val subscription = prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim().orEmpty()
             clearProfileKeys(prefs, profile, CONNECTION)
+            bumpProfileEpoch(prefs)
             if ((prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX) == profile) {
-                prefs[ACTIVE_PROFILE] = profileIndices.firstOrNull { it != profile && profileInUse(prefs, it) }
-                    ?: CsqttConstants.Profiles.MIN_INDEX
+                val next = profileIndices.firstOrNull { it != profile && profileInUse(prefs, it) } ?: profile
+                prefs[ACTIVE_PROFILE] = next
+                if (next == profile && linkMode != null) prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = linkMode
+            }
+            if (subscription.isNotEmpty() &&
+                profileIndices.none { prefs[getProfileKey(SUBSCRIPTION_URL, it)]?.trim() == subscription }
+            ) {
+                val meta = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META]).toMutableMap()
+                if (meta.remove(subscription) != null) prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
             }
         }
 
@@ -692,7 +716,9 @@ class SettingsStore(context: Context) {
             val free = profileIndices.firstOrNull { it != active && !profileInUse(prefs, it) } ?: return null
             clearProfileKeys(prefs, free, CONNECTION)
             prefs[getProfileKey(CSQTT_LINK_MODE, free)] = linkMode
+            prefs[getProfileKey(PROFILE_ADDED, free)] = true
             prefs[ACTIVE_PROFILE] = free
+            bumpProfileEpoch(prefs)
             return free
         }
 
@@ -832,7 +858,7 @@ class SettingsStore(context: Context) {
             vps?.let { readSecret(prefs, encrypted, legacy, it) } ?: ""
         DeploySettingsSnapshot(
             profile = profile,
-            vps = vps,
+            epoch = prefs[PROFILE_EPOCH] ?: 0,
             ip = record(DEPLOY_IP) ?: "",
             serverName = record(DEPLOY_SERVER_NAME) ?: "",
             sshLogin = record(DEPLOY_LOGIN) ?: "",
@@ -1054,6 +1080,9 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] ?: ""
     }
 
+    /** See PROFILE_EPOCH: each tab's saved form state is keyed on the profile and this. */
+    val profileEpoch: Flow<Int> = dataStore.data.map { it[PROFILE_EPOCH] ?: 0 }
+
     /** Classic's «Профиль конфигурации»: the profiles in use and the active one, with their names (M-97). */
     internal val profileList: Flow<List<Pair<Int, String>>> = dataStore.data.map(::profileList)
 
@@ -1246,11 +1275,6 @@ class SettingsStore(context: Context) {
      */
     suspend fun clearProfile(profile: Int) {
         dataStore.edit { prefs -> deleteProfileKeys(prefs, profile) }
-    }
-
-    /** Deletes a VPS record and every link to it; the profiles keep connecting (M-41). */
-    suspend fun deleteVps(index: Int) {
-        dataStore.edit { prefs -> deleteVpsKeys(prefs, index) }
     }
 
     /**
