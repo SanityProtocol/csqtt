@@ -1,20 +1,19 @@
 package com.csqtt.client
 
 import com.csqtt.client.ui.legacy.utils.encryptCsqttPayload
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.net.InetSocketAddress
 
+/** The parsers, over HTTPS to a self-signed server the user marked (pinned on first use); the `http://` URLs are fetched as https. */
 class SubscriptionImporterTest {
     private fun withServer(
         body: String,
         status: Int = 200,
         block: suspend (String) -> Unit,
     ) = runBlocking {
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val server = SubscriptionTestServers.https()
         server.createContext("/") { exchange ->
             val bytes = body.toByteArray(Charsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
@@ -53,7 +52,7 @@ class SubscriptionImporterTest {
         }
         """.trimIndent(),
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
         val preview = (result as SubscriptionFetchResult.Success).preview
         assertEquals("Demo", preview.title)
@@ -91,7 +90,7 @@ class SubscriptionImporterTest {
         }
         """.trimIndent(),
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
         val preview = (result as SubscriptionFetchResult.Success).preview
         assertEquals(1, preview.nodes.size)
@@ -102,7 +101,7 @@ class SubscriptionImporterTest {
     fun reportsServerRejection() = withServer(
         """{"ok": false, "error": "subscription expired"}""",
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Failure)
         assertEquals(
             "subscription expired",
@@ -112,7 +111,7 @@ class SubscriptionImporterTest {
 
     @Test
     fun followsRedirectWithinAllowedScheme() = runBlocking {
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val server = SubscriptionTestServers.https()
         server.createContext("/sub") { exchange ->
             exchange.responseHeaders.add("Location", "/final")
             exchange.sendResponseHeaders(302, -1)
@@ -131,7 +130,7 @@ class SubscriptionImporterTest {
         server.start()
         try {
             val url = "http://127.0.0.1:${server.address.port}/sub"
-            val result = SubscriptionImporter.fetch(url, allowHttp = true)
+            val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
             assertTrue(result is SubscriptionFetchResult.Success)
             val preview = (result as SubscriptionFetchResult.Success).preview
             assertEquals("Redirected", preview.title)
@@ -143,7 +142,7 @@ class SubscriptionImporterTest {
 
     @Test
     fun rejectsRedirectToDisallowedScheme() = runBlocking {
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val server = SubscriptionTestServers.https()
         server.createContext("/sub") { exchange ->
             exchange.responseHeaders.add("Location", "ftp://example.com/sub")
             exchange.sendResponseHeaders(302, -1)
@@ -152,7 +151,7 @@ class SubscriptionImporterTest {
         server.start()
         try {
             val url = "http://127.0.0.1:${server.address.port}/sub"
-            val result = SubscriptionImporter.fetch(url, allowHttp = true)
+            val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
             assertTrue(result is SubscriptionFetchResult.Failure)
             assertEquals(
                 "Поддерживаются только HTTPS-ссылки",
@@ -184,7 +183,7 @@ class SubscriptionImporterTest {
         }
         """.trimIndent(),
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
         val preview = (result as SubscriptionFetchResult.Success).preview
         assertEquals("Team", preview.title)
@@ -210,7 +209,7 @@ class SubscriptionImporterTest {
 
     @Test
     fun resolvesGroupSubJsonEndpoint() = runBlocking {
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val server = SubscriptionTestServers.https()
         server.createContext("/group/sub-group") { exchange ->
             val bytes = "<html><head><title>Fallback</title></head><body></body></html>"
                 .toByteArray(Charsets.UTF_8)
@@ -236,7 +235,7 @@ class SubscriptionImporterTest {
         server.start()
         try {
             val url = "http://127.0.0.1:${server.address.port}/group/sub-group"
-            val result = SubscriptionImporter.fetch(url, allowHttp = true)
+            val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
             assertTrue(result is SubscriptionFetchResult.Success)
             val preview = (result as SubscriptionFetchResult.Success).preview
             assertEquals("Team", preview.title)
@@ -255,7 +254,7 @@ class SubscriptionImporterTest {
         ]
         """.trimIndent(),
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
         val preview = (result as SubscriptionFetchResult.Success).preview
         assertEquals(2, preview.nodes.size)
@@ -275,7 +274,7 @@ class SubscriptionImporterTest {
         </html>
         """.trimIndent(),
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
         val preview = (result as SubscriptionFetchResult.Success).preview
         assertEquals("Group Page", preview.title)
@@ -294,7 +293,7 @@ class SubscriptionImporterTest {
         </html>
         """.trimIndent(),
     ) { url ->
-        val result = SubscriptionImporter.fetch(url, allowHttp = true)
+        val result = SubscriptionImporter.fetch(url, SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
         val preview = (result as SubscriptionFetchResult.Success).preview
         assertEquals("My Sub", preview.title)

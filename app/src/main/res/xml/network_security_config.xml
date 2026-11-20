@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No cleartext anywhere (M-171): the only thing that spoke plain HTTP was the subscription fetch, now always HTTPS.
+     The system's certificate authorities only; a self-signed subscription server is trusted by its pinned certificate
+     in code (SubscriptionCertPin), for the subscriptions the user marked. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

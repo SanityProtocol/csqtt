@@ -52,16 +52,20 @@ internal object SubscriptionSync {
         url: String,
     ): SubscriptionRefreshOutcome {
         val meta = store.subscriptionMeta.first()[url]
-        val allowHttp = meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
-        val normalized = normalizeSubscriptionUrl(url, allowHttp)
+        // marked by the user (V2's «Скачивать по HTTP», or an http:// URL they typed): fetched over HTTPS all the same,
+        // its server trusted by its pinned certificate (M-171)
+        val pinned = meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
+        val normalized = normalizeSubscriptionUrl(url, pinned)
         store.markSubscriptionAttempt(normalized)
-        return when (val result = SubscriptionImporter.fetch(normalized, allowHttp)) {
+        val trust = SubscriptionTrust(pinned, meta?.certSha256.orEmpty())
+        return when (val result = SubscriptionImporter.fetch(normalized, trust)) {
             is SubscriptionFetchResult.Success -> {
+                result.certSha256?.let { store.pinSubscriptionCertificate(normalized, it) }
                 val summary = SubscriptionImporter.importNodes(
                     store = store,
                     rawUrl = normalized,
                     preview = result.preview,
-                    allowHttp = allowHttp,
+                    allowHttp = pinned,
                 )
                 store.markSubscriptionUpdated(normalized, title = result.preview.title)
                 SubscriptionRefreshOutcome(

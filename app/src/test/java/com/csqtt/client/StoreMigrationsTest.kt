@@ -79,14 +79,25 @@ class StoreMigrationsTest {
     @Test
     fun `a subscription slot and a token account keep everything but the modes' and workers' spelling`() {
         val (before, after) = migrate(Store253Snapshots.subscriptionAndToken)
+        // step 3 (B5c1, M-170): the subscription slot becomes the participant link it came from
         assertEquals(
-            setOf("vk_auth_mode_2", "workers_per_hash_2", "store_schema_version"),
+            setOf(
+                "vk_auth_mode_2", "workers_per_hash_2", "store_schema_version",
+                "peer_5", "connection_password_local_5", "csqtt_link_5", "csqtt_link_mode_5",
+            ),
             changedKeys(before, after),
         )
         assertEquals(CsqttConstants.VkAuth.MODE_CALLS, after["vk_auth_mode_2"])
         assertEquals(70, after["workers_per_hash_2"])
         assertEquals(40, after["workers_per_hash_5"])
         assertEquals("c3", after["vk_access_token_encrypted_2"])
+        assertEquals(true, after["csqtt_link_mode_5"])
+        val link = com.csqtt.client.ui.legacy.utils.parseCsqttLink(after["csqtt_link_5"] as String)!!
+        assertEquals("192.0.2.10", link.host)
+        assertEquals(CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT, link.port)
+        assertEquals("s", link.password)
+        assertEquals(40, link.power)
+        assertEquals("https://sub.example.invalid/s/abc", after["subscription_url_5"])
     }
 
     @Test

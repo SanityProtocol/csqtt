@@ -48,6 +48,11 @@ class UpgradeFrom253Test {
                 prefs[stringPreferencesKey("csqtt_link_3")] =
                     "csqtt://connect?v=2&host=198.51.100.9&peer=46000&password=p&hashes=$hashA"
                 prefs[stringPreferencesKey("vk_hashes_3")] = "$hashA,$hashC"
+                // a 2.5.3 subscription slot in owner mode, holding the node's hashes as its own (B5c1, M-170)
+                prefs[stringPreferencesKey("peer_8")] = "192.0.2.80"
+                prefs[stringPreferencesKey("subscription_url_8")] = "https://sub.example.invalid/s"
+                prefs[stringPreferencesKey("connection_password_local_8")] = "subpw"
+                prefs[stringPreferencesKey("vk_hashes_8")] = hashA
             }
             oldScope.coroutineContext[kotlinx.coroutines.Job]!!.cancelAndJoin()
 
@@ -68,6 +73,12 @@ class UpgradeFrom253Test {
             assertEquals(SettingsStore.STORE_SCHEMA, prefs[intPreferencesKey("store_schema_version")])
             // B5b2: each slot's deploy data is a VPS record its profile links, a VPS-only slot too
             assertEquals(0, prefs[intPreferencesKey("vps_ref")])
+            // B5c1: the subscription slot is the participant link it came from; the owner's hash is no longer its own
+            assertEquals(true, prefs[booleanPreferencesKey("csqtt_link_mode_8")])
+            assertNull(prefs[stringPreferencesKey("vk_hashes_8")])
+            val subscriptionLink = com.csqtt.client.ui.legacy.utils.parseCsqttLink(prefs[stringPreferencesKey("csqtt_link_8")]!!)!!
+            assertEquals(listOf(hashA), subscriptionLink.hashes)
+            assertEquals("subpw", subscriptionLink.password)
             assertEquals(7, prefs[intPreferencesKey("vps_ref_7")])
             assertNull(prefs[intPreferencesKey("vps_ref_3")])
         } finally {

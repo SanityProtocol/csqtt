@@ -16,6 +16,8 @@ import java.nio.charset.Charset
 import java.util.Locale
 
 internal data class SubscriptionNode(
+    /** The node's `csqtt://` link as the server served it: stored as is, never rebuilt (M-72, M-170). */
+    val link: String,
     val name: String,
     val host: String,
     val port: Int,
@@ -33,16 +35,14 @@ internal data class SubscriptionPreview(
 )
 
 internal sealed interface SubscriptionFetchResult {
-    data class Success(val preview: SubscriptionPreview) : SubscriptionFetchResult
+    /** [certSha256]: the subscription server's leaf certificate, when the fetch went through a pinned connection. */
+    data class Success(val preview: SubscriptionPreview, val certSha256: String? = null) : SubscriptionFetchResult
     data class Failure(val message: String) : SubscriptionFetchResult
 }
 
 internal data class SubscriptionProfileWrite(
     val profile: Int,
-    val host: String,
-    val port: Int,
-    val password: String,
-    val hashes: List<String>,
+    val link: String,
     val power: Int?,
     val nodeName: String,
     val title: String,
@@ -67,17 +67,105 @@ internal data class SubscriptionImportSummary(
     }
 }
 
+/** The URL a subscription is fetched from: always HTTPS, at the same host and port as an `http://` one (M-171). */
+internal fun subscriptionTransportUrl(url: String): String =
+    if (url.startsWith("http://", ignoreCase = true)) "https://" + url.substring(7) else url
+
+/**
+ * How a subscription's own server is trusted (M-171). [pinned]: the user marked it (V2's «Скачивать по HTTP», or an
+ * `http://` URL they typed) — its server is trusted by its certificate's [certSha256], pinned on the first fetch when empty.
+ * Otherwise the platform's full checks.
+ */
+internal data class SubscriptionTrust(val pinned: Boolean = false, val certSha256: String = "")
+
+/** The pinned certificate's check: [expected] null pins whatever is seen (trust on first use). Returns the SHA-256 hex. */
+internal fun acceptPinnedLeaf(expected: String?, leafDer: ByteArray): String {
+    val seen = java.security.MessageDigest.getInstance("SHA-256").digest(leafDer)
+        .joinToString("") { "%02x".format(it) }
+    if (expected != null && !expected.equals(seen, ignoreCase = true)) {
+        throw java.security.cert.CertificateException(SubscriptionCertPin.MISMATCH)
+    }
+    return seen
+}
+
+/**
+ * One fetch's trust for the subscription's own host and port; any other host gets the platform's checks. A certificate the
+ * platform accepts is checked as for any server (its name too) and never pinned, so a CA certificate that renews keeps
+ * working; only a certificate the platform refuses (a self-signed panel) is held to the pin.
+ */
+internal class SubscriptionCertPin(
+    private val host: String,
+    private val port: Int,
+    private val expected: String?,
+    private val platform: javax.net.ssl.X509TrustManager = platformTrustManager(),
+) {
+    /** The pinned certificate's SHA-256 when the last handshake went by the pin; null when the platform accepted it. */
+    @Volatile
+    var seen: String? = null
+        private set
+
+    /** The last handshake went by the pin, so the pin, not a CA, vouches for the name. */
+    @Volatile
+    var byPin: Boolean = false
+        private set
+
+    private val manager = object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {
+            throw java.security.cert.CertificateException("client certificates are not used")
+        }
+
+        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {
+            val leaf = chain?.firstOrNull() ?: throw java.security.cert.CertificateException("no server certificate")
+            if (runCatching { platform.checkServerTrusted(chain, authType) }.isSuccess) {
+                byPin = false
+                return
+            }
+            seen = acceptPinnedLeaf(expected, leaf.encoded)
+            byPin = true
+        }
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = platform.acceptedIssuers
+    }
+
+    /** The name check: the platform's, unless the pin vouched for this very certificate. */
+    val hostnameVerifier = javax.net.ssl.HostnameVerifier { name, session ->
+        byPin || javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(name, session)
+    }
+
+    val socketFactory: javax.net.ssl.SSLSocketFactory by lazy {
+        javax.net.ssl.SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf<javax.net.ssl.TrustManager>(manager), java.security.SecureRandom())
+        }.socketFactory
+    }
+
+    fun covers(url: URL): Boolean =
+        url.host.equals(host, ignoreCase = true) && (if (url.port == -1) url.defaultPort else url.port) == port
+
+    companion object {
+        const val MISMATCH = "subscription certificate pin mismatch"
+
+        private fun platformTrustManager(): javax.net.ssl.X509TrustManager =
+            javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+                .apply { init(null as java.security.KeyStore?) }
+                .trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>().first()
+
+        fun forUrl(url: String, trust: SubscriptionTrust): SubscriptionCertPin? {
+            if (!trust.pinned) return null
+            val parsed = runCatching { URL(url) }.getOrNull() ?: return null
+            val port = if (parsed.port == -1) parsed.defaultPort else parsed.port
+            return SubscriptionCertPin(parsed.host, port, trust.certSha256.trim().ifEmpty { null })
+        }
+    }
+}
+
 internal fun normalizeSubscriptionUrl(raw: String, allowHttp: Boolean = false): String {
     val trimmed = raw.trim()
     if (trimmed.isEmpty()) return ""
+    // the URL is the subscription's key, so a stored one is kept as it is; the fetch itself is always HTTPS
     return if (trimmed.startsWith("http://", ignoreCase = true) ||
         trimmed.startsWith("https://", ignoreCase = true)
     ) {
-        if (allowHttp && trimmed.startsWith("https://", ignoreCase = true)) {
-            "http://" + trimmed.substring(8)
-        } else {
-            trimmed
-        }
+        trimmed
     } else {
         if (allowHttp) "http://$trimmed" else "https://$trimmed"
     }
@@ -94,8 +182,14 @@ internal object SubscriptionImporter {
 
     private sealed interface BodyResult {
         data class Body(val text: String) : BodyResult
-        data class Failed(val message: String) : BodyResult
+        /** [tls]: the TLS handshake failed (an `http://`-only server, or a certificate). */
+        data class Failed(val message: String, val tls: Boolean = false) : BodyResult
     }
+
+    private const val HTTP_ONLY_MESSAGE =
+        "Подписка только по HTTP не поддерживается: она передаёт пароль подключения открытым текстом. Нужен HTTPS"
+    private const val PIN_MISMATCH_MESSAGE =
+        "Сертификат сервера подписки изменился: обновление отклонено. Если сервер сменил сертификат, добавьте подписку заново"
 
     private sealed interface ParseResult {
         data class Success(val preview: SubscriptionPreview) : ParseResult
@@ -103,43 +197,31 @@ internal object SubscriptionImporter {
         data class Invalid(val message: String) : ParseResult
     }
 
-    private val trustAllSslSocketFactory: javax.net.ssl.SSLSocketFactory by lazy {
-        val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
-            object : javax.net.ssl.X509TrustManager {
-                override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-            },
-        )
-        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
-        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-        sslContext.socketFactory
-    }
-
-    private val trustAllHostnameVerifier: javax.net.ssl.HostnameVerifier =
-        javax.net.ssl.HostnameVerifier { _, _ -> true }
-
     suspend fun fetch(
         rawUrl: String,
-        allowHttp: Boolean = false,
+        trust: SubscriptionTrust = SubscriptionTrust(),
     ): SubscriptionFetchResult = withContext(Dispatchers.IO) {
-        val url = normalizeSubscriptionUrl(rawUrl, allowHttp)
+        val url = normalizeSubscriptionUrl(rawUrl, trust.pinned)
         if (url.isEmpty()) return@withContext SubscriptionFetchResult.Failure("Укажите ссылку подписки")
-        val uri = runCatching { URI(url) }.getOrNull()
+        val transport = subscriptionTransportUrl(url)
+        val uri = runCatching { URI(transport) }.getOrNull()
         if (uri?.host.isNullOrBlank()) {
             return@withContext SubscriptionFetchResult.Failure("Некорректная ссылка подписки")
         }
-        if (!isAllowedScheme(url, allowHttp)) {
+        if (!isAllowedScheme(transport)) {
             return@withContext SubscriptionFetchResult.Failure("Поддерживаются только HTTPS-ссылки")
         }
+        val pin = SubscriptionCertPin.forUrl(transport, trust)
+        val plainHttpUrl = url.startsWith("http://", ignoreCase = true)
 
         var lastError = "Не удалось загрузить подписку"
         var rejectedError: String? = null
         for (candidate in candidateUrls(uri)) {
-            when (val body = fetchBody(candidate, allowHttp)) {
-                is BodyResult.Failed -> lastError = body.message
+            when (val body = fetchBody(candidate, pin)) {
+                is BodyResult.Failed -> lastError = if (body.tls && plainHttpUrl) HTTP_ONLY_MESSAGE else body.message
                 is BodyResult.Body -> when (val parsed = parseBody(body.text)) {
-                    is ParseResult.Success -> return@withContext SubscriptionFetchResult.Success(parsed.preview)
+                    is ParseResult.Success ->
+                        return@withContext SubscriptionFetchResult.Success(parsed.preview, pin?.seen)
                     is ParseResult.Rejected -> rejectedError = parsed.message
                     is ParseResult.Invalid -> lastError = parsed.message
                 }
@@ -261,10 +343,7 @@ internal object SubscriptionImporter {
         title: String,
     ): SubscriptionProfileWrite = SubscriptionProfileWrite(
         profile = profile,
-        host = host,
-        port = port,
-        password = password,
-        hashes = hashes,
+        link = link,
         power = power,
         nodeName = name,
         title = title,
@@ -272,7 +351,9 @@ internal object SubscriptionImporter {
         subUuid = subUuid,
     )
 
-    private fun ProfileConnectionSnapshot.endpointKey(): String? {
+    internal fun ProfileConnectionSnapshot.endpointKey(): String? {
+        // a link-mode profile connects to its link's server (a subscription node is one now, M-170)
+        if (csqttLinkMode) return parseCsqttLink(csqttLink)?.let { endpointKey(it.host, it.port) }
         val raw = peer.trim()
         if (raw.isEmpty()) return null
         if (raw.startsWith('[')) {
@@ -330,19 +411,22 @@ internal object SubscriptionImporter {
 
     private fun fetchBody(
         rawUrl: String,
-        allowHttp: Boolean,
+        pin: SubscriptionCertPin?,
         redirectsLeft: Int = MAX_REDIRECTS,
     ): BodyResult {
         val connection = runCatching {
-            (URL(rawUrl).openConnection() as HttpURLConnection).apply {
+            val target = URL(rawUrl)
+            (target.openConnection() as HttpURLConnection).apply {
                 connectTimeout = TIMEOUT_MS
                 readTimeout = TIMEOUT_MS
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", "csqtt-client")
                 setRequestProperty("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
-                if (allowHttp && this is javax.net.ssl.HttpsURLConnection) {
-                    sslSocketFactory = trustAllSslSocketFactory
-                    hostnameVerifier = trustAllHostnameVerifier
+                // the subscription's own server, marked by the user: a self-signed certificate is held to its pin, and
+                // then the pin vouches for the name too (no CA did); every other host is checked by the platform alone
+                if (pin != null && this is javax.net.ssl.HttpsURLConnection && pin.covers(target)) {
+                    sslSocketFactory = pin.socketFactory
+                    hostnameVerifier = pin.hostnameVerifier
                 }
             }
         }.getOrElse {
@@ -362,10 +446,10 @@ internal object SubscriptionImporter {
                     val next = runCatching { URL(URL(rawUrl), location).toString() }.getOrNull()
                     if (next == null) {
                         BodyResult.Failed("Некорректное перенаправление")
-                    } else if (!isAllowedScheme(next, allowHttp)) {
+                    } else if (!isAllowedScheme(next)) {
                         BodyResult.Failed("Поддерживаются только HTTPS-ссылки")
                     } else {
-                        fetchBody(next, allowHttp, redirectsLeft - 1)
+                        fetchBody(next, pin, redirectsLeft - 1)
                     }
                 }
             } else if (code !in 200..299) {
@@ -383,6 +467,12 @@ internal object SubscriptionImporter {
                     }
                 }
             }
+        } catch (e: javax.net.ssl.SSLException) {
+            if (generateSequence<Throwable>(e) { it.cause }.any { it.message == SubscriptionCertPin.MISMATCH }) {
+                BodyResult.Failed(PIN_MISMATCH_MESSAGE)
+            } else {
+                BodyResult.Failed("Ошибка TLS: ${e.message ?: "сертификат не принят"}", tls = true)
+            }
         } catch (e: Exception) {
             BodyResult.Failed("Ошибка сети: ${e.message ?: "нет соединения"}")
         } finally {
@@ -390,10 +480,8 @@ internal object SubscriptionImporter {
         }
     }
 
-    private fun isAllowedScheme(url: String, allowHttp: Boolean): Boolean {
-        val scheme = runCatching { URI(url).scheme }.getOrNull()?.lowercase(Locale.ROOT)
-        return scheme == "https" || (allowHttp && scheme == "http")
-    }
+    private fun isAllowedScheme(url: String): Boolean =
+        runCatching { URI(url).scheme }.getOrNull()?.lowercase(Locale.ROOT) == "https"
 
     private fun charsetOf(connection: HttpURLConnection): Charset {
         val name = connection.contentType
@@ -480,6 +568,7 @@ internal object SubscriptionImporter {
         val parsed = parseCsqttLink(rawLink) ?: return null
         if (parsed.password.isBlank()) return null
         return SubscriptionNode(
+            link = rawLink,
             name = obj.optString("name").trim().ifBlank { fallbackName },
             host = parsed.host,
             port = parsed.port,
@@ -524,6 +613,7 @@ internal object SubscriptionImporter {
                 continue
             }
             nodes += SubscriptionNode(
+                link = rawLink,
                 name = title,
                 host = parsed.host,
                 port = parsed.port,

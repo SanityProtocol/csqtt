@@ -137,7 +137,13 @@ internal data class SubscriptionMeta(
     val autoUpdateMinutes: Int = 0,
     val lastUpdatedAt: Long = 0L,
     val lastAttemptAt: Long = 0L,
+    /**
+     * V2's «Скачивать по HTTP»: the user accepted this subscription's server certificate unchecked. It now means the
+     * server is trusted by its pinned certificate (M-171), never over plain HTTP.
+     */
     val allowHttp: Boolean = false,
+    /** SHA-256 (hex) of the subscription server's pinned leaf certificate; empty until its first fetch pins it. */
+    val certSha256: String = "",
 ) {
     fun needsUpdate(now: Long): Boolean {
         if (autoUpdateMinutes <= 0 || url.isBlank()) return false
@@ -165,6 +171,7 @@ private fun decodeSubscriptionMeta(raw: String?): Map<String, SubscriptionMeta> 
             lastUpdatedAt = entry.optLong("lastUpdatedAt", 0L).coerceAtLeast(0L),
             lastAttemptAt = entry.optLong("lastAttemptAt", 0L).coerceAtLeast(0L),
             allowHttp = entry.optBoolean("allowHttp", false),
+            certSha256 = entry.optString("certSha256").trim(),
         )
     }
     return result
@@ -183,6 +190,7 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
                 put("lastUpdatedAt", value.lastUpdatedAt)
                 put("lastAttemptAt", value.lastAttemptAt)
                 put("allowHttp", value.allowHttp)
+                if (value.certSha256.isNotBlank()) put("certSha256", value.certSha256)
             },
         )
     }
@@ -444,7 +452,7 @@ class SettingsStore(context: Context) {
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 2
+        internal const val STORE_SCHEMA = 3
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -488,6 +496,13 @@ class SettingsStore(context: Context) {
                 // classic has no VPS list, and a record no profile links could not be reached)
                 for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
                     step { if (vpsRecordExists(prefs, profile)) prefs[getProfileKey(VPS_REF, profile)] = profile }
+                }
+            }
+            if (from < 3) {
+                // 2.6.0, B5c1: a subscription slot is the owner's link, not an owner-mode slot holding the owner's hashes
+                // as its own (M-170)
+                for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
+                    step { subscriptionSlotToLink(prefs, profile) }
                 }
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
@@ -685,6 +700,106 @@ class SettingsStore(context: Context) {
          * A new profile written into a free slot starts clean: no VK keys or lists left by an older profile there (M-40).
          * The active slot's keys are the settings the user is looking at, so they stay.
          */
+        /**
+         * A subscription node into its slot (M-170): the owner's link as served, in link mode, so its hashes stay the owner's
+         * («от владельца», masked, never the profile's own) and a token link connects from the link. A slot that held the
+         * node in owner mode (2.5.3) loses the node's hashes, peer and password, which the link now carries.
+         */
+        internal fun writeSubscriptionNode(prefs: MutablePreferences, write: SubscriptionProfileWrite) {
+            val profile = write.profile
+            if (write.link.isBlank()) return
+            startCleanIfFree(prefs, profile)
+            useParticipantLink(prefs, profile, write.link.trim())
+
+            val power = write.power?.coerceIn(1, CsqttConstants.Tunnel.MAX_WORKERS)
+            val storedWorkers = prefs[getProfileKey(WORKERS_PER_HASH, profile)]
+            val targetWorkers = when {
+                power == null -> storedWorkers ?: 10
+                storedWorkers == null -> power
+                else -> storedWorkers.coerceAtMost(power)
+            }
+            prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(
+                targetWorkers,
+                maximum = power ?: CsqttConstants.Tunnel.MAX_WORKERS,
+            )
+
+            val title = write.title.trim()
+            val nodeName = write.nodeName.trim()
+            val previousNode = prefs[getProfileKey(SUBSCRIPTION_NODE, profile)].orEmpty()
+            val currentName = prefs[getProfileKey(PROFILE_NAME, profile)]
+            val defaultName = defaultProfileName(profile)
+            val renameAllowed = currentName.isNullOrBlank() ||
+                currentName == defaultName ||
+                currentName == previousNode
+            if (renameAllowed) {
+                if (nodeName.isEmpty() || nodeName == defaultName) {
+                    prefs.remove(getProfileKey(PROFILE_NAME, profile))
+                } else {
+                    prefs[getProfileKey(PROFILE_NAME, profile)] = nodeName
+                }
+            }
+
+            prefs[getProfileKey(SUBSCRIPTION_URL, profile)] = write.url.trim()
+            if (title.isEmpty()) {
+                prefs.remove(getProfileKey(SUBSCRIPTION_TITLE, profile))
+            } else {
+                prefs[getProfileKey(SUBSCRIPTION_TITLE, profile)] = title
+            }
+            if (write.subUuid.isNullOrBlank()) {
+                prefs.remove(getProfileKey(SUBSCRIPTION_UUID, profile))
+            } else {
+                prefs[getProfileKey(SUBSCRIPTION_UUID, profile)] = write.subUuid
+            }
+            prefs[getProfileKey(SUBSCRIPTION_NODE, profile)] = nodeName
+            if (power == null) {
+                prefs.remove(getProfileKey(SUBSCRIPTION_POWER, profile))
+            } else {
+                prefs[getProfileKey(SUBSCRIPTION_POWER, profile)] = power
+            }
+        }
+
+        /**
+         * [profile] connects through the owner's [link]. Coming from owner mode, the slot's connection fields go: the link
+         * carries peer, port, password and the owner's hashes, and the hashes stored as its own were the owner's.
+         */
+        private fun useParticipantLink(prefs: MutablePreferences, profile: Int, link: String) {
+            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) {
+                listOf(
+                    VK_HASHES, PEER, SERVER_PEER_PORT, CONNECTION_PASSWORD_LOCAL, CONNECTION_PASSWORD,
+                    CONNECTION_PASSWORD_ENCRYPTED, LINK_HASHES_REMOVED,
+                ).forEach { prefs.remove(getProfileKey(it, profile)) }
+            }
+            prefs[getProfileKey(CSQTT_LINK, profile)] = link
+            prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
+        }
+
+        /**
+         * Store step 3 (M-170): a 2.5.3 subscription slot in owner mode becomes the participant link it came from. Built
+         * from the stored fields, as no original link was kept; skipped while its password is not readable here (the
+         * keystore is not), and then its next refresh converts it.
+         */
+        internal fun subscriptionSlotToLink(prefs: MutablePreferences, profile: Int) {
+            if (prefs[getProfileKey(SUBSCRIPTION_URL, profile)].isNullOrBlank()) return
+            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) return
+            val peer = prefs[getProfileKey(PEER, profile)]?.trim().orEmpty()
+            if (peer.isEmpty()) return
+            val host = if (peer.startsWith("[")) peer.substringAfter('[').substringBefore(']') else peer
+            if (host.isEmpty() || host.contains(':') && !peer.startsWith("[")) return
+            val port = prefs[getProfileKey(SERVER_PEER_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT
+            val password = (prefs[getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)]
+                ?: prefs[getProfileKey(CONNECTION_PASSWORD, profile)])?.takeIf { it.isNotBlank() } ?: return
+            val hashes = prefs[getProfileKey(VK_HASHES, profile)].orEmpty()
+                .split(Regex("[,\\s]+")).map(String::trim).filter(String::isNotEmpty).distinct()
+            val link = com.csqtt.client.ui.legacy.utils.formatCsqttLink(
+                host = host,
+                peer = port,
+                password = password,
+                hashes = hashes,
+                power = prefs[getProfileKey(SUBSCRIPTION_POWER, profile)],
+            )
+            useParticipantLink(prefs, profile, link)
+        }
+
         internal fun startCleanIfFree(prefs: MutablePreferences, profile: Int) {
             if (!profileInUse(prefs, profile) && profile != (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)) {
                 clearProfileKeys(prefs, profile, CONNECTION)
@@ -1195,75 +1310,7 @@ class SettingsStore(context: Context) {
      */
     internal suspend fun applySubscriptionImport(writes: List<SubscriptionProfileWrite>) {
         if (writes.isEmpty()) return
-        dataStore.edit { prefs ->
-            for (write in writes) {
-                val profile = write.profile
-                val host = write.host.trim().removePrefix("[").removeSuffix("]")
-                if (host.isEmpty() || write.port !in 1..65535) continue
-                startCleanIfFree(prefs, profile)
-
-                prefs[getProfileKey(PEER, profile)] =
-                    if (host.contains(':')) "[$host]:${write.port}" else host
-                prefs[getProfileKey(SERVER_PEER_PORT, profile)] = write.port
-                prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = false
-                prefs.remove(getProfileKey(CSQTT_LINK, profile))
-
-                val localKey = getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)
-                prefs[localKey] = write.password
-                prefs.remove(getProfileKey(CONNECTION_PASSWORD, profile))
-                prefs.remove(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile))
-
-                val power = write.power?.coerceIn(1, CsqttConstants.Tunnel.MAX_WORKERS)
-                val storedWorkers = prefs[getProfileKey(WORKERS_PER_HASH, profile)]
-                val targetWorkers = when {
-                    power == null -> storedWorkers ?: 10
-                    storedWorkers == null -> power
-                    else -> storedWorkers.coerceAtMost(power)
-                }
-                prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(
-                    targetWorkers,
-                    maximum = power ?: CsqttConstants.Tunnel.MAX_WORKERS,
-                )
-
-                val title = write.title.trim()
-                val nodeName = write.nodeName.trim()
-                val previousNode = prefs[getProfileKey(SUBSCRIPTION_NODE, profile)].orEmpty()
-                val currentName = prefs[getProfileKey(PROFILE_NAME, profile)]
-                val defaultName = defaultProfileName(profile)
-                val renameAllowed = currentName.isNullOrBlank() ||
-                    currentName == defaultName ||
-                    currentName == previousNode
-                if (renameAllowed) {
-                    if (nodeName.isEmpty() || nodeName == defaultName) {
-                        prefs.remove(getProfileKey(PROFILE_NAME, profile))
-                    } else {
-                        prefs[getProfileKey(PROFILE_NAME, profile)] = nodeName
-                    }
-                }
-
-                prefs[getProfileKey(SUBSCRIPTION_URL, profile)] = write.url.trim()
-                if (title.isEmpty()) {
-                    prefs.remove(getProfileKey(SUBSCRIPTION_TITLE, profile))
-                } else {
-                    prefs[getProfileKey(SUBSCRIPTION_TITLE, profile)] = title
-                }
-                if (write.subUuid.isNullOrBlank()) {
-                    prefs.remove(getProfileKey(SUBSCRIPTION_UUID, profile))
-                } else {
-                    prefs[getProfileKey(SUBSCRIPTION_UUID, profile)] = write.subUuid
-                }
-                prefs[getProfileKey(SUBSCRIPTION_NODE, profile)] = nodeName
-                if (power == null) {
-                    prefs.remove(getProfileKey(SUBSCRIPTION_POWER, profile))
-                } else {
-                    prefs[getProfileKey(SUBSCRIPTION_POWER, profile)] = power
-                }
-
-                if (write.hashes.isNotEmpty()) {
-                    prefs[getProfileKey(VK_HASHES, profile)] = write.hashes.joinToString(",")
-                }
-            }
-        }
+        dataStore.edit { prefs -> writes.forEach { writeSubscriptionNode(prefs, it) } }
     }
 
     /** The first slot no profile uses (M-39). */
@@ -1331,8 +1378,17 @@ class SettingsStore(context: Context) {
                 lastUpdatedAt = existing?.lastUpdatedAt ?: 0L,
                 lastAttemptAt = existing?.lastAttemptAt ?: 0L,
                 allowHttp = allowHttp || existing?.allowHttp == true,
+                certSha256 = existing?.certSha256.orEmpty(),
             )
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
+        }
+    }
+
+    /** The first fetch of a pinned subscription pins its server's certificate; a pin is never replaced here (M-171). */
+    internal suspend fun pinSubscriptionCertificate(url: String, certSha256: String) {
+        if (certSha256.isBlank()) return
+        updateSubscriptionMeta(url) { meta ->
+            if (meta.certSha256.isBlank()) meta.copy(certSha256 = certSha256) else meta
         }
     }
 
