@@ -94,6 +94,8 @@ internal data class DeployUiState(
     val progress: Float = 0f,
     val currentStep: String = "",
     val showValidation: Boolean = false,
+    // the profile's stored web port: the panel of the server it points at, whatever «Ручные порты» says (M-85)
+    val profileWebPort: Int = CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT,
 ) {
     val portsValid: Boolean
         get() = isValidPort(sshPort) && (!manualPorts || listOf(peerPort, webPort).all(::isValidPort))
@@ -114,7 +116,7 @@ internal data class DeployUiState(
         get() {
             val h = host.ifBlank { "IP" }
             // the panel of the server this profile points at (a deploy stores the server's ports on success)
-            val p = resolveServerPorts(manualPorts, sshPort, peerPort, webPort).web
+            val p = if (manualPorts) resolveServerPorts(true, sshPort, peerPort, webPort).web else profileWebPort
             val u = if (secretPathUuid.isNotBlank()) {
                 if (secretPathUuid.startsWith("/")) secretPathUuid else "/$secretPathUuid"
             } else {
@@ -329,6 +331,7 @@ internal fun DeployTab(
         sshPort = sshPort,
         peerPort = peerPort,
         webPort = webPort,
+        profileWebPort = savedServerWebPort,
         mainPasswordConfigured = isDeployMainPasswordValid(savedMainPass),
         webPanelConfigured = hasWebPanelCredentials(savedWebLogin, savedWebPassword),
         sshKeysMode = savedSshKeysMode,
@@ -618,12 +621,11 @@ internal fun DeployTab(
                     if (host.isBlank()) {
                         scope.launch { snackbarHostState.showSnackbar("Сначала укажите IP сервера") }
                     } else {
-                        val effectiveWebPort = resolveServerPorts(
-                            savedManualPorts,
-                            sshPort,
-                            peerPort,
-                            webPort,
-                        ).web
+                        val effectiveWebPort = if (savedManualPorts) {
+                            resolveServerPorts(true, sshPort, peerPort, webPort).web
+                        } else {
+                            savedServerWebPort  // the profile's server, as the link above shows it
+                        }
                         val path = if (savedSettings.secretPathUuid.isNotBlank()) {
                             "/${savedSettings.secretPathUuid.trimStart('/')}"
                         } else {
