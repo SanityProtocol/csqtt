@@ -488,6 +488,9 @@ pub fn evaluate_route(
 pub struct DnsDomainMap {
     entries: RwLock<HashMap<IpAddr, (String, Instant)>>,
     max_entries: usize,
+    /// IPs seen for a `!domain` (M-31). `entries` keeps only the last name per IP, so a direct name on the
+    /// same IP (shared hosting) would otherwise flip the forced one's route between connections.
+    forced_ips: RwLock<HashSet<IpAddr>>,
 }
 
 impl DnsDomainMap {
@@ -495,6 +498,33 @@ impl DnsDomainMap {
         Self {
             entries: RwLock::new(HashMap::with_capacity(max_entries.min(4096))),
             max_entries,
+            forced_ips: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// Remembers `ips` as forced-tunnel when `domain` is a `!domain`. Nothing to do for an empty list.
+    pub fn learn_forced(&self, domain: &str, ips: &[IpAddr], forced_domains: &[String]) {
+        if forced_domains.is_empty() || ips.is_empty() || !is_domain_in_list(domain, forced_domains) {
+            return;
+        }
+        if let Ok(mut forced) = self.forced_ips.write() {
+            if forced.len() + ips.len() > self.max_entries {
+                forced.clear();
+            }
+            forced.extend(ips.iter().copied());
+        }
+    }
+
+    pub fn is_forced(&self, ip: &IpAddr) -> bool {
+        self.forced_ips
+            .read()
+            .is_ok_and(|forced| forced.contains(ip))
+    }
+
+    /// When the `!` list changes, what was learned from the old one no longer holds.
+    pub fn clear_forced(&self) {
+        if let Ok(mut forced) = self.forced_ips.write() {
+            forced.clear();
         }
     }
 
@@ -542,6 +572,7 @@ impl DnsDomainMap {
         if let Ok(mut map) = self.entries.write() {
             map.clear();
         }
+        self.clear_forced();
     }
 }
 
@@ -565,14 +596,20 @@ pub fn split_forced_domains(domains: Vec<String>) -> (Vec<String>, Vec<String>) 
 /// A leading `!` marks a force-tunnel entry (M-31); it is kept, and the rest is cleaned like any entry.
 pub fn parse_direct_domains(input: &str) -> Vec<String> {
     let mut result = Vec::new();
+    let mut force_next = false;
     for token in input.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
         let mut cleaned = token.trim();
-        let forced = cleaned.starts_with('!');
-        if forced {
-            cleaned = cleaned[1..].trim_start();
-        }
         if cleaned.is_empty() {
             continue;
+        }
+        if cleaned == "!" {
+            // "! x.ru": the `!` belongs to the next entry, never left out to make it a plain (direct) one
+            force_next = true;
+            continue;
+        }
+        let forced = std::mem::take(&mut force_next) || cleaned.starts_with('!');
+        if let Some(rest) = cleaned.strip_prefix('!') {
+            cleaned = rest;
         }
         if let Some(pos) = cleaned.find("://") {
             cleaned = &cleaned[pos + 3..];
@@ -844,6 +881,24 @@ mod tests {
         let (plain, forced) = split_forced_domains(parsed);
         assert_eq!(plain, vec!["site.ru".to_string()]);
         assert_eq!(forced, vec!["panel.example.ru".to_string()]);
+        // a spaced "! x" (CLI, domains file) stays forced, never a plain direct entry
+        assert_eq!(
+            parse_direct_domains("! spaced.example.ru\nplain.ru !"),
+            vec!["!spaced.example.ru".to_string(), "plain.ru".to_string()]
+        );
+
+        // learned IPs of a `!` name stay forced whatever name is seen for them later
+        let map = DnsDomainMap::default();
+        let shared: IpAddr = "95.0.0.2".parse().unwrap();
+        map.learn_forced("example.ru", &[shared], &forced);
+        assert!(!map.is_forced(&shared));
+        map.learn_forced("panel.example.ru", &[shared], &[]);
+        assert!(!map.is_forced(&shared));
+        map.learn_forced("www.panel.example.ru.", &[shared], &forced);
+        map.insert(shared, "example.ru".to_string());
+        assert!(map.is_forced(&shared));
+        map.clear_forced();
+        assert!(!map.is_forced(&shared));
 
         let ip: IpAddr = "95.0.0.1".parse().unwrap();
         let every_ip = parse_ip_rules("0.0.0.0/0");

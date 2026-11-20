@@ -61,8 +61,9 @@ pub async fn connect(
         .await
         .with_context(|| {
             format!(
-                "TURN {} connect {server} timed out",
-                endpoint.transport.as_str()
+                "TURN {} connect to {} ({server}) timed out",
+                endpoint.transport.as_str(),
+                endpoint.host
             )
         })?
         .with_context(|| format!("TURN {} connect {server}", endpoint.transport.as_str()))?;

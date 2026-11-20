@@ -1271,7 +1271,10 @@ impl Dispatcher {
             ip_is_whitelist,
             ip_rules: Arc::new(ip_rules),
         };
-        self.domain_routing.store(Arc::new(new_config.clone()));
+        let previous = self.domain_routing.swap(Arc::new(new_config.clone()));
+        if previous.forced_domains != new_config.forced_domains {
+            self.dns_domain_map.clear_forced();
+        }
         crate::log_error!(
             "[КЛИЕНТ] Горячее обновление доменов: вкл={}, RU={}, шаблоны={}, кастомных={}, ЧС/БС={}, IP вкл={}, IP ЧС/БС={}, IP правил={}",
             enabled,
@@ -1298,6 +1301,8 @@ impl Dispatcher {
         if let Some((domain, _is_resp, ips)) = crate::sni::parse_ip_packet_dns(slice) {
             if !ips.is_empty() {
                 self.dns_domain_map.insert_multiple(&ips, &domain);
+                self.dns_domain_map
+                    .learn_forced(&domain, &ips, &config.forced_domains);
             }
             if config.enabled
                 && !ips.is_empty()
@@ -1326,6 +1331,8 @@ impl Dispatcher {
         {
             let ip = dst.ip();
             self.dns_domain_map.insert(ip, sni.to_string());
+            self.dns_domain_map
+                .learn_forced(sni, &[ip], &config.forced_domains);
             if config.enabled
                 && crate::sni::is_direct_domain_mode(
                     sni,

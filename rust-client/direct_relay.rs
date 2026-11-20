@@ -679,12 +679,14 @@ impl DirectRelay {
             &config.ip_rules,
         );
 
-        // A `!domain` wins over an IP cached as direct earlier (M-31).
+        // A `!domain` wins over an IP cached as direct earlier, and over a direct name seen later on the
+        // same IP (M-31).
         let forced = config.enabled
             && !config.forced_domains.is_empty()
-            && domain
-                .as_deref()
-                .is_some_and(|d| crate::sni::is_domain_in_list(d, &config.forced_domains));
+            && (self.dns_domain_map.is_forced(&dst_ip)
+                || domain
+                    .as_deref()
+                    .is_some_and(|d| crate::sni::is_domain_in_list(d, &config.forced_domains)));
         let is_candidate_direct = if forced {
             false
         } else if self.is_direct_ip(&dst_ip) {
@@ -1495,6 +1497,54 @@ mod tests {
         packet.extend_tail(syn.len()).unwrap().copy_from_slice(&syn);
         assert!(!relay.try_handle(&packet).await);
         assert!(relay.is_direct_ip(&target_ip));
+    }
+
+    #[tokio::test]
+    async fn forced_ip_holds_when_a_direct_name_shares_it() {
+        // `!lk.example.ru` and example.ru (an RU zone, so direct) on one IP: once lk was seen, the
+        // IP stays tunnelled even after example.ru became the last name seen for it (review F1).
+        let domain_routing = Arc::new(ArcSwap::from_pointee(
+            crate::dispatcher::DomainRoutingConfig {
+                enabled: true,
+                is_whitelist: false,
+                exclude_ru_zones: true,
+                template_domains: false,
+                direct_domains: vec![].into(),
+                forced_domains: vec!["lk.example.ru".to_string()].into(),
+                ip_routing_enabled: false,
+                ip_is_whitelist: false,
+                ip_rules: vec![].into(),
+            },
+        ));
+        let shared_ip: IpAddr = "192.0.2.11".parse().unwrap();
+        let direct_ips = Arc::new(ArcSwap::from_pointee(
+            std::iter::once(shared_ip).collect::<std::collections::HashSet<IpAddr>>(),
+        ));
+        let dns_domain_map = Arc::new(crate::sni::DnsDomainMap::default());
+        dns_domain_map.learn_forced("lk.example.ru", &[shared_ip], &["lk.example.ru".to_string()]);
+        dns_domain_map.insert(shared_ip, "example.ru".to_string());
+        let pool = PacketPool::new(16);
+        let (inbound_tx, _inbound_rx) = mpsc::channel(64);
+        let relay = DirectRelay::new(
+            domain_routing,
+            direct_ips,
+            dns_domain_map,
+            pool.clone(),
+            inbound_tx,
+        )
+        .expect("smoltcp test stack must initialize");
+        let syn = build_tcp_packet(
+            "10.66.67.2:40001".parse().unwrap(),
+            SocketAddr::new(shared_ip, 443),
+            1,
+            0,
+            0x02,
+            b"",
+        )
+        .unwrap();
+        let mut packet = pool.try_acquire().unwrap();
+        packet.extend_tail(syn.len()).unwrap().copy_from_slice(&syn);
+        assert!(!relay.try_handle(&packet).await);
     }
 
     #[tokio::test]
