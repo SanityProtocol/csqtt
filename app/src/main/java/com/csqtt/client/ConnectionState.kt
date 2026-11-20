@@ -1,0 +1,138 @@
+package com.csqtt.client
+
+/**
+ * One connection state for the app, the notification, the QS tile and the widget (M-43, plan §4.3). It is derived from
+ * what the tunnel reports, never stored: «Подключено» needs a TUNCONF from the running process, the VPN interface and
+ * live workers, not a started process (amurcanov #45).
+ */
+sealed class ConnectionState {
+    data object Idle : ConnectionState()
+    data object Preparing : ConnectionState()
+    data object Connecting : ConnectionState()
+    data class Connected(val workers: Int) : ConnectionState()
+    data object Reconnecting : ConnectionState()
+    data object WaitingForNetwork : ConnectionState()
+    data object PausedOnWifi : ConnectionState()
+    data object Stopping : ConnectionState()
+    data object CaptchaNeeded : ConnectionState()
+    data object ServerNotResponding : ConnectionState()
+    data class Failed(val reason: String) : ConnectionState()
+
+    /** The power button, the tile and the widget are «on»: a tap stops. */
+    val powerIsOn: Boolean
+        get() = this !is Idle && this !is Failed && this !is Stopping
+
+    /** The short label of the tile, the widget and classic Home. */
+    val label: String
+        get() = when (this) {
+            Idle -> "Отключено"
+            Preparing, Connecting -> "Подключение…"
+            is Connected -> "Подключено"
+            Reconnecting -> "Переподключение…"
+            WaitingForNetwork -> "Нет сети — ожидание"
+            PausedOnWifi -> "Пауза: Wi-Fi"
+            Stopping -> "Остановка…"
+            CaptchaNeeded -> "Нужна капча"
+            ServerNotResponding -> "Сервер не отвечает"
+            is Failed -> "Ошибка"
+        }
+}
+
+internal data class ConnectionInputs(
+    /** A run is on: from the process start to the stop, through a crash restart's backoff (TunnelManager.running). */
+    val running: Boolean = false,
+    /** The service prepares a start (hashes, network) before the process exists. */
+    val starting: Boolean = false,
+    val stopping: Boolean = false,
+    val pausedOnWifi: Boolean = false,
+    val waitingForNetwork: Boolean = false,
+    val captchaPending: Boolean = false,
+    /** The running process sent its TUNCONF (a crash restart's retained one does not count). */
+    val tunconf: Boolean = false,
+    val vpnReady: Boolean = false,
+    val activeWorkers: Int = 0,
+    /** This run was connected at least once. */
+    val everConnected: Boolean = false,
+    /** A stream is ready but the server never answered GETCONF (M-2). */
+    val serverSilent: Boolean = false,
+    /** The first fatal cause of the last run, until the next start. */
+    val failure: String? = null,
+)
+
+internal fun deriveConnectionState(input: ConnectionInputs): ConnectionState = with(input) {
+    when {
+        stopping -> ConnectionState.Stopping
+        pausedOnWifi -> ConnectionState.PausedOnWifi
+        !running && !starting -> failure?.let { ConnectionState.Failed(it) } ?: ConnectionState.Idle
+        captchaPending -> ConnectionState.CaptchaNeeded
+        waitingForNetwork -> ConnectionState.WaitingForNetwork
+        running && tunconf && vpnReady && activeWorkers > 0 -> ConnectionState.Connected(activeWorkers)
+        serverSilent -> ConnectionState.ServerNotResponding
+        running && everConnected -> ConnectionState.Reconnecting
+        !running -> ConnectionState.Preparing
+        else -> ConnectionState.Connecting
+    }
+}
+
+/** The first fatal cause of a run (M-47): retry chatter or a second error never replaces it. */
+internal class FirstFatal {
+    @Volatile
+    var cause: String? = null
+        private set
+
+    @Synchronized
+    fun record(cause: String): Boolean {
+        if (this.cause != null) return false
+        this.cause = cause.trim().ifEmpty { "ошибка" }
+        return true
+    }
+}
+
+/** A process that ended with a fatal cause is never restarted, whichever of the stop and the exit runs first (M-47). */
+internal fun shouldRestartProcess(lifecycleWantsRestart: Boolean, fatal: FirstFatal): Boolean =
+    lifecycleWantsRestart && fatal.cause == null
+
+/**
+ * Intents to TunVpnService carry (process generation, sequence). One made for an older process, or overtaken by a newer
+ * one, is dropped: a START delivered after its run stopped would bring the TUN back with no core behind it, and a STOP
+ * delivered after the next run's START would tear the new one down.
+ */
+internal class VpnIntentGate {
+    private var nextSequence = 0L
+    private var lastStartApplied = 0L
+
+    @Synchronized
+    fun stamp(): Long = ++nextSequence
+
+    /**
+     * [currentGeneration] is the generation of the running process (null: none) and [runWanted] whether a run is on.
+     * A START or RELOAD is applied only for the current process of a wanted run (two of one process may arrive in
+     * either order: both are current); a STOP unless a START made after it was applied already.
+     */
+    @Synchronized
+    fun accept(
+        isStop: Boolean,
+        generation: Long,
+        sequence: Long,
+        currentGeneration: Long?,
+        runWanted: Boolean,
+    ): Boolean {
+        if (isStop) return sequence > lastStartApplied
+        if (!runWanted || currentGeneration != generation) return false
+        lastStartApplied = maxOf(lastStartApplied, sequence)
+        return true
+    }
+}
+
+/** The tunnel notification's title (M-89): the state, and the live stream count once connected. */
+internal fun tunnelNotificationTitle(state: ConnectionState): String = when (state) {
+    is ConnectionState.Connected -> "Подключено • Потоков: ${state.workers}"
+    else -> state.label
+}
+
+/** The traffic line is shown only while it means something: connected, or reconnecting after a connection. */
+internal fun showsTraffic(state: ConnectionState): Boolean =
+    state is ConnectionState.Connected || state is ConnectionState.Reconnecting
+
+/** The run's start ([startedAtMs], elapsedRealtime) while it runs; [frozenSeconds] after it stopped; neither before. */
+data class UptimeMark(val startedAtMs: Long = 0L, val frozenSeconds: Long? = null)

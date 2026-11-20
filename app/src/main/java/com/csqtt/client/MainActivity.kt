@@ -87,7 +87,7 @@ import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     private val appSettingsStore by lazy { SettingsStore(applicationContext) }
-    private var renderUi by mutableStateOf(false)
+    private var showPermissionIntro by mutableStateOf(false)
     private var showVkAuthDialog by mutableStateOf(false)
     private var pendingDeepLink by mutableStateOf<String?>(null)
     private var batteryPromptInFlight = false
@@ -113,12 +113,13 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         activeActivities++
-        renderUi = true
         ManlCaptchaWebViewManager.checkAndShowPendingCaptcha(this)
     }
 
+    // The composition is kept while the app is in the background (§4.2 rule 1): Compose pauses recomposition while the
+    // activity is stopped, and every flow it shows is collected with the lifecycle, so dropping it saved nothing and
+    // lost every open dialog and the flows' loaded values.
     override fun onStop() {
-        renderUi = false
         activeActivities = (activeActivities - 1).coerceAtLeast(0)
         super.onStop()
     }
@@ -133,7 +134,7 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
 
-        checkAndRequestNotifications()
+        startPermissionRequests()
 
         // Subscriptions refresh while the app is open
         lifecycleScope.launch {
@@ -149,7 +150,7 @@ class MainActivity : ComponentActivity() {
             val authContext = LocalContext.current.applicationContext
             val authScope = rememberCoroutineScope()
             val uiStateHolder = rememberSaveableStateHolder()
-            if (renderUi) {
+            run {
                 uiStateHolder.SaveableStateProvider("main_ui") {
             val settingsStore = remember { appSettingsStore }
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Theme.MODE_SYSTEM)
@@ -179,6 +180,29 @@ class MainActivity : ComponentActivity() {
                         },
                         onVkAuthRequested = { showVkAuthDialog = true },
                     )
+                    if (showPermissionIntro) {
+                        // one word before the system prompts, shown once (L-29)
+                        AlertDialog(
+                            onDismissRequest = {},
+                            title = { Text("Два разрешения") },
+                            text = {
+                                Text(
+                                    "Уведомления — чтобы видеть состояние туннеля и запрос капчи VK: без них капча не " +
+                                        "появится.\n\nРабота без ограничений батареи — чтобы туннель не засыпал при " +
+                                        "выключенном экране.",
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showPermissionIntro = false
+                                    lifecycleScope.launch {
+                                        appSettingsStore.markPermissionIntroShown()
+                                        checkAndRequestNotifications()
+                                    }
+                                }) { Text("Продолжить") }
+                            },
+                        )
+                    }
                     // A csqtt:// link, the classic way: confirm, then it replaces the current configuration. It stays
                     // pending until the user chooses, so the dialog survives a rotation instead of losing the link.
                     pendingDeepLink?.let { raw ->
@@ -234,6 +258,25 @@ class MainActivity : ComponentActivity() {
             return
         }
         pendingDeepLink = raw
+    }
+
+    /** The intro dialog first when a system prompt is about to come and the intro was never shown (L-29). */
+    private fun startPermissionRequests() {
+        lifecycleScope.launch {
+            val notificationsMissing = Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val batteryPromptDue = shouldRequestBatteryOptimizationExemption(
+                promptHandled = appSettingsStore.isBatteryOptimizationPromptHandled(),
+                alreadyExempt = powerManager.isIgnoringBatteryOptimizations(packageName),
+            )
+            if ((notificationsMissing || batteryPromptDue) && !appSettingsStore.isPermissionIntroShown()) {
+                showPermissionIntro = true
+            } else {
+                checkAndRequestNotifications()
+            }
+        }
     }
 
     private fun checkAndRequestNotifications() {
@@ -338,7 +381,10 @@ fun MainScreen(
         initialValue = TunnelAuthSnapshot()
     )
     val csqttLinkMode = tunnelAuthSettings.csqttLinkMode
-    val participantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(initialValue = false)
+    // null until the store has emitted: the tab is corrected only from loaded values (§4.2 rule 3)
+    val storedParticipantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(initialValue = null)
+    val participantShowLogs = storedParticipantShowLogs ?: false
+    val navInputsLoaded = tunnelAuthSettings.isLoaded && storedParticipantShowLogs != null
     val autoPauseOnWifi by settingsStore.autoPauseOnWifi.collectAsStateWithLifecycle(initialValue = false)
     val excludedApps by settingsStore.excludedApps.collectAsStateWithLifecycle(
         initialValue = SettingsStore.cachedExcludedApps ?: ""
@@ -377,14 +423,16 @@ fun MainScreen(
     }
     val tabStateHolder = rememberSaveableStateHolder()
     val profileEpoch by settingsStore.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
-    LaunchedEffect(csqttLinkMode, participantShowLogs) {
+    LaunchedEffect(navInputsLoaded, csqttLinkMode, participantShowLogs) {
+        if (!navInputsLoaded) return@LaunchedEffect
         if (csqttLinkMode) {
             if (selectedTab == 2 || (selectedTab == 3 && !participantShowLogs)) {
                 selectedTab = 0
             }
         }
     }
-    LaunchedEffect(activeNavItems) {
+    LaunchedEffect(navInputsLoaded, activeNavItems) {
+        if (!navInputsLoaded) return@LaunchedEffect
         if (activeNavItems.none { it.id == selectedTab }) {
             selectedTab = 0
         }
@@ -401,7 +449,8 @@ fun MainScreen(
         if (selectedTab == 3) TunnelManager.clearUnreadErrors()
     }
 
-    LaunchedEffect(updateCheckIntervalHours) {
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(updateCheckIntervalHours, lifecycleOwner) {
         if (CsqttConstants.Update.CHECK_DISABLED || updateCheckIntervalHours == UPDATE_CHECK_NEVER) return@LaunchedEffect
 
         val intervalMillis = updateIntervalHoursToMillis(updateCheckIntervalHours)
@@ -440,10 +489,13 @@ fun MainScreen(
             }
         }
 
-        while (isActive) {
-            val waitMs = updateCheckDelayMs(System.currentTimeMillis(), settingsStore.updateLastCheckAt.first(), intervalMillis)
-            if (waitMs > 0) delay(waitMs)
-            if (isActive) runUpdateCheck(if (waitMs > 0) "periodic" else "startup")
+        // only while the app is on screen, as before the composition was kept in the background (§4.2 rule 1)
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                val waitMs = updateCheckDelayMs(System.currentTimeMillis(), settingsStore.updateLastCheckAt.first(), intervalMillis)
+                if (waitMs > 0) delay(waitMs)
+                if (isActive) runUpdateCheck(if (waitMs > 0) "periodic" else "startup")
+            }
         }
     }
 

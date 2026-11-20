@@ -53,6 +53,7 @@ private const val NETWORK_LOSS_GRACE_MS = 2_000L
 // phone stays on Wi-Fi (hours), so a 1 s poll woke the app every second for all of it.
 private const val AUTO_PAUSE_WIFI_RECONCILE_MS = 15_000L
 private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
+private const val AWAIT_NETWORK_SHOWN_AFTER_MS = 5_000L
 private const val WAKE_LOCK_RENEWAL_WINDOW_MS = 60 * 1_000L
 private const val VK_PROBE_CONNECT_TIMEOUT_MS = 3_000
 private const val VK_PROBE_READ_TIMEOUT_MS = 3_000
@@ -80,8 +81,8 @@ class TunnelService : Service() {
     private var startJob: Job? = null
     @Volatile
     private var startGeneration = 0L
-    private var lastNotificationText: String? = null
-    private var lastNotificationPostElapsedMs = 0L
+    // the tunnel status notification: built and posted only while the screen is on, ≥ 5 s apart (M-48)
+    private val notificationThrottle = NotificationThrottle(NOTIFICATION_MIN_REBUILD_INTERVAL_MS)
     @Volatile
     private var isStopping = false
     @Volatile
@@ -343,9 +344,8 @@ class TunnelService : Service() {
                 com.csqtt.client.DeployManager.writeError("✗ Установка отменена пользователем")
                 com.csqtt.client.DeployManager.stopDeploy("error: Отменена пользователем")
                 if (TunnelManager.running.value) {
-                    lastNotificationText = null
-                    lastNotificationPostElapsedMs = 0L
-                    updateNotification(buildTunnelNotificationText())
+                    notificationThrottle.invalidate()
+                    postTunnelStatus()
                 } else {
                     stopTunnel()
                 }
@@ -359,9 +359,8 @@ class TunnelService : Service() {
             }
             "RESTORE_NOTIFICATION" -> {
                 if (foregroundStarted && !isStopping) {
-                    lastNotificationText = null
-                    lastNotificationPostElapsedMs = 0L
-                    updateNotification(currentNotificationText())
+                    notificationThrottle.invalidate()
+                    postTunnelStatus()
                 }
             }
         }
@@ -835,17 +834,27 @@ class TunnelService : Service() {
     }
 
     private suspend fun awaitVkNetwork(): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + 60_000L
-        while (
-            serviceScope.coroutineContext[Job]?.isActive != false &&
-            SystemClock.elapsedRealtime() < deadline
-        ) {
-            if (physicalNetworks.hasUsableNetwork()) return true
-            currentPhysicalCandidates().forEach { network ->
-                rememberPhysicalCandidate(network)
-                startVkNetworkProbe(network)
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + 60_000L
+        try {
+            while (
+                serviceScope.coroutineContext[Job]?.isActive != false &&
+                SystemClock.elapsedRealtime() < deadline
+            ) {
+                if (physicalNetworks.hasUsableNetwork()) return true
+                // the state says «Нет сети» once the start has waited a while for one (M-43); the first VK probe of
+                // a network that is there takes a moment
+                if (SystemClock.elapsedRealtime() - startedAt >= AWAIT_NETWORK_SHOWN_AFTER_MS) {
+                    TunnelManager.awaitingNetwork.value = true
+                }
+                currentPhysicalCandidates().forEach { network ->
+                    rememberPhysicalCandidate(network)
+                    startVkNetworkProbe(network)
+                }
+                delay(250)
             }
-            delay(250)
+        } finally {
+            TunnelManager.awaitingNetwork.value = false
         }
         if (serviceScope.coroutineContext[Job]?.isActive != false) {
             TunnelManager.updateLog(
@@ -1015,11 +1024,39 @@ class TunnelService : Service() {
         }
     }
 
+    /**
+     * A deploy stops the tunnel completely (M-45, Fikisq-slim): a pending start, the Wi-Fi auto-pause and its watch, the
+     * network and VK recovery jobs and the VK calls all end, and the tunnel is not restored after it. Otherwise a racing
+     * start or a Wi-Fi resume brought the tunnel back mid-deploy. The service stays: it carries the deploy's foreground.
+     */
     private fun prepareForDeploy() {
+        startJob?.cancel()
+        startJob = null
+        startGeneration++
+        autoPauseRequested = false
+        stopWifiAutoPauseWatch()
         updateJob?.cancel()
         updateJob = null
+        networkSwapJob?.cancel()
+        networkSwapJob = null
+        networkLossJob?.cancel()
+        networkLossJob = null
+        vkRecoveryJob?.cancel()
+        vkRecoveryJob = null
+        synchronized(vkProbeLock) {
+            vkProbeJobs.values.forEach(Job::cancel)
+            vkProbeJobs.clear()
+        }
         CaptchaWebViewManager.onTunnelStop()
-        TunnelManager.stop(notifyController = false)
+        val wasActive = TunnelManager.running.value || TunnelManager.starting.value || autoPausedForWifi
+        autoPausedForWifi = false
+        TunnelManager.leaveWifiAutoPause()
+        TunnelManager.starting.value = false
+        if (wasActive) {
+            VkAutoCallsManager.finishActiveCalls()
+            TunnelManager.stop(finishVkCalls = true, notifyController = false)
+        }
+        serviceScope.launch { runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(false) } }
         releaseWifiLock()
     }
 
@@ -1386,26 +1423,33 @@ class TunnelService : Service() {
                     stopTunnel()
                     break
                 }
-                // The traffic numbers in the notification are read only with the screen on: redrawing it with the
-                // screen off costs a notification post every few seconds for nothing. The next tick after the screen
-                // comes on brings it up to date.
-                if (screenInteractive()) updateNotification(currentNotificationText())
+                // The notification is built and posted only with the screen on: redrawing it with the screen off costs
+                // a post every few seconds for nothing. The next tick after the screen comes on brings it up to date.
+                postTunnelStatus()
                 delay(2000)
             }
         }
     }
 
-    private fun currentNotificationText(): String {
-        return buildTunnelNotificationText()
-    }
-
-    private fun buildTunnelNotificationText(): String {
-        val statsText = TunnelManager.stats.value.trim()
-        return when {
-            statsText.isEmpty() -> "Туннель активен"
-            statsText == "Ожидание данных..." -> "Туннель активен"
-            else -> statsText
+    /** The status notification from the connection state and STATS (M-43, M-89), throttled (M-48). */
+    private fun postTunnelStatus() {
+        if (!foregroundStarted || isStopping) return
+        val state = TunnelManager.connectionState.value
+        val title = tunnelNotificationTitle(state)
+        val text = if (showsTraffic(state)) formatTraffic(TunnelManager.traffic.value) else ""
+        // the state's label goes out at once; the stream count and the figures wait for the 5 s spacing
+        if (!notificationThrottle.shouldPost(
+                state = state.label,
+                text = "$title\n$text",
+                nowMs = SystemClock.elapsedRealtime(),
+                screenOn = screenInteractive(),
+                visible = ::isNotificationVisible,
+            )
+        ) {
+            return
         }
+        getSystemService(NotificationManager::class.java)
+            .notify(TUNNEL_NOTIFICATION_ID, createNotification(text, title = title))
     }
 
     private fun createNotificationChannel() {
@@ -1424,7 +1468,12 @@ class TunnelService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun createNotification(text: String, actionName: String = "STOP", actionTitle: String = "Отключить"): Notification {
+    private fun createNotification(
+        text: String,
+        actionName: String = "STOP",
+        actionTitle: String = "Отключить",
+        title: String = "CSQTT",
+    ): Notification {
         val openIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
@@ -1444,8 +1493,8 @@ class TunnelService : Service() {
         )
 
         return NotificationCompat.Builder(this, TUNNEL_NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("CSQTT")
-            .setContentText(text)
+            .setContentTitle(title)
+            .setContentText(text.ifEmpty { null })
             .setSmallIcon(R.drawable.ic_stat_c)
             .setOngoing(true)
             .setLocalOnly(true)
@@ -1479,16 +1528,9 @@ class TunnelService : Service() {
         foregroundStarted = true
     }
 
+    /** A one-off notice at a transition (start, pause, deploy); the status posts that follow are not held back by it. */
     private fun updateNotification(text: String) {
-        if (lastNotificationText == text && isNotificationVisible()) return
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (lastNotificationText != null &&
-            now - lastNotificationPostElapsedMs < NOTIFICATION_MIN_REBUILD_INTERVAL_MS
-        ) {
-            return
-        }
-        lastNotificationText = text
-        lastNotificationPostElapsedMs = now
+        notificationThrottle.invalidate()
         val notification = createNotification(text)
         if (foregroundStarted) {
             getSystemService(NotificationManager::class.java).notify(TUNNEL_NOTIFICATION_ID, notification)

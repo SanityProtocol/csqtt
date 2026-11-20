@@ -26,8 +26,8 @@ class QuickToggleTileService : TileService() {
         stateJob?.cancel()
         stateJob = scope.launch {
             try {
-                TunnelManager.running.collect { running ->
-                    updateTile(running)
+                TunnelManager.connectionState.collect { state ->
+                    updateTile(state)
                 }
             } catch (e: Exception) {
                 Log.e("QuickToggleTile", "Error collecting running state", e)
@@ -57,14 +57,14 @@ class QuickToggleTileService : TileService() {
         super.onDestroy()
     }
 
-    private fun updateTile(running: Boolean) {
+    private fun updateTile(connection: ConnectionState) {
         runCatching {
             qsTile?.apply {
                 label = CsqttConstants.General.APP_NAME
                 icon = Icon.createWithResource(this@QuickToggleTileService, R.drawable.ic_c_logo)
-                state = if (running) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+                state = tileStateFor(connection)
                 if (Build.VERSION.SDK_INT >= 29) {
-                    subtitle = if (running) "Подключено" else "Отключено"
+                    subtitle = connection.label
                 }
                 updateTile()
             }
@@ -95,4 +95,11 @@ class QuickToggleTileService : TileService() {
             Log.e("QuickToggleTile", "Failed to open MainActivity", e)
         }
     }
+}
+
+/** The tile follows the connection state (M-44): on while a run is on, unavailable while it stops. */
+internal fun tileStateFor(state: ConnectionState): Int = when {
+    state is ConnectionState.Stopping -> Tile.STATE_UNAVAILABLE
+    state.powerIsOn -> Tile.STATE_ACTIVE
+    else -> Tile.STATE_INACTIVE
 }

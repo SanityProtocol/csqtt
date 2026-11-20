@@ -45,12 +45,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.app.NotificationManagerCompat
+import android.os.SystemClock
+import android.provider.Settings
+import com.csqtt.client.ConnectionState
+import com.csqtt.client.buildTunnelStartIntent
+import com.csqtt.client.formatTraffic
+import com.csqtt.client.showsTraffic
+import kotlinx.coroutines.delay
 import com.csqtt.client.BatterySaver
-import com.csqtt.client.ConnectionSource
 import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
-import com.csqtt.client.DpiSplitMode
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.StoredSecretState
@@ -59,7 +70,6 @@ import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelService
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.newTunnelSessionId
-import com.csqtt.client.resolveConnectionSource
 import com.csqtt.client.showRaisedToast
 import com.csqtt.client.ui.legacy.components.CsqttScreen
 import com.csqtt.client.ui.legacy.design.CsqttShapes
@@ -77,32 +87,21 @@ internal fun ConnectionTab(
     val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val connectionPassword = tunnelAuthSettings.connectionPassword
-    val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
-    val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
-    val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
-    val autoPausedForWifi by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
+    val connectionState by TunnelManager.connectionState.collectAsStateWithLifecycle()
     val cooldownActive by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
 
     val csqttLinkMode = tunnelAuthSettings.csqttLinkMode
     val csqttLink = tunnelAuthSettings.csqttLink
-    val peer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = "")
+    // null until the store has emitted: a tap before that starts nothing (§4.2 rule 3)
+    val storedPeer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = null)
+    val peer = storedPeer.orEmpty()
     val vkHashes by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
     val vkHashCheckResultsJson by settingsStore.vkHashCheckResults.collectAsStateWithLifecycle(initialValue = "{}")
-    val workersPerHash by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_WORKERS)
-    val sni by settingsStore.sni.collectAsStateWithLifecycle(initialValue = "")
-    val turnTransport by settingsStore.turnTransport.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT)
-    val dpiSplit by settingsStore.dpiSplit.collectAsStateWithLifecycle(initialValue = DpiSplitMode.OFF)
-    val srtpMode by settingsStore.srtpMode.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedSrtpMode ?: CsqttConstants.SrtpMode.DEFAULT)
-    val customTurnIps by settingsStore.customTurnIps.collectAsStateWithLifecycle(initialValue = "")
     val manualPortsEnabled by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
     val serverPeerPort by settingsStore.serverPeerPort.collectAsStateWithLifecycle(
         initialValue = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
     )
     val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.VkAuth.MODE_CALLS)
-    val captchaMode by settingsStore.captchaMode.collectAsStateWithLifecycle(initialValue = "auto")
-    val captchaSolveMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle(initialValue = "auto")
-    val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
-    val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS)
     val savedHashMode by settingsStore.vkHashMode.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkHashMode)
     val savedVkAccessToken by settingsStore.vkAccessToken.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkAccessToken)
 
@@ -154,42 +153,15 @@ internal fun ConnectionTab(
     )
     val isValid = startBlocker == null
 
-    fun startIntent(source: ConnectionSource, generationId: Long, salt: String): Intent =
-        Intent(context, TunnelService::class.java).apply {
-            action = "START"
-            putExtra("peer", source.peer)
-            putExtra("vk_hashes", source.hashes)
-            putExtra("vk_hashes_from_link", source.hashesFromLink)
-            putExtra("vk_access_token", source.vkAccessToken)
-            putExtra("vk_token_from_link", source.tokenFromLink)
-            putExtra("workers_per_hash", workersPerHash)
-            putExtra("port", 0)
-            putExtra("sni", sni)
-            putExtra("connection_password", source.password)
-            putExtra("vk_auth_mode", vkAuthMode)
-            putExtra("captcha_mode", captchaMode)
-            putExtra("captcha_solve_method", captchaSolveMethod)
-            putExtra("fingerprint", activeFingerprint)
-            putExtra("client_ids", activeClientIds)
-            putExtra("obfs_mode", CsqttConstants.Tunnel.DEFAULT_OBFS_MODE)
-            putExtra("turn_transport", turnTransport)
-            putExtra(DpiSplitMode.EXTRA, dpiSplit.storedValue)
-            putExtra("srtp_mode", srtpMode)
-            putExtra("custom_turn_ips", customTurnIps)
-            putExtra("generation_id", generationId)
-            putExtra("session_salt", salt)
-        }
-
     fun startTunnelService() {
         scope.launch {
-            val source = resolveConnectionSource(settingsStore) ?: run {
-                context.showRaisedToast("Заполните настройки подключения", Toast.LENGTH_SHORT)
-                return@launch
-            }
             TunnelManager.isLoggingEnabled = settingsStore.loggingEnabled.first()
             val nextGen = System.currentTimeMillis() / 1000L
             val salt = newTunnelSessionId()
-            val intent = startIntent(source, nextGen, salt)
+            val intent = buildTunnelStartIntent(context, settingsStore, nextGen, salt) ?: run {
+                context.showRaisedToast("Заполните настройки подключения", Toast.LENGTH_SHORT)
+                return@launch
+            }
             runCatching { context.startForegroundService(intent) }
                 .onFailure { error ->
                     TunnelManager.updateLog(
@@ -221,12 +193,14 @@ internal fun ConnectionTab(
     }
 
     fun toggleTunnel() {
-        if (TunnelManager.stopping.value) return
-        if (com.csqtt.client.tunnelPowerIsOn(TunnelManager.running.value, TunnelManager.starting.value, TunnelManager.autoPausedForWifi.value)) {
+        val state = TunnelManager.currentConnectionState()
+        if (state is ConnectionState.Stopping || TunnelManager.stopping.value) return
+        if (state.powerIsOn) {
             pendingStartAfterVpnPermission = false
             context.startService(Intent(context, TunnelService::class.java).apply { action = "STOP" })
             return
         }
+        if (storedPeer == null || !hashSettingsLoaded || !tunnelAuthSettings.isLoaded) return
         if (!isValid) {
             val blocker = requireNotNull(startBlocker)
             TunnelManager.updateLog(
@@ -270,10 +244,7 @@ internal fun ConnectionTab(
             contentAlignment = Alignment.Center,
         ) {
             TunnelConnectionPanel(
-                tunnelRunning = tunnelRunning,
-                tunnelStarting = tunnelStarting,
-                tunnelStopping = tunnelStopping,
-                autoPausedForWifi = autoPausedForWifi,
+                state = connectionState,
                 cooldownActive = cooldownActive,
                 configurationValid = isValid,
                 onToggleTunnel = { toggleTunnel() },
@@ -284,33 +255,33 @@ internal fun ConnectionTab(
 
 @Composable
 private fun TunnelConnectionPanel(
-    tunnelRunning: Boolean,
-    tunnelStarting: Boolean,
-    tunnelStopping: Boolean,
-    autoPausedForWifi: Boolean,
+    state: ConnectionState,
     cooldownActive: Boolean,
     configurationValid: Boolean,
     onToggleTunnel: () -> Unit,
 ) {
-    val isStarting = tunnelStarting && !tunnelRunning && !tunnelStopping
-    val canToggle = !tunnelStopping && (tunnelRunning || isStarting || autoPausedForWifi || !cooldownActive || !configurationValid)
-    val activeVisual = tunnelRunning || isStarting || autoPausedForWifi || tunnelStopping
+    val tunnelStopping = state is ConnectionState.Stopping
+    val powerOn = state.powerIsOn
+    val canToggle = !tunnelStopping && (powerOn || !cooldownActive || !configurationValid)
+    val activeVisual = powerOn || tunnelStopping
     val logoScale = if (activeVisual) 1.06f else 0.96f
-    val statusColor = when {
-        autoPausedForWifi -> MaterialTheme.colorScheme.tertiary
-        tunnelStopping -> MaterialTheme.colorScheme.tertiary
-        tunnelRunning -> MaterialTheme.colorScheme.primary
-        isStarting -> MaterialTheme.colorScheme.primary
-        cooldownActive -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    val statusColor = when (state) {
+        is ConnectionState.Connected -> MaterialTheme.colorScheme.primary
+        ConnectionState.Preparing, ConnectionState.Connecting -> MaterialTheme.colorScheme.primary
+        is ConnectionState.Failed -> MaterialTheme.colorScheme.error
+        ConnectionState.ServerNotResponding, ConnectionState.CaptchaNeeded -> MaterialTheme.colorScheme.error
+        ConnectionState.Idle -> if (cooldownActive) {
+            MaterialTheme.colorScheme.tertiary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        else -> MaterialTheme.colorScheme.tertiary
     }
+    // «Подключено» only on a working tunnel (M-43, #45)
     val statusText = when {
-        tunnelStopping -> "Остановка"
-        autoPausedForWifi -> "Ожидание. Автопауза при Wi-Fi"
-        tunnelRunning -> "Подключено"
-        isStarting -> "Подключение"
-        cooldownActive -> "Ожидание"
-        else -> "Отключено"
+        state is ConnectionState.Idle && cooldownActive -> "Ожидание"
+        state is ConnectionState.Failed -> "Отключено"
+        else -> state.label
     }
 
     AppSectionCard(
@@ -326,7 +297,7 @@ private fun TunnelConnectionPanel(
                 painter = painterResource(id = R.drawable.ic_c_logo),
                 contentDescription = when {
                     tunnelStopping -> "Ожидание отключения VPN"
-                    tunnelRunning || autoPausedForWifi -> "Остановить VPN"
+                    powerOn -> "Остановить VPN"
                     else -> "Включить VPN"
                 },
                 modifier = Modifier
@@ -357,11 +328,24 @@ private fun TunnelConnectionPanel(
                 textAlign = TextAlign.Center,
             )
 
-            TunnelUptimeText(tunnelRunning = tunnelRunning || autoPausedForWifi || tunnelStopping)
+            if (state is ConnectionState.Failed) {
+                Text(
+                    text = state.reason,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
+            }
+
+            TunnelUptimeText(tunnelRunning = activeVisual)
+
+            if (showsTraffic(state)) TunnelLiveFigures()
+
+            NotificationsOffWarning()
 
             // «Экономия батареи» in force: said under the status, where the user looks
             val batterySaving by BatterySaver.active.collectAsStateWithLifecycle()
-            if (batterySaving && tunnelRunning) {
+            if (batterySaving && state.powerIsOn) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -384,17 +368,90 @@ private fun TunnelConnectionPanel(
     }
 }
 
+/** The uptime ticks once a second only while this text is on a started screen (M-48): no ticker runs off-screen. */
 @Composable
 private fun TunnelUptimeText(tunnelRunning: Boolean) {
-    val uptimeSeconds by TunnelManager.uptimeSeconds.collectAsStateWithLifecycle()
+    val mark by TunnelManager.uptime.collectAsStateWithLifecycle()
+    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(mark, lifecycle) {
+        if (mark.startedAtMs <= 0L) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                now = SystemClock.elapsedRealtime()
+                delay(1_000L - (now - mark.startedAtMs).mod(1_000L))
+            }
+        }
+    }
+    val seconds = mark.frozenSeconds
+        ?: mark.startedAtMs.takeIf { it > 0L }?.let { (now - it).coerceAtLeast(0L) / 1_000L }
     Text(
-        text = formatTunnelUptime(uptimeSeconds),
+        text = formatTunnelUptime(seconds),
         style = MaterialTheme.typography.labelLarge,
         fontWeight = FontWeight.SemiBold,
         color = if (tunnelRunning) {
             MaterialTheme.colorScheme.primary
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
+        },
+    )
+}
+
+/** Live traffic (M-89) and workers: active / target · the server's limit (L-27), read only while shown. */
+@Composable
+private fun TunnelLiveFigures() {
+    val traffic by TunnelManager.traffic.collectAsStateWithLifecycle()
+    val active by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
+    val target by TunnelManager.targetWorkers.collectAsStateWithLifecycle()
+    val serverLimit by TunnelManager.serverAssignedWorkers.collectAsStateWithLifecycle()
+    val trafficText = formatTraffic(traffic)
+    if (trafficText.isNotEmpty()) {
+        Text(
+            text = trafficText,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+    Text(
+        text = workersLine(active, target, serverLimit),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+    )
+}
+
+internal fun workersLine(active: Int, target: Int, serverLimit: Int?): String = buildString {
+    append("Потоки: ").append(active)
+    if (target > 0) append(" / ").append(target)
+    if (serverLimit != null) append(" · сервер: ").append(serverLimit)
+}
+
+/** Notifications off: the status and the captcha prompt cannot show (L-29). Checked on each return to the screen. */
+@Composable
+private fun NotificationsOffWarning() {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(true) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        }
+    }
+    if (enabled) return
+    Text(
+        text = "Уведомления выключены — капча не появится",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.error,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.clickable {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
         },
     )
 }

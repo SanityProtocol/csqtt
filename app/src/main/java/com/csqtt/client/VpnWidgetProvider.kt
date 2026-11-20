@@ -28,9 +28,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
     }
 
     override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
-        val running = TunnelManager.running.value
+        val state = TunnelManager.connectionState.value
         for (appWidgetId in appWidgetIds) {
-            updateWidgetState(context, appWidgetManager, appWidgetId, running)
+            updateWidgetState(context, appWidgetManager, appWidgetId, state)
         }
     }
 
@@ -38,16 +38,17 @@ class VpnWidgetProvider : AppWidgetProvider() {
         context: Context,
         appWidgetManager: AppWidgetManager,
         appWidgetId: Int,
-        running: Boolean
+        state: ConnectionState,
     ) {
         val views = RemoteViews(context.packageName, R.layout.vpn_widget)
 
-        if (running) {
-            views.setTextViewText(R.id.widget_status, "Подключено")
+        // the widget says what the state says (M-44): «Подключено» only on a working tunnel
+        if (state.powerIsOn) {
+            views.setTextViewText(R.id.widget_status, state.label)
             views.setTextColor(R.id.widget_status, 0xFF00E5FF.toInt())
             views.setInt(R.id.widget_toggle_btn, "setBackgroundResource", R.drawable.bg_widget_button_active)
         } else {
-            views.setTextViewText(R.id.widget_status, "Отключено")
+            views.setTextViewText(R.id.widget_status, state.label)
             views.setTextColor(R.id.widget_status, 0xFF888888.toInt())
             views.setInt(R.id.widget_toggle_btn, "setBackgroundResource", R.drawable.bg_widget_button_inactive)
         }

@@ -11,7 +11,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
@@ -20,6 +26,7 @@ import java.io.File
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 
 import androidx.compose.runtime.Immutable
@@ -127,6 +134,8 @@ object TunnelManager {
     private const val CRASH_RESTART_MAX_DELAY_MS = 60_000L
     private const val VPN_START_RETRY_MS = 10_000L
     private const val TUN_LOSS_REBUILD_WINDOW_MS = 60_000L
+    // a stream is ready but GETCONF got no answer for this long: the server hangs (M-2, amurcanov #42)
+    private const val SERVER_SILENT_MS = 20_000L
 
     private val startStopMutex = kotlinx.coroutines.sync.Mutex()
     private val lifecycleState = TunnelLifecycleState()
@@ -143,6 +152,10 @@ object TunnelManager {
         val readyWorkers = mutableSetOf<Int>()
         val dtlsWorkers = mutableSetOf<Int>()
         val unavailableManualHashes = mutableSetOf<String>()
+        // set synchronously, before any stop is launched: the reader's exit then never restarts this process (M-47)
+        val fatal = FirstFatal()
+        @Volatile
+        var silenceArmed = false
     }
 
     private data class PendingLog(
@@ -197,7 +210,6 @@ object TunnelManager {
     val logs = mutableStateListOf<LogEntry>()
     val unreadErrorCount = MutableStateFlow(0)
     val config = MutableStateFlow<String?>(null)
-    val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
     val autoPausedForWifi = MutableStateFlow(false)
     val vpnReady = MutableStateFlow(false)
@@ -205,41 +217,101 @@ object TunnelManager {
     val activeServerRoutingRule = MutableStateFlow<ServerRoutingRule?>(null)
     val serverAssignedWorkers = MutableStateFlow<Int?>(null)
     val lastTunnelDiagnostic = MutableStateFlow("")
-    val uptimeSeconds = MutableStateFlow<Long?>(null)
-    private var uptimeJob: Job? = null
-    
+    // the uptime is computed where it is shown, while it is shown: no ticker runs with the screen off (M-48)
+    val uptime = MutableStateFlow(UptimeMark())
+
     private val pausedForNoNetwork = NetworkPauseGate()
+
+    // the inputs of the connection state (M-43) that the flows above do not carry
+    private val tunconfThisProcess = MutableStateFlow(false)
+    private val everConnected = MutableStateFlow(false)
+    private val networkPaused = MutableStateFlow(false)
+    /** The service waits for a network VK answers on, before the process starts. */
+    internal val awaitingNetwork = MutableStateFlow(false)
+    private val serverSilent = MutableStateFlow(false)
+    private val runFatal = AtomicReference(FirstFatal())
+    val failure = MutableStateFlow<String?>(null)
+    /** The run's traffic from STATS (M-89); null before the first reading. */
+    val traffic = MutableStateFlow<TrafficSnapshot?>(null)
+    private val trafficTracker = TrafficTracker()
+    /** The workers the running process was started with (`-n`), 0 without a run (L-27). */
+    val targetWorkers = MutableStateFlow(0)
+    private val vpnIntentGate = VpnIntentGate()
+
+    val connectionState: StateFlow<ConnectionState> = combine(
+        listOf<kotlinx.coroutines.flow.Flow<Any?>>(
+            running, starting, stopping, autoPausedForWifi, networkPaused, awaitingNetwork,
+            ManlCaptchaWebViewManager.pending, tunconfThisProcess, vpnReady, activeWorkers, everConnected, serverSilent,
+            failure,
+        ),
+    ) { values: Array<Any?> ->
+        deriveConnectionState(
+            ConnectionInputs(
+                running = values[0] as Boolean,
+                starting = values[1] as Boolean,
+                stopping = values[2] as Boolean,
+                pausedOnWifi = values[3] as Boolean,
+                waitingForNetwork = values[4] as Boolean || values[5] as Boolean,
+                captchaPending = values[6] as Boolean,
+                tunconf = values[7] as Boolean,
+                vpnReady = values[8] as Boolean,
+                activeWorkers = values[9] as Int,
+                everConnected = values[10] as Boolean,
+                serverSilent = values[11] as Boolean,
+                failure = values[12] as String?,
+            ),
+        )
+    }.stateIn(scope, SharingStarted.Eagerly, ConnectionState.Idle)
+
+    /** The state as of now, for a tap's decision: the flow above follows its inputs a moment later. */
+    fun currentConnectionState(): ConnectionState = deriveConnectionState(
+        ConnectionInputs(
+            running = running.value,
+            starting = starting.value,
+            stopping = stopping.value,
+            pausedOnWifi = autoPausedForWifi.value,
+            waitingForNetwork = networkPaused.value || awaitingNetwork.value,
+            captchaPending = ManlCaptchaWebViewManager.pending.value,
+            tunconf = tunconfThisProcess.value,
+            vpnReady = vpnReady.value,
+            activeWorkers = activeWorkers.value,
+            everConnected = everConnected.value,
+            serverSilent = serverSilent.value,
+            failure = failure.value,
+        ),
+    )
+
+    private fun syncNetworkPaused() {
+        networkPaused.value = pausedForNoNetwork.isPaused()
+    }
+
+    private fun markConnectedIfReady() {
+        if (running.value && tunconfThisProcess.value && vpnReady.value && activeWorkers.value > 0) {
+            everConnected.value = true
+        }
+    }
+
+    /** The first fatal cause of the run is the one shown (M-47); a later one only goes to the log. */
+    private fun recordRunFailure(cause: String) {
+        val fatal = runFatal.get()
+        if (fatal.record(withoutLogStickers(cause))) failure.value = fatal.cause
+    }
 
     val cooldownActive = MutableStateFlow(false)
     private var cooldownJob: Job? = null
 
     private fun startUptimeTimer() {
         processStartedAtMs = SystemClock.elapsedRealtime()
-        uptimeSeconds.value = 0L
-        uptimeJob?.cancel()
-        uptimeJob = scope.launch(Dispatchers.Default) {
-            while (isActive) {
-                val start = processStartedAtMs
-                val isProcessActive = running.value || process != null
-                if (start > 0L && isProcessActive) {
-                    uptimeSeconds.value = (SystemClock.elapsedRealtime() - start) / 1000L
-                } else if (!isProcessActive && !starting.value) {
-                    break
-                }
-                delay(1000L)
-            }
-        }
+        uptime.value = UptimeMark(startedAtMs = processStartedAtMs)
     }
 
     private fun stopUptimeTimer() {
-        uptimeJob?.cancel()
-        uptimeJob = null
         val start = processStartedAtMs
         if (start > 0L) {
-            uptimeSeconds.value = (SystemClock.elapsedRealtime() - start) / 1000L
+            uptime.value = UptimeMark(frozenSeconds = (SystemClock.elapsedRealtime() - start) / 1000L)
             processStartedAtMs = 0L
-        } else {
-            uptimeSeconds.value = null
+        } else if (uptime.value.frozenSeconds == null) {
+            uptime.value = UptimeMark()
         }
     }
 
@@ -286,6 +358,7 @@ object TunnelManager {
     fun onPhysicalNetworkAvailable(context: Context) {
         if (!running.value) return
         if (pausedForNoNetwork.resume()) {
+            syncNetworkPaused()
             val identity = processIdentity ?: return
             activeScope.launch {
                 writeProcessCommand(identity, "RESUME", "network_resume_command_error")
@@ -295,6 +368,7 @@ object TunnelManager {
 
     fun onVpnInterfaceReady(dns: String? = null) {
         vpnReady.value = true
+        markConnectedIfReady()
         lastTunnelDiagnostic.value = ""
         activeScope.launch { activeSettingsStore?.clearTunnelDiagnostic() }
         if (!dns.isNullOrBlank() && dns != lastAppliedDns) {
@@ -362,6 +436,7 @@ object TunnelManager {
         val diagnostic = VpnRecoveryPolicy.message(kind, message)
         recordTunnelDiagnostic(kind.code, diagnostic)
         updateLog("${kind.code}_terminal", "✗ VPN TUN: $diagnostic", 99, true)
+        recordRunFailure("VPN: $diagnostic")
         scope.launch {
             startStopMutex.withLock {
                 stopLocked(processIdentity)
@@ -371,6 +446,7 @@ object TunnelManager {
 
     internal fun suspendForNoNetwork(reason: PhysicalNetworkPauseReason) {
         if (!running.value || !pausedForNoNetwork.pause()) return
+        syncNetworkPaused()
         val message = when (reason) {
             PhysicalNetworkPauseReason.AIRPLANE_MODE -> "[NET] Режим полёта · ожидание"
             PhysicalNetworkPauseReason.OFFLINE -> "[NET] Сеть отключена · ожидание"
@@ -412,9 +488,15 @@ object TunnelManager {
                         ensureVpnStarted(currentConfig, identity, reason = "stats_no_vpn")
                     }
                 }
+                markConnectedIfReady()
+                traffic.value = trafficTracker.onStats(
+                    identity.generation,
+                    event.bytesUp,
+                    event.bytesDown,
+                    SystemClock.elapsedRealtime(),
+                )
                 val totalMB = (event.bytesUp + event.bytesDown) / (1024.0 * 1024.0)
                 val msg = "Активных: ${event.active} | Трафик: %.2f МБ".format(totalMB)
-                stats.value = msg
                 updateProcessLog(identity, "stats", "[СЕТЬ] $msg", 25, false, LogLevel.NET)
             }
             is TunnelEventParser.Event.ActiveZero -> {
@@ -426,6 +508,7 @@ object TunnelManager {
             is TunnelEventParser.Event.ServerRestart -> schedulePanelServerRestart(identity)
             is TunnelEventParser.Event.Ready -> {
                 identity.startupProgress.streamReady()
+                armServerSilence(identity)
                 if (event.worker == 0 || identity.readyWorkers.add(event.worker)) {
                     updateProcessLog(identity, "ready", "[ВОРКЕР] Поток готов ✓", 20, false, LogLevel.OK)
                 }
@@ -454,6 +537,11 @@ object TunnelManager {
                 val configStr = event.config.trim()
                 if (configStr.isNotEmpty()) {
                     config.value = configStr
+                    if (configStr.startsWith("TUNCONF:")) {
+                        tunconfThisProcess.value = true
+                        serverSilent.value = false
+                        markConnectedIfReady()
+                    }
                     activeScope.launch(Dispatchers.Main) {
                         if (!isCurrent(identity)) return@launch
                         if (configStr.startsWith("TUNCONF:")) {
@@ -672,6 +760,7 @@ object TunnelManager {
             lastVpnStartAttemptMs = SystemClock.elapsedRealtime()
             val vpnIntent = Intent(ctx, TunVpnService::class.java).apply {
                 action = "START"
+                stampVpnIntent(this, identity.generation)
                 putExtra("client_ip", clientIp)
                 putExtra("dns", dns)
                 putExtra("force_rebuild", forceRebuild)
@@ -688,6 +777,46 @@ object TunnelManager {
 
     private fun startTunVpnService(context: Context, intent: Intent) {
         context.startService(intent)
+    }
+
+    private const val EXTRA_VPN_GENERATION = "vpn_generation"
+    private const val EXTRA_VPN_SEQUENCE = "vpn_sequence"
+
+    /** (process generation, sequence) for TunVpnService: see [VpnIntentGate]. */
+    private fun stampVpnIntent(intent: Intent, generation: Long) {
+        intent.putExtra(EXTRA_VPN_GENERATION, generation)
+        intent.putExtra(EXTRA_VPN_SEQUENCE, vpnIntentGate.stamp())
+    }
+
+    /** Whether TunVpnService applies [intent]: Android's own (no stamp) always, ours only while still current. */
+    internal fun acceptsVpnIntent(intent: Intent): Boolean {
+        if (!intent.hasExtra(EXTRA_VPN_SEQUENCE)) return true
+        return vpnIntentGate.accept(
+            isStop = intent.action == "STOP",
+            generation = intent.getLongExtra(EXTRA_VPN_GENERATION, -1L),
+            sequence = intent.getLongExtra(EXTRA_VPN_SEQUENCE, 0L),
+            currentGeneration = processIdentity?.generation,
+            runWanted = lifecycleState.isDesiredRunning(),
+        )
+    }
+
+    /** A stream is ready; with no TUNCONF [SERVER_SILENT_MS] later, the server took the session and hangs (M-2). */
+    private fun armServerSilence(identity: ProcessIdentity) {
+        if (identity.silenceArmed) return
+        identity.silenceArmed = true
+        activeScope.launch {
+            delay(SERVER_SILENT_MS)
+            if (isCurrent(identity) && !tunconfThisProcess.value) {
+                serverSilent.value = true
+                updateProcessLog(
+                    identity,
+                    "server_silent",
+                    "[СЕРВЕР] Поток готов, но сервер не отвечает на запрос конфигурации",
+                    98,
+                    true,
+                )
+            }
+        }
     }
 
     private fun scheduleWorkerZeroRecovery(identity: ProcessIdentity) {
@@ -765,7 +894,10 @@ object TunnelManager {
                 if (!running.value) return@launch
                 val newParams = runCatching { params.withNewSession(appContext) }
                     .getOrElse {
-                        if (logKey == "network_swap") pausedForNoNetwork.restore()
+                        if (logKey == "network_swap") {
+                            pausedForNoNetwork.restore()
+                            syncNetworkPaused()
+                        }
                         if (it is kotlin.coroutines.cancellation.CancellationException) throw it
                         updateLog(
                             "${logKey}_epoch_error",
@@ -811,7 +943,7 @@ object TunnelManager {
         observersInitialized = true
         val appContext = context.applicationContext
         scope.launch {
-            running.collect { running ->
+            connectionState.map { it.label }.distinctUntilChanged().collect {
                 try {
                     VpnWidgetProvider.updateAllWidgets(appContext)
                     android.service.quicksettings.TileService.requestListeningState(
@@ -1006,7 +1138,10 @@ object TunnelManager {
         autoPausedForWifi.value = false
         stopping.value = false
         
-        if (!isSwitching) pausedForNoNetwork.reset()
+        if (!isSwitching) {
+            pausedForNoNetwork.reset()
+            syncNetworkPaused()
+        }
         
         activeScope.launch {
             startStopMutex.withLock {
@@ -1021,7 +1156,6 @@ object TunnelManager {
                 } else {
                     clearLogs()
                     config.value = null
-                    stats.value = "Ожидание данных..."
                     wrapAuthTimeoutCount = 0
                     crashRestartStreak = 0
                     processStartedAtMs = 0L
@@ -1032,6 +1166,11 @@ object TunnelManager {
                     lastTunnelDiagnostic.value = ""
                     activeScope.launch { activeSettingsStore?.clearTunnelDiagnostic() }
                     currentCaptchaSolveMethod = params.captchaSolveMethod
+                    runFatal.set(FirstFatal())
+                    failure.value = null
+                    everConnected.value = false
+                    trafficTracker.reset()
+                    traffic.value = null
                     lifecycleState.requestStart()
                 }
                 restartJob?.cancel()
@@ -1045,6 +1184,7 @@ object TunnelManager {
 
     private fun failStartLocked(key: String, message: String) {
         updateLog(key, message, 99, true)
+        recordRunFailure(message.removePrefix("Ошибка: "))
         lifecycleState.requestStop()
         stopUptimeTimer()
         running.value = false
@@ -1244,6 +1384,9 @@ object TunnelManager {
             3_500L,
         )
         process = startedProcess
+        tunconfThisProcess.value = false
+        serverSilent.value = false
+        targetWorkers.value = totalWorkers
         callRecoveryPending.set(false)
         nativeProcessPid = processIdOf(startedProcess)
         processIdentity = identity
@@ -1342,7 +1485,9 @@ object TunnelManager {
                         lineTrim.contains("error", true) ||
                         lineTrim.contains("FAIL", true)
 
-                    if (lineTrim.contains("[КЛИЕНТ] Все воркеры завершены", true) || isCritical) {
+                    if ((lineTrim.contains("[КЛИЕНТ] Все воркеры завершены", true) || isCritical) &&
+                        identity.fatal.cause == null
+                    ) {
                         lastDiagnostic = lineTrim.take(240)
                     }
 
@@ -1594,7 +1739,11 @@ object TunnelManager {
                         }
                         val exitCode = initialExitCode
                             ?: runCatching { targetProcess.exitValue() }.getOrNull()
-                        val shouldRestart = lifecycleWantsRestart
+                        // a fatal cause (a dead VK account, a wrong password) ends the run, whichever of this exit and
+                        // handleCriticalError's stop takes the lock first (M-47)
+                        val fatalCause = identity.fatal.cause
+                        val shouldRestart = shouldRestartProcess(lifecycleWantsRestart, identity.fatal)
+                        if (fatalCause != null) lastDiagnostic = fatalCause
                         if (lifecycleWantsRestart) {
                             VkAutoCallsManager.finishActiveCalls()
                         }
@@ -1616,7 +1765,15 @@ object TunnelManager {
                                 currentParams
                             }
                         }
-                        if (shouldRestart && restartParams != null && restartContext != null) {
+                        if (fatalCause != null && lifecycleWantsRestart) {
+                            updateLog(
+                                "process_exit",
+                                "✗ Rust-клиент завершился (код ${exitCode ?: "?"}). Причина: $fatalCause",
+                                99,
+                                true,
+                            )
+                            stopLocked(identity)
+                        } else if (shouldRestart && restartParams != null && restartContext != null) {
                             currentParams = restartParams
                             val reason = lastDiagnostic?.let { " Причина: $it" }.orEmpty()
                             updateLog(
@@ -1648,6 +1805,7 @@ object TunnelManager {
                                 99,
                                 true,
                             )
+                            recordRunFailure(lastDiagnostic ?: "Rust-клиент завершился (код ${exitCode ?: "?"})")
                         }
                     }
                 }
@@ -1673,6 +1831,8 @@ object TunnelManager {
     }
 
     private fun handleCriticalError(message: String, identity: ProcessIdentity) {
+        // before anything is launched: the process may exit at once, and its reader must see the cause (M-47)
+        if (identity.fatal.record(withoutLogStickers(message))) recordRunFailure(message)
         updateProcessLog(identity, "circuit_breaker", "[СТОП] $message", -1, true)
         activeScope.launch {
             startStopMutex.withLock {
@@ -1781,7 +1941,6 @@ object TunnelManager {
             autoPausedForWifi.value = true
             stopLocked(processIdentity, preserveWifiAutoPause = true)
             starting.value = false
-            stats.value = "Ожидание. Автопауза при Wi-Fi"
             updateLog(
                 "wifi_auto_pause",
                 "Ожидание. Автопауза при Wi-Fi",
@@ -1806,7 +1965,12 @@ object TunnelManager {
         lifecycleState.requestStop()
         if (!preserveWifiAutoPause) autoPausedForWifi.value = false
         pausedForNoNetwork.reset()
+        syncNetworkPaused()
         vpnReady.value = false
+        tunconfThisProcess.value = false
+        everConnected.value = false
+        serverSilent.value = false
+        targetWorkers.value = 0
         serverRoutingActive.value = false
         activeServerRoutingRule.value = null
         serverAssignedWorkers.value = null
@@ -1821,7 +1985,10 @@ object TunnelManager {
                 preserveWifiAutoPause = preserveWifiAutoPause,
                 notifyController = notifyController,
                 stopVpn = {
-                    val stopIntent = Intent(ctx, TunVpnService::class.java).apply { action = "STOP" }
+                    val stopIntent = Intent(ctx, TunVpnService::class.java).apply {
+                        action = "STOP"
+                        stampVpnIntent(this, identity?.generation ?: -1L)
+                    }
                     try { ctx.startService(stopIntent) } catch (_: Exception) {}
                 },
                 stopController = {
@@ -1848,9 +2015,11 @@ object TunnelManager {
                 val parts = configStr.removePrefix("TUNCONF:").split(":", limit = 3)
                 val clientIp = parts.getOrNull(0)?.trim()?.takeIf { it.isNotEmpty() } ?: return@launch
                 val dns = parts.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() } ?: return@launch
+                val generation = processIdentity?.generation ?: return@launch
                 activeContext()?.let { ctx ->
                     val vpnIntent = Intent(ctx, TunVpnService::class.java).apply {
                         action = "RELOAD_ROUTING"
+                        stampVpnIntent(this, generation)
                         putExtra("client_ip", clientIp)
                         putExtra("dns", dns)
                         putExtra("force_rebuild", true)
@@ -1986,6 +2155,7 @@ object TunnelManager {
                 if (vpnReady.value && vpnInputsChanged) {
                     val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
                         action = "RELOAD_ROUTING"
+                        stampVpnIntent(this, processIdentity?.generation ?: -1L)
                         putExtra("client_ip", clientIp)
                         putExtra("dns", dns)
                         putExtra("reason", "routing_changed")
@@ -2019,6 +2189,7 @@ object TunnelManager {
                     if (vpnReady.value) {
                         val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
                             action = "RELOAD_ROUTING"
+                            stampVpnIntent(this, processIdentity?.generation ?: -1L)
                             putExtra("client_ip", clientIp)
                             putExtra("dns", dns)
                             putExtra("reason", "routing_cleared")

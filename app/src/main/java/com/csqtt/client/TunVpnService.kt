@@ -122,6 +122,19 @@ class TunVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
+        // an intent made for an older tunnel process, or overtaken by a newer one, is dropped (M-43)
+        if (!TunnelManager.acceptsVpnIntent(intent)) {
+            Log.i(TAG, "Dropped a stale ${intent.action} for generation ${intent.getLongExtra("vpn_generation", -1L)}")
+            // no run is on and no interface is up: nothing else will use this service, so it lets its locks go
+            val idle = synchronized(interfaceLock) { vpnInterface == null }
+            if (idle && !TunnelManager.running.value && !stopRequested) {
+                releaseLocks()
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            return START_STICKY
+        }
+
         when (intent.action) {
             "START" -> {
                 stopRequested = false

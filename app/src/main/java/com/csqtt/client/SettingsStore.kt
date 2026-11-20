@@ -325,6 +325,8 @@ class SettingsStore(context: Context) {
         private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
         private val BATTERY_OPTIMIZATION_PROMPT_HANDLED =
             booleanPreferencesKey("battery_optimization_prompt_handled")
+        // the one explanation before the first notification and battery prompts was shown (L-29)
+        private val PERMISSION_INTRO_SHOWN = booleanPreferencesKey("permission_intro_shown")
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
         private val BATTERY_SAVER_MODE = stringPreferencesKey("battery_saver_mode")
         private val BATTERY_SAVER_PERCENT = intPreferencesKey("battery_saver_percent")
@@ -581,7 +583,7 @@ class SettingsStore(context: Context) {
         internal val notBackedUpGlobalKeys: Set<String> by lazy {
             listOf(
                 STORE_SCHEMA_VERSION, DEPLOY_PROFILE_NAMES_CLEANED, DEFAULT_ROLE_DECIDED, SPLIT_TUNNEL_WHITELIST_MIGRATED,
-                BATTERY_OPTIMIZATION_PROMPT_HANDLED, UPDATE_LAST_CHECK_AT, UPDATE_LATEST_VERSION, UPDATE_LAST_ERROR,
+                BATTERY_OPTIMIZATION_PROMPT_HANDLED, PERMISSION_INTRO_SHOWN, UPDATE_LAST_CHECK_AT, UPDATE_LATEST_VERSION, UPDATE_LAST_ERROR,
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
@@ -2099,6 +2101,12 @@ class SettingsStore(context: Context) {
 
     suspend fun saveBatterySaverPercent(percent: Int) {
         dataStore.edit { prefs -> prefs[BATTERY_SAVER_PERCENT] = percent.coerceIn(5, 95) }
+    }
+
+    suspend fun isPermissionIntroShown(): Boolean = dataStore.data.first()[PERMISSION_INTRO_SHOWN] ?: false
+
+    suspend fun markPermissionIntroShown() {
+        dataStore.edit { prefs -> prefs[PERMISSION_INTRO_SHOWN] = true }
     }
 
     suspend fun markBatteryOptimizationPromptHandled() {

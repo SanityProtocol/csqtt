@@ -32,8 +32,13 @@ object ManlCaptchaWebViewManager {
         }
     @Volatile
     var pendingIntentToStart: Intent? = null
-    @Volatile
-    var isCaptchaPending = false
+    /** A manual captcha waits for the user: the connection state is «Нужна капча» meanwhile (L-28). */
+    val pending = kotlinx.coroutines.flow.MutableStateFlow(false)
+    var isCaptchaPending: Boolean
+        get() = pending.value
+        set(value) {
+            pending.value = value
+        }
 
     fun checkAndShowPendingCaptcha(context: Context) {
         val intent = pendingIntentToStart
