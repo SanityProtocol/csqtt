@@ -281,6 +281,30 @@ object TunnelManager {
         ),
     )
 
+    /**
+     * The service accepted a START (or restores one): the last run's failure is no longer the state, whatever ends this
+     * attempt (review F3).
+     */
+    internal fun beginStartRequest() {
+        runFatal.set(FirstFatal())
+        failure.value = null
+        starting.value = true
+    }
+
+    /** A start that ended before a process: its cause is the state (no network for VK, H1). */
+    internal fun failStartRequest(cause: String) {
+        starting.value = false
+        recordRunFailure(cause)
+    }
+
+    /** The process is gone: its last speed is not the tunnel's (review F4); the totals stay. */
+    private fun clearTrafficSpeed() {
+        traffic.value = traffic.value?.copy(downBytesPerSecond = 0L, upBytesPerSecond = 0L, hasSpeed = false)
+    }
+
+    // a routing reload asked while no process runs (a crash restart's backoff): the next process rebuilds the TUN
+    private val vpnRebuildPending = AtomicBoolean(false)
+
     private fun syncNetworkPaused() {
         networkPaused.value = pausedForNoNetwork.isPaused()
     }
@@ -763,7 +787,7 @@ object TunnelManager {
                 stampVpnIntent(this, identity.generation)
                 putExtra("client_ip", clientIp)
                 putExtra("dns", dns)
-                putExtra("force_rebuild", forceRebuild)
+                putExtra("force_rebuild", forceRebuild || vpnRebuildPending.getAndSet(false))
                 putExtra("reason", reason)
                 putExtra("mtu", CsqttConstants.Vpn.DEFAULT_MTU)
             }
@@ -1725,6 +1749,7 @@ object TunnelManager {
                         processIdentity = null
                         nativeProcessPid = null
                         activeWorkers.value = 0
+                        clearTrafficSpeed()
                         resetWorkerRecoveryState()
                         if (readerJob === coroutineContext[Job]) readerJob = null
                         val initialExitCode = runCatching {
@@ -1883,6 +1908,7 @@ object TunnelManager {
             readerJob = null
         }
         val graceMs = identity?.shutdownGraceMs ?: 3_500L
+        clearTrafficSpeed()
         terminateExactProcess(targetProcess, graceMs, finishVkCalls)
         pidToKill?.let { pid ->
             if (pid > 0 && targetProcess.isAlive) {
@@ -1971,6 +1997,7 @@ object TunnelManager {
         everConnected.value = false
         serverSilent.value = false
         targetWorkers.value = 0
+        vpnRebuildPending.set(false)
         serverRoutingActive.value = false
         activeServerRoutingRule.value = null
         serverAssignedWorkers.value = null
@@ -1998,6 +2025,8 @@ object TunnelManager {
             )
         }
         terminateProcessLocked(identity, finishVkCalls)
+        // a stop in a crash restart's backoff has no process to terminate: the uptime stops here too (review F1)
+        stopUptimeTimer()
         running.value = false
         stopping.value = false
         activeWorkers.value = 0
@@ -2015,7 +2044,11 @@ object TunnelManager {
                 val parts = configStr.removePrefix("TUNCONF:").split(":", limit = 3)
                 val clientIp = parts.getOrNull(0)?.trim()?.takeIf { it.isNotEmpty() } ?: return@launch
                 val dns = parts.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() } ?: return@launch
-                val generation = processIdentity?.generation ?: return@launch
+                val generation = processIdentity?.generation ?: run {
+                    // no process (a crash restart's backoff): its TUNCONF start rebuilds the interface instead (review F2)
+                    vpnRebuildPending.set(true)
+                    return@launch
+                }
                 activeContext()?.let { ctx ->
                     val vpnIntent = Intent(ctx, TunVpnService::class.java).apply {
                         action = "RELOAD_ROUTING"

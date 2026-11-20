@@ -152,7 +152,7 @@ class TunnelService : Service() {
                 startJob?.cancel()
                 val requestGeneration = ++startGeneration
                 autoPauseRequested = true
-                TunnelManager.starting.value = true
+                TunnelManager.beginStartRequest()
                 val notification = createNotification("Запуск...")
                 if (!tryStartPersistentForeground(notification, "запуск VPN")) {
                     TunnelManager.starting.value = false
@@ -210,7 +210,9 @@ class TunnelService : Service() {
                             store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CALLS)
                         }
                         if (!awaitVkNetwork()) {
-                            TunnelManager.starting.value = false
+                            // the service and its foreground notice end too, not only the start (H1)
+                            TunnelManager.failStartRequest("нет сети, через которую доступен VK")
+                            launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel() }
                             return@launch
                         }
                         if (!isCurrentStart(requestGeneration)) return@launch
@@ -373,7 +375,7 @@ class TunnelService : Service() {
         val requestGeneration = ++startGeneration
         isStopping = false
         resourcesReleased = false
-        TunnelManager.starting.value = true
+        TunnelManager.beginStartRequest()
         val notification = createNotification("Восстановление соединения...")
         if (!tryStartPersistentForeground(notification, "восстановление VPN")) {
             TunnelManager.starting.value = false
@@ -449,7 +451,8 @@ class TunnelService : Service() {
                     ),
                 )
                 if (!awaitVkNetwork()) {
-                    TunnelManager.starting.value = false
+                    TunnelManager.failStartRequest("нет сети, через которую доступен VK")
+                    launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel() }
                     return@launch
                 }
                 if (!isCurrentStart(requestGeneration)) return@launch
@@ -1433,7 +1436,8 @@ class TunnelService : Service() {
 
     /** The status notification from the connection state and STATS (M-43, M-89), throttled (M-48). */
     private fun postTunnelStatus() {
-        if (!foregroundStarted || isStopping) return
+        // with the screen off nothing is built at all (review F5)
+        if (!foregroundStarted || isStopping || !screenInteractive()) return
         val state = TunnelManager.connectionState.value
         val title = tunnelNotificationTitle(state)
         val text = if (showsTraffic(state)) formatTraffic(TunnelManager.traffic.value) else ""
@@ -1442,7 +1446,7 @@ class TunnelService : Service() {
                 state = state.label,
                 text = "$title\n$text",
                 nowMs = SystemClock.elapsedRealtime(),
-                screenOn = screenInteractive(),
+                screenOn = true,
                 visible = ::isNotificationVisible,
             )
         ) {
