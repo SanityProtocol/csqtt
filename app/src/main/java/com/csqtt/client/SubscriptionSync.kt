@@ -42,7 +42,17 @@ internal object SubscriptionSync {
             lockFor(meta.url).withLock {
                 val current = store.subscriptionMeta.first()[meta.url] ?: return@withLock
                 if (!current.needsUpdate(System.currentTimeMillis())) return@withLock
-                performRefresh(store, meta.url)
+                val outcome = performRefresh(store, meta.url)
+                // classic has no subscription screen: a refresh that fails is said in the log, by title (a subscription URL
+                // can carry its access token, so it is never logged)
+                if (!outcome.success) {
+                    TunnelManager.updateLog(
+                        "subscription_refresh_${meta.url.hashCode()}",
+                        "[ПОДПИСКА] «${current.title.ifBlank { "Подписка" }}» не обновлена: ${outcome.message}",
+                        99,
+                        true,
+                    )
+                }
             }
         }
     }
@@ -57,10 +67,10 @@ internal object SubscriptionSync {
         val pinned = meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
         val normalized = normalizeSubscriptionUrl(url, pinned)
         store.markSubscriptionAttempt(normalized)
-        val trust = SubscriptionTrust(pinned, meta?.certSha256.orEmpty())
-        return when (val result = SubscriptionImporter.fetch(normalized, trust)) {
+        val record = meta?.certSha256?.takeIf { it.isNotBlank() }?.let { SubscriptionCertRecord(it, meta.certNotAfter) }
+        return when (val result = SubscriptionImporter.fetch(normalized, SubscriptionTrust(pinned, record))) {
             is SubscriptionFetchResult.Success -> {
-                result.certSha256?.let { store.pinSubscriptionCertificate(normalized, it) }
+                result.cert?.let { store.recordSubscriptionCertificate(normalized, it) }
                 val summary = SubscriptionImporter.importNodes(
                     store = store,
                     rawUrl = normalized,

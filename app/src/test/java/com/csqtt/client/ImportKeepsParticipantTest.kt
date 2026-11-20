@@ -79,4 +79,50 @@ class ImportKeepsParticipantTest {
         val ownerMode = ProfileConnectionSnapshot(peer = "203.0.113.9", serverPeerPort = 46000)
         assertEquals("203.0.113.9|46000", with(SubscriptionImporter) { ownerMode.endpointKey() })
     }
+
+    @Test
+    fun `a node without hashes keeps the participant's own hashes (review F1)`() {
+        val own = listOf("C".repeat(20), "D".repeat(20))
+        val bare = "csqtt://connect?v=2&host=203.0.113.50&peer=46100&password=pw"
+        val prefs = load(
+            """{"strings": {"peer_2": "203.0.113.50", "connection_password_local_2": "pw", "vk_hashes_2": "${own.joinToString(",")}",
+                            "subscription_url_2": "https://sub.example/s"},
+                "ints": {"server_peer_port_2": 46100}}""",
+        )
+        SettingsStore.writeSubscriptionNode(prefs, write(2, bare))
+        assertEquals(own.joinToString(","), prefs[s("vk_hashes", 2)])
+        assertEquals(bare, prefs[s("csqtt_link", 2)])
+    }
+
+    @Test
+    fun `leaving owner mode drops only the hashes the link carries`() {
+        val own = "C".repeat(20)
+        val prefs = load(
+            """{"strings": {"peer_2": "203.0.113.50", "vk_hashes_2": "${(ownerHashes + own).joinToString(",")}",
+                            "subscription_url_2": "https://sub.example/s"}}""",
+        )
+        SettingsStore.writeSubscriptionNode(prefs, write(2, nodeLink))
+        assertEquals(own, prefs[s("vk_hashes", 2)])
+    }
+
+    @Test
+    fun `store step 3 leaves a refreshing subscription to its refresh, and never writes a link it cannot read`() {
+        val refreshing = load(
+            """{"strings": {"peer_2": "203.0.113.50", "connection_password_local_2": "pw", "vk_hashes_2": "${ownerHashes.joinToString(",")}",
+                            "subscription_url_2": "https://sub.example/s",
+                            "subscription_meta_v1": "{\"https://sub.example/s\": {\"url\": \"https://sub.example/s\", \"autoUpdateMinutes\": 60}}"}}""",
+        )
+        SettingsStore.subscriptionSlotToLink(refreshing, 2)
+        assertNull(refreshing[b("csqtt_link_mode", 2)])
+        assertEquals("203.0.113.50", refreshing[s("peer", 2)])
+
+        val sevenHashes = (1..7).joinToString(",") { "${'A' + it}".repeat(20) }
+        val unreadable = load(
+            """{"strings": {"peer_2": "203.0.113.50", "connection_password_local_2": "pw", "vk_hashes_2": "$sevenHashes",
+                            "subscription_url_2": "https://sub.example/s"}}""",
+        )
+        SettingsStore.subscriptionSlotToLink(unreadable, 2)
+        assertNull(unreadable[b("csqtt_link_mode", 2)])
+        assertEquals(sevenHashes, unreadable[s("vk_hashes", 2)])
+    }
 }

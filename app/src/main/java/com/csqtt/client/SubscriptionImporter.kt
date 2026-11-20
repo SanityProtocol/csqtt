@@ -35,8 +35,8 @@ internal data class SubscriptionPreview(
 )
 
 internal sealed interface SubscriptionFetchResult {
-    /** [certSha256]: the subscription server's leaf certificate, when the fetch went through a pinned connection. */
-    data class Success(val preview: SubscriptionPreview, val certSha256: String? = null) : SubscriptionFetchResult
+    /** [cert]: the leaf a marked subscription's own server was trusted with on this fetch, to be recorded (M-171). */
+    data class Success(val preview: SubscriptionPreview, val cert: SubscriptionCertRecord? = null) : SubscriptionFetchResult
     data class Failure(val message: String) : SubscriptionFetchResult
 }
 
@@ -71,43 +71,69 @@ internal data class SubscriptionImportSummary(
 internal fun subscriptionTransportUrl(url: String): String =
     if (url.startsWith("http://", ignoreCase = true)) "https://" + url.substring(7) else url
 
+/** A leaf certificate as a marked subscription records it: SHA-256 (hex) and notAfter (epoch ms). */
+internal data class SubscriptionCertRecord(val sha256: String, val notAfterMs: Long)
+
 /**
  * How a subscription's own server is trusted (M-171). [pinned]: the user marked it (V2's «Скачивать по HTTP», or an
- * `http://` URL they typed) — its server is trusted by its certificate's [certSha256], pinned on the first fetch when empty.
- * Otherwise the platform's full checks.
+ * `http://` URL they typed) — a certificate the platform refuses is held to [record], the leaf it was last trusted with.
+ * Otherwise the platform's full checks only.
  */
-internal data class SubscriptionTrust(val pinned: Boolean = false, val certSha256: String = "")
-
-/** The pinned certificate's check: [expected] null pins whatever is seen (trust on first use). Returns the SHA-256 hex. */
-internal fun acceptPinnedLeaf(expected: String?, leafDer: ByteArray): String {
-    val seen = java.security.MessageDigest.getInstance("SHA-256").digest(leafDer)
-        .joinToString("") { "%02x".format(it) }
-    if (expected != null && !expected.equals(seen, ignoreCase = true)) {
-        throw java.security.cert.CertificateException(SubscriptionCertPin.MISMATCH)
-    }
-    return seen
-}
+internal data class SubscriptionTrust(val pinned: Boolean = false, val record: SubscriptionCertRecord? = null)
 
 /**
- * One fetch's trust for the subscription's own host and port; any other host gets the platform's checks. A certificate the
- * platform accepts is checked as for any server (its name too) and never pinned, so a CA certificate that renews keeps
- * working; only a certificate the platform refuses (a self-signed panel) is held to the pin.
+ * A certificate the platform refused (its chain, or its name) on a marked subscription's own server is accepted when it is
+ * the recorded leaf, when none is recorded yet (trust on first use), or when the recorded leaf has expired: the panels the
+ * app deploys replace a certificate only once it has expired (a 365-day self-signed fallback, a lapsed Let's Encrypt one;
+ * review F2). A recorded leaf without a known expiry never expires.
+ */
+internal fun pinAccepts(record: SubscriptionCertRecord?, leaf: SubscriptionCertRecord, nowMs: Long): Boolean =
+    record == null || record.sha256.equals(leaf.sha256, ignoreCase = true) ||
+        (record.notAfterMs > 0L && record.notAfterMs < nowMs)
+
+internal fun certRecordOf(leaf: java.security.cert.X509Certificate): SubscriptionCertRecord = SubscriptionCertRecord(
+    sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(leaf.encoded).joinToString("") { "%02x".format(it) },
+    notAfterMs = leaf.notAfter.time,
+)
+
+/**
+ * One fetch's trust for a marked subscription's own host and port; any other host gets the platform's checks. A certificate
+ * the platform accepts, name included, is used as for any server and becomes the recorded leaf (so a later certificate it
+ * refuses cannot take its place while it is current: review F3). One it refuses — a self-signed panel, or a CA certificate
+ * for another name than the URL's (review F4) — must pass [pinAccepts]; then the pin, not a CA, vouches for the name.
  */
 internal class SubscriptionCertPin(
     private val host: String,
     private val port: Int,
-    private val expected: String?,
+    private val record: SubscriptionCertRecord?,
+    private val nowMs: Long = System.currentTimeMillis(),
     private val platform: javax.net.ssl.X509TrustManager = platformTrustManager(),
 ) {
-    /** The pinned certificate's SHA-256 when the last handshake went by the pin; null when the platform accepted it. */
+    /** The leaf this fetch trusted on the subscription's own server, to be recorded. */
     @Volatile
-    var seen: String? = null
+    var observed: SubscriptionCertRecord? = null
         private set
 
     /** The last handshake went by the pin, so the pin, not a CA, vouches for the name. */
     @Volatile
     var byPin: Boolean = false
         private set
+
+    /** A certificate was refused by the pin rule: the fetch failed because the certificate changed. */
+    @Volatile
+    var refusedByPin: Boolean = false
+        private set
+
+    private fun pinOrRefuse(leaf: java.security.cert.X509Certificate): Boolean {
+        val candidate = certRecordOf(leaf)
+        if (!pinAccepts(record, candidate, nowMs)) {
+            refusedByPin = true
+            return false
+        }
+        byPin = true
+        observed = candidate
+        return true
+    }
 
     private val manager = object : javax.net.ssl.X509TrustManager {
         override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {
@@ -116,20 +142,26 @@ internal class SubscriptionCertPin(
 
         override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {
             val leaf = chain?.firstOrNull() ?: throw java.security.cert.CertificateException("no server certificate")
+            byPin = false
             if (runCatching { platform.checkServerTrusted(chain, authType) }.isSuccess) {
-                byPin = false
+                // recorded once the fetch succeeds, i.e. once its name passed too (a mismatch goes to the pin rule)
+                observed = certRecordOf(leaf)
                 return
             }
-            seen = acceptPinnedLeaf(expected, leaf.encoded)
-            byPin = true
+            if (!pinOrRefuse(leaf)) throw java.security.cert.CertificateException(MISMATCH)
         }
 
         override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = platform.acceptedIssuers
     }
 
-    /** The name check: the platform's, unless the pin vouched for this very certificate. */
+    /**
+     * The platform's name check; a CA certificate for another name falls to the pin rule (review F4). Android calls it for
+     * every connection, the JVM only after its own name check failed.
+     */
     val hostnameVerifier = javax.net.ssl.HostnameVerifier { name, session ->
-        byPin || javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(name, session)
+        byPin || javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(name, session) ||
+            runCatching { session.peerCertificates.first() as java.security.cert.X509Certificate }
+                .getOrNull()?.let(::pinOrRefuse) == true
     }
 
     val socketFactory: javax.net.ssl.SSLSocketFactory by lazy {
@@ -153,7 +185,7 @@ internal class SubscriptionCertPin(
             if (!trust.pinned) return null
             val parsed = runCatching { URL(url) }.getOrNull() ?: return null
             val port = if (parsed.port == -1) parsed.defaultPort else parsed.port
-            return SubscriptionCertPin(parsed.host, port, trust.certSha256.trim().ifEmpty { null })
+            return SubscriptionCertPin(parsed.host, port, trust.record?.takeIf { it.sha256.isNotBlank() })
         }
     }
 }
@@ -189,7 +221,7 @@ internal object SubscriptionImporter {
     private const val HTTP_ONLY_MESSAGE =
         "Подписка только по HTTP не поддерживается: она передаёт пароль подключения открытым текстом. Нужен HTTPS"
     private const val PIN_MISMATCH_MESSAGE =
-        "Сертификат сервера подписки изменился: обновление отклонено. Если сервер сменил сертификат, добавьте подписку заново"
+        "Сертификат сервера подписки изменился раньше срока прежнего: обновление отклонено"
 
     private sealed interface ParseResult {
         data class Success(val preview: SubscriptionPreview) : ParseResult
@@ -221,7 +253,7 @@ internal object SubscriptionImporter {
                 is BodyResult.Failed -> lastError = if (body.tls && plainHttpUrl) HTTP_ONLY_MESSAGE else body.message
                 is BodyResult.Body -> when (val parsed = parseBody(body.text)) {
                     is ParseResult.Success ->
-                        return@withContext SubscriptionFetchResult.Success(parsed.preview, pin?.seen)
+                        return@withContext SubscriptionFetchResult.Success(parsed.preview, pin?.observed)
                     is ParseResult.Rejected -> rejectedError = parsed.message
                     is ParseResult.Invalid -> lastError = parsed.message
                 }
@@ -467,11 +499,14 @@ internal object SubscriptionImporter {
                     }
                 }
             }
-        } catch (e: javax.net.ssl.SSLException) {
-            if (generateSequence<Throwable>(e) { it.cause }.any { it.message == SubscriptionCertPin.MISMATCH }) {
-                BodyResult.Failed(PIN_MISMATCH_MESSAGE)
-            } else {
-                BodyResult.Failed("Ошибка TLS: ${e.message ?: "сертификат не принят"}", tls = true)
+        } catch (e: java.io.IOException) {
+            when {
+                // refused by the pin rule, in the handshake or at the name check (an IOException on the JVM, an
+                // SSLPeerUnverifiedException on Android)
+                pin?.refusedByPin == true -> BodyResult.Failed(PIN_MISMATCH_MESSAGE)
+                e is javax.net.ssl.SSLException ->
+                    BodyResult.Failed("Ошибка TLS: ${e.message ?: "сертификат не принят"}", tls = true)
+                else -> BodyResult.Failed("Ошибка сети: ${e.message ?: "нет соединения"}")
             }
         } catch (e: Exception) {
             BodyResult.Failed("Ошибка сети: ${e.message ?: "нет соединения"}")

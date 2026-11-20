@@ -6,12 +6,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 import java.io.File
 import java.net.InetSocketAddress
-import java.security.MessageDigest
-import java.security.cert.CertificateException
 
 /**
  * B5c1, M-171: a subscription is fetched over HTTPS only. The platform checks an unmarked one; one the user marked (V2's
@@ -37,22 +34,33 @@ class SubscriptionTlsTest {
         }
     }
 
+    private val future = System.currentTimeMillis() + 86_400_000L
+    private val past = System.currentTimeMillis() - 86_400_000L
+    private fun other(notAfter: Long) = SubscriptionCertRecord("ab".repeat(32), notAfter)
+
     @Test
-    fun `a marked subscription pins its server's certificate on the first fetch`() = withHttps { port ->
+    fun `a marked subscription records its server's certificate on the first fetch`() = withHttps { port ->
         val result = SubscriptionImporter.fetch("https://127.0.0.1:$port/sub", SubscriptionTestServers.pinnedOnFirstUse)
         assertTrue(result is SubscriptionFetchResult.Success)
-        assertEquals(SubscriptionTestServers.fixtureSha256, (result as SubscriptionFetchResult.Success).certSha256)
+        val cert = (result as SubscriptionFetchResult.Success).cert!!
+        assertEquals(SubscriptionTestServers.fixtureSha256, cert.sha256)
+        assertTrue(cert.notAfterMs > System.currentTimeMillis())
     }
 
     @Test
-    fun `the pinned certificate is accepted, any other is refused`() = withHttps { port ->
+    fun `the recorded certificate is accepted, another one only once the recorded one has expired`() = withHttps { port ->
         val url = "https://127.0.0.1:$port/sub"
-        val pinned = SubscriptionImporter.fetch(url, SubscriptionTrust(true, SubscriptionTestServers.fixtureSha256.uppercase()))
-        assertTrue(pinned is SubscriptionFetchResult.Success)
+        val same = SubscriptionCertRecord(SubscriptionTestServers.fixtureSha256.uppercase(), future)
+        assertTrue(SubscriptionImporter.fetch(url, SubscriptionTrust(true, same)) is SubscriptionFetchResult.Success)
 
-        val changed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, "ab".repeat(32)))
+        val changed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(future)))
         assertTrue(changed is SubscriptionFetchResult.Failure)
         assertTrue((changed as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки изменился"))
+
+        // the panels the app deploys replace an expired certificate (a 365-day fallback, a lapsed Let's Encrypt one)
+        val renewed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(past)))
+        assertTrue(renewed is SubscriptionFetchResult.Success)
+        assertEquals(SubscriptionTestServers.fixtureSha256, (renewed as SubscriptionFetchResult.Success).cert!!.sha256)
     }
 
     @Test
@@ -112,7 +120,7 @@ class SubscriptionTlsTest {
         try {
             val result = SubscriptionImporter.fetch(
                 "https://127.0.0.1:${origin.address.port}/sub",
-                SubscriptionTrust(true, SubscriptionTestServers.fixtureSha256),
+                SubscriptionTrust(true, SubscriptionCertRecord(SubscriptionTestServers.fixtureSha256, future)),
             )
             assertTrue(result is SubscriptionFetchResult.Failure)
             assertTrue((result as SubscriptionFetchResult.Failure).message.startsWith("Ошибка TLS"))
@@ -122,39 +130,56 @@ class SubscriptionTlsTest {
         }
     }
 
-    @Test
-    fun `a certificate the platform accepts is checked as usual and never pinned`() = withHttps { port ->
-        // a stand-in platform that accepts every chain: a CA certificate that renews must not be pinned
-        val acceptAll = object : javax.net.ssl.X509TrustManager {
-            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) = Unit
-            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) = Unit
-            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
-        }
-        val pin = SubscriptionCertPin("127.0.0.1", port, expected = "ab".repeat(32), platform = acceptAll)
-        val connection = java.net.URL("https://127.0.0.1:$port/sub").openConnection() as javax.net.ssl.HttpsURLConnection
+    private val acceptAll = object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) = Unit
+        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) = Unit
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+    }
+
+    /** One request through [pin], as fetchBody makes it on the subscription's own server; the response code or null. */
+    private fun through(pin: SubscriptionCertPin, url: String): Int? {
+        val connection = java.net.URL(url).openConnection() as javax.net.ssl.HttpsURLConnection
         connection.sslSocketFactory = pin.socketFactory
-        connection.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
-        try {
-            assertEquals(200, connection.responseCode)
+        connection.hostnameVerifier = pin.hostnameVerifier
+        return try {
+            connection.responseCode
+        } catch (_: java.io.IOException) {
+            null
         } finally {
             connection.disconnect()
         }
-        assertNull(pin.seen)
-        assertFalse(pin.byPin)
     }
 
     @Test
-    fun `the pin check itself`() {
-        val der = byteArrayOf(1, 2, 3)
-        val sha = MessageDigest.getInstance("SHA-256").digest(der).joinToString("") { "%02x".format(it) }
-        assertEquals(sha, acceptPinnedLeaf(null, der))
-        assertEquals(sha, acceptPinnedLeaf(sha.uppercase(), der))
-        try {
-            acceptPinnedLeaf("00".repeat(32), der)
-            fail("a different certificate must be refused")
-        } catch (e: CertificateException) {
-            assertEquals(SubscriptionCertPin.MISMATCH, e.message)
-        }
+    fun `a certificate the platform accepts, name included, is used as usual and recorded`() = withHttps { port ->
+        // a stand-in platform that accepts the chain (a CA certificate); the fixture is valid for 127.0.0.1
+        val pin = SubscriptionCertPin("127.0.0.1", port, other(future), platform = acceptAll)
+        assertEquals(200, through(pin, "https://127.0.0.1:$port/sub"))
+        assertFalse(pin.byPin)
+        assertEquals(SubscriptionTestServers.fixtureSha256, pin.observed?.sha256)
+    }
+
+    @Test
+    fun `a CA certificate for another name falls to the pin rule`() = withHttps { port ->
+        // the URL's host ("localhost") is not in the certificate, as a domain pointed at a panel with an IP certificate
+        val first = SubscriptionCertPin("localhost", port, null, platform = acceptAll)
+        assertEquals(200, through(first, "https://localhost:$port/sub"))
+        assertTrue(first.byPin)
+
+        val refused = SubscriptionCertPin("localhost", port, other(future), platform = acceptAll)
+        assertNull(through(refused, "https://localhost:$port/sub"))
+        assertTrue(refused.refusedByPin)
+    }
+
+    @Test
+    fun `the pin rule`() {
+        val now = 1_000_000L
+        val leaf = SubscriptionCertRecord("cd".repeat(32), now + 10)
+        assertTrue("nothing recorded: trust on first use", pinAccepts(null, leaf, now))
+        assertTrue(pinAccepts(SubscriptionCertRecord("CD".repeat(32), now + 5), leaf, now))
+        assertFalse(pinAccepts(SubscriptionCertRecord("ab".repeat(32), now + 5), leaf, now))
+        assertTrue(pinAccepts(SubscriptionCertRecord("ab".repeat(32), now - 5), leaf, now))
+        assertFalse("an unknown expiry never expires", pinAccepts(SubscriptionCertRecord("ab".repeat(32), 0L), leaf, now))
         assertNull(SubscriptionCertPin.forUrl("https://h/x", SubscriptionTrust()))
     }
 

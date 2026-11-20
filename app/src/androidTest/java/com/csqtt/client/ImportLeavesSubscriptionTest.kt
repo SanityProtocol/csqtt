@@ -24,7 +24,7 @@ class ImportLeavesSubscriptionTest {
         store.applySubscriptionImport(
             listOf(
                 SubscriptionProfileWrite(
-                    profile = slot, host = "203.0.113.7", port = 46000, password = "sub-password", hashes = emptyList(),
+                    profile = slot, link = "csqtt://connect?v=2&host=203.0.113.7&peer=46000&password=sub-password",
                     power = null, nodeName = "node A", title = "test subscription",
                     url = "https://sub.example.invalid/s/abc", subUuid = "uuid-abc",
                 ),

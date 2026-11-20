@@ -142,8 +142,12 @@ internal data class SubscriptionMeta(
      * server is trusted by its pinned certificate (M-171), never over plain HTTP.
      */
     val allowHttp: Boolean = false,
-    /** SHA-256 (hex) of the subscription server's pinned leaf certificate; empty until its first fetch pins it. */
+    /**
+     * The last leaf certificate a marked subscription's server was trusted with (SHA-256 hex, and its notAfter in ms):
+     * a certificate the platform refuses is accepted only if it is this one or this one has expired (M-171).
+     */
     val certSha256: String = "",
+    val certNotAfter: Long = 0L,
 ) {
     fun needsUpdate(now: Long): Boolean {
         if (autoUpdateMinutes <= 0 || url.isBlank()) return false
@@ -172,6 +176,7 @@ private fun decodeSubscriptionMeta(raw: String?): Map<String, SubscriptionMeta> 
             lastAttemptAt = entry.optLong("lastAttemptAt", 0L).coerceAtLeast(0L),
             allowHttp = entry.optBoolean("allowHttp", false),
             certSha256 = entry.optString("certSha256").trim(),
+            certNotAfter = entry.optLong("certNotAfter", 0L).coerceAtLeast(0L),
         )
     }
     return result
@@ -190,7 +195,10 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
                 put("lastUpdatedAt", value.lastUpdatedAt)
                 put("lastAttemptAt", value.lastAttemptAt)
                 put("allowHttp", value.allowHttp)
-                if (value.certSha256.isNotBlank()) put("certSha256", value.certSha256)
+                if (value.certSha256.isNotBlank()) {
+                    put("certSha256", value.certSha256)
+                    put("certNotAfter", value.certNotAfter)
+                }
             },
         )
     }
@@ -697,13 +705,10 @@ class SettingsStore(context: Context) {
         }
 
         /**
-         * A new profile written into a free slot starts clean: no VK keys or lists left by an older profile there (M-40).
-         * The active slot's keys are the settings the user is looking at, so they stay.
-         */
-        /**
          * A subscription node into its slot (M-170): the owner's link as served, in link mode, so its hashes stay the owner's
          * («от владельца», masked, never the profile's own) and a token link connects from the link. A slot that held the
-         * node in owner mode (2.5.3) loses the node's hashes, peer and password, which the link now carries.
+         * node in owner mode (2.5.3) loses the peer and password the link now carries, and of its hashes only the ones the
+         * link carries: a node without hashes left the participant's own hashes there (2.5.3 copied only non-empty ones).
          */
         internal fun writeSubscriptionNode(prefs: MutablePreferences, write: SubscriptionProfileWrite) {
             val profile = write.profile
@@ -759,15 +764,21 @@ class SettingsStore(context: Context) {
         }
 
         /**
-         * [profile] connects through the owner's [link]. Coming from owner mode, the slot's connection fields go: the link
-         * carries peer, port, password and the owner's hashes, and the hashes stored as its own were the owner's.
+         * [profile] connects through the owner's [link]. Coming from owner mode, the slot's connection fields go (the link
+         * carries peer, port and password), and its hashes the link also carries: those were the owner's. Any other hash
+         * stays the participant's own (review F1).
          */
         private fun useParticipantLink(prefs: MutablePreferences, profile: Int, link: String) {
             if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) {
                 listOf(
-                    VK_HASHES, PEER, SERVER_PEER_PORT, CONNECTION_PASSWORD_LOCAL, CONNECTION_PASSWORD,
+                    PEER, SERVER_PEER_PORT, CONNECTION_PASSWORD_LOCAL, CONNECTION_PASSWORD,
                     CONNECTION_PASSWORD_ENCRYPTED, LINK_HASHES_REMOVED,
                 ).forEach { prefs.remove(getProfileKey(it, profile)) }
+                val ownKey = getProfileKey(VK_HASHES, profile)
+                val linkHashes = parseCsqttLink(link)?.hashes.orEmpty().toSet()
+                val own = prefs[ownKey].orEmpty().split(Regex("[,\\s]+")).map(String::trim)
+                    .filter { it.isNotEmpty() && it !in linkHashes }.distinct()
+                if (own.isEmpty()) prefs.remove(ownKey) else prefs[ownKey] = own.joinToString(",")
             }
             prefs[getProfileKey(CSQTT_LINK, profile)] = link
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
@@ -779,8 +790,12 @@ class SettingsStore(context: Context) {
          * keystore is not), and then its next refresh converts it.
          */
         internal fun subscriptionSlotToLink(prefs: MutablePreferences, profile: Int) {
-            if (prefs[getProfileKey(SUBSCRIPTION_URL, profile)].isNullOrBlank()) return
+            val url = prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim()
+            if (url.isNullOrEmpty()) return
             if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) return
+            // a subscription that refreshes is converted by its next refresh, from the link it serves, which tells the
+            // owner's hashes from the participant's own; only the ones that never refresh are rebuilt here (review F1)
+            if ((decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])[url]?.autoUpdateMinutes ?: 0) > 0) return
             val peer = prefs[getProfileKey(PEER, profile)]?.trim().orEmpty()
             if (peer.isEmpty()) return
             val host = if (peer.startsWith("[")) peer.substringAfter('[').substringBefore(']') else peer
@@ -797,9 +812,15 @@ class SettingsStore(context: Context) {
                 hashes = hashes,
                 power = prefs[getProfileKey(SUBSCRIPTION_POWER, profile)],
             )
+            // a link the parser refuses (more than 6 hashes, a short one) would leave a profile that cannot connect
+            parseCsqttLink(link) ?: return
             useParticipantLink(prefs, profile, link)
         }
 
+        /**
+         * A new profile written into a free slot starts clean: no VK keys or lists left by an older profile there (M-40).
+         * The active slot's keys are the settings the user is looking at, so they stay.
+         */
         internal fun startCleanIfFree(prefs: MutablePreferences, profile: Int) {
             if (!profileInUse(prefs, profile) && profile != (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)) {
                 clearProfileKeys(prefs, profile, CONNECTION)
@@ -1304,10 +1325,7 @@ class SettingsStore(context: Context) {
         }
     }
 
-    /**
-     * Writes subscription nodes into profile slots as owner profiles.
-     * Peer and password come from the decrypted link; power caps the worker count.
-     */
+    /** Writes subscription nodes into profile slots as the owner's links (M-170); a node's power caps the worker count. */
     internal suspend fun applySubscriptionImport(writes: List<SubscriptionProfileWrite>) {
         if (writes.isEmpty()) return
         dataStore.edit { prefs -> writes.forEach { writeSubscriptionNode(prefs, it) } }
@@ -1379,16 +1397,21 @@ class SettingsStore(context: Context) {
                 lastAttemptAt = existing?.lastAttemptAt ?: 0L,
                 allowHttp = allowHttp || existing?.allowHttp == true,
                 certSha256 = existing?.certSha256.orEmpty(),
+                certNotAfter = existing?.certNotAfter ?: 0L,
             )
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
         }
     }
 
-    /** The first fetch of a pinned subscription pins its server's certificate; a pin is never replaced here (M-171). */
-    internal suspend fun pinSubscriptionCertificate(url: String, certSha256: String) {
-        if (certSha256.isBlank()) return
+    /** The leaf a marked subscription's server was last trusted with, whichever way (M-171; review F2, F3). */
+    internal suspend fun recordSubscriptionCertificate(url: String, cert: SubscriptionCertRecord) {
+        if (cert.sha256.isBlank()) return
         updateSubscriptionMeta(url) { meta ->
-            if (meta.certSha256.isBlank()) meta.copy(certSha256 = certSha256) else meta
+            if (meta.certSha256 == cert.sha256 && meta.certNotAfter == cert.notAfterMs) {
+                meta
+            } else {
+                meta.copy(certSha256 = cert.sha256, certNotAfter = cert.notAfterMs)
+            }
         }
     }
 
