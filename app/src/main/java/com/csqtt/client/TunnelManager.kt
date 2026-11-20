@@ -291,12 +291,6 @@ object TunnelManager {
         starting.value = true
     }
 
-    /** A start that ended before a process: its cause is the state (no network for VK, H1). */
-    internal fun failStartRequest(cause: String) {
-        starting.value = false
-        recordRunFailure(cause)
-    }
-
     /** The process is gone: its last speed is not the tunnel's (review F4); the totals stay. */
     private fun clearTrafficSpeed() {
         traffic.value = traffic.value?.copy(downBytesPerSecond = 0L, upBytesPerSecond = 0L, hasSpeed = false)
