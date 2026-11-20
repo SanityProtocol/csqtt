@@ -5,6 +5,7 @@ mod captcha;
 mod captcha_slider;
 mod cpu_task;
 pub mod direct_relay;
+mod diag;
 mod dispatcher;
 mod dns;
 #[path = "../shared/dtls.rs"]
@@ -14,6 +15,7 @@ mod logging;
 mod namegen;
 mod obfs;
 mod packet;
+mod probe;
 mod profiles;
 mod protocol;
 mod repair;
@@ -301,7 +303,10 @@ async fn run(arguments: Arguments) -> Result<i32> {
         js_credential_broker,
         events.clone(),
     ));
-    let stats = Arc::new(Stats::default());
+    let stats = Arc::new(Stats {
+        diag: diag::Diagnostics::from_env(),
+        ..Stats::default()
+    });
     let paused = Arc::new(PauseGate::new());
     let finish_js_calls = Arc::new(AtomicBool::new(false));
     let parent_task = start_parent_monitor(cancel.clone());
@@ -808,6 +813,8 @@ fn start_control_input(
                         }
                     } else if let Some(payload) = line.strip_prefix("UPDATE_DOMAINS|") {
                         dispatcher.update_domain_routing(payload);
+                    } else if let Some(args) = line.strip_prefix("PROBE|") {
+                        crate::probe::start(dispatcher.clone(), args, events.clone());
                     }
                 }
             }

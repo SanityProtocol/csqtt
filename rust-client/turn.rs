@@ -145,6 +145,26 @@ impl CoreSnapshot {
     }
 }
 
+/// An allocation's drop counters (drop paths only). Shared with the diagnostics (M-32), so they can be read after the
+/// allocation is gone.
+#[derive(Default)]
+pub struct TurnDrops {
+    queue_full: AtomicU64,
+    outbound: AtomicU64,
+    pool_deficit: AtomicU64,
+}
+
+impl TurnDrops {
+    /// (ingress queue full, ingress pool deficit, outbound send failed)
+    pub fn counts(&self) -> (u64, u64, u64) {
+        (
+            self.queue_full.load(Ordering::Relaxed),
+            self.pool_deficit.load(Ordering::Relaxed),
+            self.outbound.load(Ordering::Relaxed),
+        )
+    }
+}
+
 struct DriverShared {
     snapshot: watch::Sender<CoreSnapshot>,
     wake: Notify,
@@ -152,9 +172,7 @@ struct DriverShared {
     terminal_present: AtomicBool,
     control_sent: AtomicBool,
     channel: AtomicU16,
-    queue_full_drops: AtomicU64,
-    outbound_queue_full_drops: AtomicU64,
-    pool_deficit_drops: AtomicU64,
+    drops: Arc<TurnDrops>,
     #[cfg(test)]
     native_pumps: AtomicU64,
 }
@@ -257,7 +275,7 @@ async fn outbound_writer_loop(queue: Arc<OutboundQueue>) {
             if channel == 0 || encode_channel_data(&mut packet, channel).is_err() {
                 queue
                     .shared
-                    .outbound_queue_full_drops
+                    .drops.outbound
                     .fetch_add(1, Ordering::Relaxed);
                 drop(packet);
                 continue;
@@ -271,7 +289,7 @@ async fn outbound_writer_loop(queue: Arc<OutboundQueue>) {
                         if queue.socket.writable().await.is_err() {
                             queue
                                 .shared
-                                .outbound_queue_full_drops
+                                .drops.outbound
                                 .fetch_add(1, Ordering::Relaxed);
                             break;
                         }
@@ -283,7 +301,7 @@ async fn outbound_writer_loop(queue: Arc<OutboundQueue>) {
                             Err(_) => {
                                 queue
                                     .shared
-                                    .outbound_queue_full_drops
+                                    .drops.outbound
                                     .fetch_add(1, Ordering::Relaxed);
                                 break;
                             }
@@ -293,7 +311,7 @@ async fn outbound_writer_loop(queue: Arc<OutboundQueue>) {
                 Err(_) => {
                     queue
                         .shared
-                        .outbound_queue_full_drops
+                        .drops.outbound
                         .fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -393,9 +411,7 @@ impl TurnAllocation {
             terminal_present: AtomicBool::new(false),
             control_sent: AtomicBool::new(false),
             channel: AtomicU16::new(0),
-            queue_full_drops: AtomicU64::new(0),
-            outbound_queue_full_drops: AtomicU64::new(0),
-            pool_deficit_drops: AtomicU64::new(0),
+            drops: Arc::default(),
             #[cfg(test)]
             native_pumps: AtomicU64::new(0),
         });
@@ -757,20 +773,24 @@ impl TurnAllocation {
         }
     }
 
+    pub fn drops(&self) -> Arc<TurnDrops> {
+        self.shared.drops.clone()
+    }
+
     #[cfg(test)]
     pub fn ingress_queue_full_drops(&self) -> u64 {
-        self.shared.queue_full_drops.load(Ordering::Relaxed)
+        self.shared.drops.queue_full.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
     pub fn ingress_pool_deficit_drops(&self) -> u64 {
-        self.shared.pool_deficit_drops.load(Ordering::Relaxed)
+        self.shared.drops.pool_deficit.load(Ordering::Relaxed)
     }
 
     #[cfg(all(test, unix))]
     pub fn outbound_queue_full_drops(&self) -> u64 {
         self.shared
-            .outbound_queue_full_drops
+            .drops.outbound
             .load(Ordering::Relaxed)
     }
 
@@ -1238,7 +1258,7 @@ async fn driver_loop_stream(
                 }
             }
             StreamDriverEvent::Frame(Ok(TurnStreamFrame::DataDropped)) => {
-                shared.pool_deficit_drops.fetch_add(1, Ordering::Relaxed);
+                shared.drops.pool_deficit.fetch_add(1, Ordering::Relaxed);
             }
             StreamDriverEvent::Frame(Err(error)) => {
                 if !shared.closing.load(Ordering::Acquire) {
@@ -1505,7 +1525,7 @@ fn process_packet(
         match incoming.try_send(packet) {
             Ok(()) => PacketAction::Wait,
             Err(TrySendError::Full(_)) => {
-                shared.queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                shared.drops.queue_full.fetch_add(1, Ordering::Relaxed);
                 PacketAction::Wait
             }
         }
@@ -1521,7 +1541,7 @@ fn process_packet(
 fn process_deficit_packet(core: &NativeCore, shared: &DriverShared, wire: &[u8]) -> PacketAction {
     if let Some((channel, _)) = channel_data_header(wire) {
         if channel == shared.channel.load(Ordering::Acquire) {
-            shared.pool_deficit_drops.fetch_add(1, Ordering::Relaxed);
+            shared.drops.pool_deficit.fetch_add(1, Ordering::Relaxed);
         }
         PacketAction::Wait
     } else if is_stun(wire) {

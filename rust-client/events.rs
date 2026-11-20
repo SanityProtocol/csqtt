@@ -111,6 +111,21 @@ impl Events {
         });
     }
 
+    /// M-32: the diagnostics window (only with `CSQTT_DIAGNOSTICS=1`)
+    pub fn traffic(&self, payload: serde_json::Value) {
+        self.emit("TRAFFIC", || payload);
+    }
+
+    /// M-32: a worker session's stage record (only with `CSQTT_DIAGNOSTICS=1`)
+    pub fn stream(&self, payload: serde_json::Value) {
+        self.emit("STREAM", || payload);
+    }
+
+    /// M-86: a PROBE's answer
+    pub fn probe(&self, payload: serde_json::Value) {
+        self.emit("PROBE", || payload);
+    }
+
     pub fn active_zero(&self) {
         self.emit("ACTIVE_ZERO", || serde_json::json!({}));
     }

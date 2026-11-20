@@ -473,6 +473,8 @@ pub struct WorkerChannels {
     pub cipher: Arc<SessionCipher>,
     pub config: ObfsConfig,
     pub write_state: Arc<ObfsState>,
+    /// M-32, only with diagnostics on; the uplink task is its `up` half's one writer
+    pub counters: Option<Arc<crate::diag::WorkerCounters>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -500,6 +502,11 @@ pub const INGRESS_CAPACITY_MAX_PKTS: usize = 1024;
 pub const INGRESS_PKTS_PER_WORKER: usize = 16;
 
 static INBOUND_DOWNLINK_EVICTED: AtomicU64 = AtomicU64::new(0);
+
+/// Downlink packets evicted from the full inbound queue, for the diagnostics (M-32)
+pub fn downlink_evicted() -> u64 {
+    INBOUND_DOWNLINK_EVICTED.load(Ordering::Relaxed)
+}
 
 impl QueueProfile {
     pub fn for_worker_count(workers: usize) -> Self {
@@ -535,9 +542,43 @@ pub struct Dispatcher {
     reassembler: crate::wire_protocol::ShardedReassembler,
     next_frag_id: std::sync::atomic::AtomicU16,
     termination: Arc<OnceLock<Termination>>,
+    pub(crate) probes: crate::probe::Probes,
 }
 
 impl Dispatcher {
+    /// tests: a dispatcher with no I/O tasks
+    #[cfg(test)]
+    pub(crate) fn for_test(pool: Arc<PacketPool>, inbound_capacity: usize) -> Self {
+        Self {
+            workers: ArcSwap::from_pointee(Vec::new()),
+            inbound: ArrayQueue::new(inbound_capacity),
+            outbound_capacity: 32,
+            tun_wake: Arc::new(Notify::new()),
+            tun_io_lost: Arc::new(Notify::new()),
+            cancel: CancellationToken::new(),
+            tasks: tokio::sync::Mutex::new(Vec::new()),
+            domain_routing: Arc::new(ArcSwap::from_pointee(DomainRoutingConfig::default())),
+            direct_ips: Arc::new(ArcSwap::from_pointee(HashSet::new())),
+            dns_domain_map: Arc::new(crate::sni::DnsDomainMap::default()),
+            direct_relay: None,
+            uplink_state: Mutex::new(UplinkState::new()),
+            pool,
+            reassembler: crate::wire_protocol::ShardedReassembler::new(),
+            next_frag_id: std::sync::atomic::AtomicU16::new(1),
+            termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
+        }
+    }
+
+    /// M-86: the workers right now, and the pool, for a probe's SYN and RST
+    pub(crate) fn workers_snapshot(&self) -> Arc<Vec<WorkerEntry>> {
+        self.workers.load_full()
+    }
+
+    pub(crate) fn pool(&self) -> &Arc<PacketPool> {
+        &self.pool
+    }
+
     #[cfg(all(test, unix))]
     pub async fn start_test_tun(
         file: File,
@@ -565,6 +606,7 @@ impl Dispatcher {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
         });
         let io_dispatcher = dispatcher.clone();
         let task = spawn_critical(
@@ -642,6 +684,7 @@ impl Dispatcher {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
         });
         crate::log_error!(
             "[КЛИЕНТ] Профиль очередей для {worker_count} потоков: буфер I/O: {} pkts, квант: {} байт",
@@ -841,6 +884,10 @@ impl Dispatcher {
 
     pub fn return_packet(&self, mut packet: PacketBuf) {
         strip_legacy_downlink_prefix(&mut packet);
+        // M-86: a probe's answer stops here, before the TUN (one relaxed load while no probe is pending)
+        if self.probes.intercept(packet.as_slice()) {
+            return;
+        }
         self.inspect_domain_routing(&packet);
         self.push_inbound(packet);
     }
@@ -1124,6 +1171,9 @@ impl Dispatcher {
                             continue;
                         }
                         if self.workers.load().is_empty() {
+                            if let Some(diag) = &stats.diag {
+                                diag.no_worker_drops.fetch_add(1, Ordering::Relaxed);
+                            }
                             continue;
                         }
                         stats
@@ -1355,7 +1405,14 @@ impl Dispatcher {
         }
     }
 
-    async fn send_to_workers(&self, mut packet: PacketBuf, workers: &[WorkerEntry]) {
+    /// `counted`: the uplink task's packets (M-32); a probe's SYN and RST come from another task, so they are not counted
+    /// (the uplink task is each counter's one writer).
+    pub(crate) async fn send_to_workers(
+        &self,
+        mut packet: PacketBuf,
+        workers: &[WorkerEntry],
+        counted: bool,
+    ) {
         let count = workers.len();
         if count == 0 {
             return;
@@ -1384,6 +1441,7 @@ impl Dispatcher {
             &target.channels.config,
             &target.channels.write_state,
         );
+        let counters = target.channels.counters.as_ref().filter(|_| counted);
         if wrapped.is_ok() {
             let failed = match target.channels.allocation.try_send_fast(packet) {
                 None => false,
@@ -1391,7 +1449,12 @@ impl Dispatcher {
             };
             if failed {
                 self.mark_uplink_congested(selected_idx);
+            } else if let Some(counters) = counters {
+                counters.up.packets.bump(1);
+                counters.up.bytes.bump(packet_len as u64);
             }
+        } else if let Some(counters) = counters {
+            counters.up.wrap_drops.bump(1);
         }
     }
 
@@ -1433,18 +1496,27 @@ impl Dispatcher {
         };
 
         let target = &workers[selected_idx];
+        let counters = target.channels.counters.as_ref();
         let mut failed = false;
         for mut frag in fragments {
+            let frag_len = frag.len() as u64;
             let wrapped = target.channels.cipher.wrap(
                 &mut frag,
                 &target.channels.config,
                 &target.channels.write_state,
             );
             if wrapped.is_ok() {
-                failed |= match target.channels.allocation.try_send_fast(frag) {
+                let lost = match target.channels.allocation.try_send_fast(frag) {
                     None => false,
                     Some(frag) => target.channels.allocation.send(frag).await.is_err(),
                 };
+                failed |= lost;
+                if let Some(counters) = counters.filter(|_| !lost) {
+                    counters.up.packets.bump(1);
+                    counters.up.bytes.bump(frag_len);
+                }
+            } else if let Some(counters) = counters {
+                counters.up.wrap_drops.bump(1);
             }
         }
         if failed {
@@ -1465,7 +1537,7 @@ impl Dispatcher {
         }
 
         if packet.len() <= 1280 {
-            self.send_to_workers(packet, &workers).await;
+            self.send_to_workers(packet, &workers, true).await;
         } else {
             let packet_len = packet.len();
             let flow = flow_key(packet.as_slice());
@@ -1546,6 +1618,9 @@ impl Dispatcher {
                 match write_res {
                     Ok(0) => {
                         log_dropped_packet(&mut dropped, "запись вернула 0 байт");
+                        if let Some(diag) = &stats.diag {
+                            diag.tun_write_drops.fetch_add(1, Ordering::Relaxed);
+                        }
                         pending = None;
                         state = TunWriteState::Dropped;
                         break;
@@ -1606,6 +1681,9 @@ impl Dispatcher {
                     }
                     Err(error) => {
                         log_dropped_packet(&mut dropped, &error.to_string());
+                        if let Some(diag) = &stats.diag {
+                            diag.tun_write_drops.fetch_add(1, Ordering::Relaxed);
+                        }
                         pending = None;
                         state = TunWriteState::Dropped;
                         break;
@@ -2030,6 +2108,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
         };
 
         let mut p1 = pool.acquire();
@@ -2189,25 +2268,7 @@ mod tests {
         let profile = QueueProfile::for_worker_count(9);
         let inbound_capacity = profile.inbound_capacity;
         let pool = PacketPool::new(inbound_capacity + 16);
-        let cancel = CancellationToken::new();
-        let dispatcher = Dispatcher {
-            workers: ArcSwap::from_pointee(Vec::new()),
-            inbound: ArrayQueue::new(inbound_capacity),
-            outbound_capacity: profile.outbound_capacity,
-            tun_wake: Arc::new(Notify::new()),
-            tun_io_lost: Arc::new(Notify::new()),
-            cancel,
-            tasks: tokio::sync::Mutex::new(Vec::new()),
-            domain_routing: Arc::new(ArcSwap::from_pointee(DomainRoutingConfig::default())),
-            direct_ips: Arc::new(ArcSwap::from_pointee(HashSet::new())),
-            dns_domain_map: Arc::new(crate::sni::DnsDomainMap::default()),
-            direct_relay: None,
-            uplink_state: Mutex::new(UplinkState::new()),
-            pool: pool.clone(),
-            reassembler: crate::wire_protocol::ShardedReassembler::new(),
-            next_frag_id: std::sync::atomic::AtomicU16::new(1),
-            termination: Arc::new(OnceLock::new()),
-        };
+        let dispatcher = Dispatcher::for_test(pool.clone(), inbound_capacity);
 
         for i in 0..inbound_capacity {
             let mut p = pool.acquire();
@@ -2263,6 +2324,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
         };
         let packet = || {
             let mut p = pool.acquire();
@@ -2303,6 +2365,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
         };
 
         let p_empty = pool.acquire();
@@ -2375,6 +2438,7 @@ mod tests {
             reassembler: crate::wire_protocol::ShardedReassembler::new(),
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
+            probes: crate::probe::Probes::default(),
         };
 
         let src: SocketAddr = "10.66.67.2:54321".parse().unwrap();

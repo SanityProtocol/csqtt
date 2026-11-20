@@ -183,6 +183,8 @@ struct TransportReader {
     shared: Arc<TransportShared>,
     receiver: TurnReceiver,
     replay: ReplayProtection,
+    /// M-32, only with diagnostics on; this task is its `down` half's one writer
+    counters: Option<Arc<crate::diag::WorkerCounters>>,
 }
 
 enum WriterCommand {
@@ -842,22 +844,33 @@ fn handshake_message_label(handshake: &crate::dtls::DtlsClientHandshake) -> &'st
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum InboundDrop {
+    NonRtp,
+    Auth,
+    Replay,
+}
+
 fn authenticate_inbound(
     cipher: &SessionCipher,
     config: &ObfsConfig,
     replay: &mut ReplayProtection,
     packet: &mut PacketBuf,
-) -> bool {
+) -> Result<(), InboundDrop> {
     if cipher.is_plain() {
-        return true;
+        return Ok(());
     }
     if !is_rtp_packet(packet.as_slice()) {
-        return false;
+        return Err(InboundDrop::NonRtp);
     }
     let Ok(sequence) = cipher.unwrap(packet, config.mode) else {
-        return false;
+        return Err(InboundDrop::Auth);
     };
-    replay.rtp.accept_rtp(sequence)
+    if replay.rtp.accept_rtp(sequence) {
+        Ok(())
+    } else {
+        Err(InboundDrop::Replay)
+    }
 }
 
 struct ActiveConnection {
@@ -975,6 +988,7 @@ impl TransportReader {
             shared,
             receiver,
             replay: ReplayProtection::default(),
+            counters: None,
         }
     }
 
@@ -986,13 +1000,22 @@ impl TransportReader {
                 .await
                 .context("TURN allocation receive")?;
             let recv_cipher = self.shared.recv_cipher.load();
-            if authenticate_inbound(
+            match authenticate_inbound(
                 &recv_cipher,
                 &self.shared.config,
                 &mut self.replay,
                 &mut packet,
             ) {
-                return Ok(packet);
+                Ok(()) => return Ok(packet),
+                Err(drop) => {
+                    if let Some(counters) = &self.counters {
+                        match drop {
+                            InboundDrop::NonRtp => counters.down.non_rtp_drops.bump(1),
+                            InboundDrop::Auth => counters.down.auth_drops.bump(1),
+                            InboundDrop::Replay => counters.down.replay_drops.bump(1),
+                        }
+                    }
+                }
             }
         }
     }
@@ -1001,7 +1024,26 @@ impl TransportReader {
 pub async fn run_session(
     config: SessionConfig,
     credentials: TurnCredentials,
+    runtime: SessionRuntime,
+) -> Result<bool> {
+    // M-32: this worker session's stage record, only with diagnostics on
+    let attempt = runtime
+        .stats
+        .diag
+        .clone()
+        .map(|diag| crate::diag::Attempt::new(diag, runtime.events.clone(), config.id));
+    let result = run_session_inner(config, credentials, runtime, attempt.clone()).await;
+    if let Some(attempt) = attempt {
+        attempt.finish(result.as_ref().err().map(|error| format!("{error:#}")).as_deref());
+    }
+    result
+}
+
+async fn run_session_inner(
+    config: SessionConfig,
+    credentials: TurnCredentials,
     mut runtime: SessionRuntime,
+    attempt: Option<Arc<crate::diag::Attempt>>,
 ) -> Result<bool> {
     if credentials.server_addresses.is_empty() {
         bail!("нет TURN URL в учётных данных");
@@ -1014,6 +1056,9 @@ pub async fn run_session(
         (None, _) => turn_address.to_string(),
     };
     crate::log_error!("[TURN] Подключение к {target_display}");
+    if let Some(attempt) = &attempt {
+        attempt.endpoint(&target_display, format!("{:?}", config.turn_transport));
+    }
     let cancel = runtime.cancel.clone();
     let turn_host = config.turn_host.clone();
     let turn_port = config.turn_port.clone();
@@ -1048,6 +1093,9 @@ pub async fn run_session(
         let _ = ready.send(());
     }
     crate::log_error!("[СЕССИЯ #{}] Relay: {}", config.id, allocation.local_addr());
+    if let Some(attempt) = &attempt {
+        attempt.stage("channel");
+    }
     let channel = tokio::select! {
         biased;
         result = allocation.prepare_channel() => result,
@@ -1065,6 +1113,7 @@ pub async fn run_session(
         runtime,
         allocation.clone(),
         turn_path,
+        attempt,
     ));
     let result = await_session_task(&cancel, session).await;
     let _ = tokio::time::timeout(DEALLOCATE_TIMEOUT, allocation.deallocate()).await;
@@ -1124,7 +1173,11 @@ async fn run_allocated_session(
     mut runtime: SessionRuntime,
     allocation: Arc<TurnAllocation>,
     _turn_path: Arc<str>,
+    attempt: Option<Arc<crate::diag::Attempt>>,
 ) -> Result<bool> {
+    if let Some(attempt) = &attempt {
+        attempt.stage("srtp");
+    }
     let session_cancel = CancellationToken::new();
     let turn_receiver = allocation.take_receiver()?;
     crate::log_error!(
@@ -1141,6 +1194,13 @@ async fn run_allocated_session(
     });
     let mut writer_transport = TransportWriter::new(shared.clone());
     let mut reader_transport = TransportReader::new(shared.clone(), turn_receiver);
+    // M-32: this session's counters, only with diagnostics on
+    let counters = runtime
+        .stats
+        .diag
+        .as_ref()
+        .map(|diag| diag.register(allocation.drops()));
+    reader_transport.counters = counters.clone();
     install_session_ciphers(
         &shared,
         &mut writer_transport,
@@ -1150,6 +1210,9 @@ async fn run_allocated_session(
     )
     .await
     .context("инициализация SRTP")?;
+    if let Some(attempt) = &attempt {
+        attempt.stage("getconf");
+    }
     let incarnation_id = NEXT_INCARNATION_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let config_tx = config.get_config.then(|| runtime.config_tx.clone());
     let mut routing_reassembler = ControlReassembler::new();
@@ -1195,6 +1258,7 @@ async fn run_allocated_session(
         cipher: shared.cipher.load_full(),
         config: shared.config,
         write_state: writer_transport.write_state.clone(),
+        counters,
     };
     let (writer_command_tx, writer_command_rx) = mpsc::channel(WRITER_COMMAND_CAPACITY);
     let shutdown_registration = runtime
@@ -1209,6 +1273,9 @@ async fn run_allocated_session(
     }
     crate::log_error!("[ВОРКЕР #{}] [READY] Поток готов ✓", config.id);
     runtime.events.ready(config.id);
+    if let Some(attempt) = &attempt {
+        attempt.ready();
+    }
     config.repair.mark_ready(config.id);
     let _active = ActiveConnection::new(runtime.stats.clone(), runtime.events.clone());
     let mut writer = tokio::spawn(writer_loop(
@@ -1512,6 +1579,7 @@ async fn reader_loop(
         target_workers,
         configured_workers,
     } = runtime;
+    let counters = transport.counters.clone();
     let mut dropped_non_ip = 0u64;
     loop {
         let packet = tokio::select! {
@@ -1584,11 +1652,18 @@ async fn reader_loop(
         if is_control_response(packet.as_slice()) {
             continue;
         }
+        if let Some(counters) = &counters {
+            counters.down.packets.bump(1);
+            counters.down.bytes.bump(packet.len() as u64);
+        }
         if packet.as_slice().first().copied() == Some(crate::wire_protocol::CSQTT_FRAG_MAGIC) {
             dispatcher.handle_incoming_fragment(packet.as_slice());
             continue;
         }
         if !is_ip_packet(packet.as_slice()) {
+            if let Some(counters) = &counters {
+                counters.down.non_ip_drops.bump(1);
+            }
             dropped_non_ip += 1;
             if dropped_non_ip <= 8 || dropped_non_ip.is_multiple_of(1000) {
                 crate::log_error!(
@@ -2201,12 +2276,10 @@ mod tests {
         let mut plaintext = pool.acquire();
         plaintext.read_area()[..6].copy_from_slice(b"DENIED");
         plaintext.set_read_len(6).unwrap();
-        assert!(!authenticate_inbound(
-            &cipher,
-            &config,
-            &mut replay,
-            &mut plaintext
-        ));
+        assert_eq!(
+            authenticate_inbound(&cipher, &config, &mut replay, &mut plaintext),
+            Err(InboundDrop::NonRtp)
+        );
 
         let mut corrupt_wire = wire.clone();
         let last = corrupt_wire.len() - 1;
@@ -2214,33 +2287,27 @@ mod tests {
         let mut corrupt = pool.acquire();
         corrupt.read_area()[..corrupt_wire.len()].copy_from_slice(&corrupt_wire);
         corrupt.set_read_len(corrupt_wire.len()).unwrap();
-        assert!(!authenticate_inbound(
-            &cipher,
-            &config,
-            &mut replay,
-            &mut corrupt
-        ));
+        assert_eq!(
+            authenticate_inbound(&cipher, &config, &mut replay, &mut corrupt),
+            Err(InboundDrop::Auth)
+        );
 
         let mut valid = pool.acquire();
         valid.read_area()[..wire.len()].copy_from_slice(&wire);
         valid.set_read_len(wire.len()).unwrap();
-        assert!(authenticate_inbound(
-            &cipher,
-            &config,
-            &mut replay,
-            &mut valid
-        ));
+        assert_eq!(
+            authenticate_inbound(&cipher, &config, &mut replay, &mut valid),
+            Ok(())
+        );
         assert_eq!(valid.as_slice(), b"payload");
 
         let mut replayed = pool.acquire();
         replayed.read_area()[..wire.len()].copy_from_slice(&wire);
         replayed.set_read_len(wire.len()).unwrap();
-        assert!(!authenticate_inbound(
-            &cipher,
-            &config,
-            &mut replay,
-            &mut replayed
-        ));
+        assert_eq!(
+            authenticate_inbound(&cipher, &config, &mut replay, &mut replayed),
+            Err(InboundDrop::Replay)
+        );
     }
 
     #[tokio::test]

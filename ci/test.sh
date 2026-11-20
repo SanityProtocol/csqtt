@@ -5,7 +5,8 @@
 #   client: cargo test of rust-client on the host target (its sni.rs includes the tree's root domains.txt)
 #   app:    the Gradle unit tests (testDebugUnitTest; AGP 9 has no release unit-test task)
 #   e2e:    rust-client's #[ignore] end-to-end tests against a running server (ci/e2e-server.sh up); CSQTT_E2E_PEER (and
-#           CSQTT_E2E_WEB, the other CSQTT_E2E_* knobs) are passed through, and the container shares the host network
+#           CSQTT_E2E_WEB, the other CSQTT_E2E_* knobs) are passed through, and the container shares the host network;
+#           CSQTT_E2E_SERVER_LOG (ci/e2e-server.sh's LOG) is mounted read-only
 # A failing or non-compiling test exits non-zero. Outside e2e, tests marked #[ignore] (a TUN, a running server) stay out.
 # Laptop knobs, as in ci/build-apk.sh: CSQTT_DOCKER_ARGS (e.g. "--network host"), CSQTT_GRADLE_HOME (a gradle.properties with
 # the proxy), CSQTT_CARGO_REGISTRY (a kept registry cache).
@@ -22,6 +23,8 @@ read -r -a XARGS <<< "${CSQTT_DOCKER_ARGS:-}"
 if [ "$SUITE" = e2e ]; then
   [ -n "${CSQTT_E2E_PEER:-}" ] || { echo "e2e needs CSQTT_E2E_PEER (ci/e2e-server.sh up prints it)" >&2; exit 2; }
   XARGS=(--network host -e "E2E_FILTER=$FILTER"); for v in $(compgen -e | grep '^CSQTT_E2E_' || true); do XARGS+=(-e "$v"); done
+  # the server's log, read-only at the same path, for the cases that check the server's own lines (M-26)
+  [ -z "${CSQTT_E2E_SERVER_LOG:-}" ] || XARGS+=(-v "$CSQTT_E2E_SERVER_LOG:$CSQTT_E2E_SERVER_LOG:ro")
 fi
 run() {  # run <image> <script>: the tree at /w/src, caches mounted, as the calling user
   docker run --rm ${XARGS[@]+"${XARGS[@]}"} -v "$W:/w" -v "$REG:/tmp/ch/registry" -v "$GH:/tmp/gh" -v "$CI:/ci:ro" \

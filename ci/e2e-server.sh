@@ -3,9 +3,9 @@
 # CI runner or the laptop. The server runs in its own network namespace, so its sysctls, NAT and TUN never touch the host;
 # the tests reach it over a veth pair through their own mock TURN relay. Nothing leaves the machine.
 # Usage (root):
-#   ci/e2e-server.sh up   <server binary> <state dir>   start it; prints PEER=, WEB=, PID= (also written to <state dir>/env)
+#   ci/e2e-server.sh up   <server binary> <state dir>   start it; prints PEER=, WEB=, PID=, LOG= (also in <state dir>/env)
 #   ci/e2e-server.sh down <state dir>                   stop it and remove the namespace
-# Then, as the normal user: CSQTT_E2E_PEER=<PEER> CSQTT_E2E_WEB=<WEB> ci/test.sh <source tree> e2e
+# Then, as the normal user: CSQTT_E2E_PEER=<PEER> CSQTT_E2E_WEB=<WEB> CSQTT_E2E_SERVER_LOG=<LOG> ci/test.sh <source tree> e2e
 # The passwords are the ones the tests carry: the live one is the server's main password (as on the WSL server the
 # cases were written for), the expired and the deactivated ones come through --desired (the panel-owned password file); the web login
 # e2e-test serves the hot-DNS case. A UDP echo on the server's tunnel address, port 47214, answers the throughput case.
@@ -45,7 +45,8 @@ s.bind(("10.66.67.1", 47214))
 while True:
     d, a = s.recvfrom(2048); s.sendto(d, a)' > "$st/echo.log" 2>&1 &
   echo $! > "$st/echo.pid"
-  printf 'PEER=%s:%s\nWEB=https://%s:%s\nPID=%s\n' $NS_IP $PORT $NS_IP $WEB_PORT "$(cat "$st/server.pid")" | tee "$st/env"
+  printf 'PEER=%s:%s\nWEB=https://%s:%s\nPID=%s\nLOG=%s\n' $NS_IP $PORT $NS_IP $WEB_PORT "$(cat "$st/server.pid")" "$st/server.log" \
+    | tee "$st/env"
 }
 
 down() {

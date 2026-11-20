@@ -23,6 +23,8 @@ pub struct Stats {
     pub total_bytes_up: AtomicI64,
     pub total_bytes_down: AtomicI64,
     pub active_connections: AtomicI32,
+    /// M-32: `Some` only with `CSQTT_DIAGNOSTICS=1`
+    pub diag: Option<Arc<crate::diag::Diagnostics>>,
 }
 
 impl Stats {
@@ -32,6 +34,8 @@ impl Stats {
         let mut log_counter = 0u32;
         let mut last_emitted: Option<Snapshot> = None;
         let mut ticks_since_emit = 0u32;
+        let mut traffic = crate::diag::Reporter::default();
+        let mut traffic_ticks = 0u32;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -42,6 +46,15 @@ impl Stats {
                     log_counter += 1;
                     ticks_since_emit += 1;
                     let now = (active, up, down);
+                    if let Some(diag) = &self.diag {
+                        traffic_ticks += 1;
+                        if traffic_ticks >= crate::diag::REPORT_TICKS {
+                            traffic_ticks = 0;
+                            if let Some(payload) = traffic.report(diag, active) {
+                                events.traffic(payload);
+                            }
+                        }
+                    }
                     if should_emit(last_emitted, now, ticks_since_emit) {
                         events.stats(active, up, down);
                         last_emitted = Some(now);

@@ -1026,9 +1026,7 @@ async fn cancelled_before_first_control_send_never_creates_allocation() {
         terminal_present: AtomicBool::new(false),
         control_sent: AtomicBool::new(false),
         channel: AtomicU16::new(0),
-        queue_full_drops: AtomicU64::new(0),
-        outbound_queue_full_drops: AtomicU64::new(0),
-        pool_deficit_drops: AtomicU64::new(0),
+        drops: Arc::default(),
         native_pumps: AtomicU64::new(0),
     });
     let (incoming, _receiver) = crate::spsc_ring::channel(1);
@@ -3501,6 +3499,14 @@ async fn streams_partial_death_keeps_tunnel_and_dataplane_alive() {
     }
     assert!(reply.is_some(), "initial ICMP reply did not arrive");
 
+    // M-86: PROBE through the real dataplane. The server's web port answers SYN-ACK, a closed port RST, both from the
+    // server's own kernel; neither answer may reach the TUN.
+    for (port, expected) in [(46_402u16, "synack"), (9, "rst")] {
+        let answer = crate::probe::run_line(&dispatcher, &format!("{client_ip}|10.66.67.1|{port}")).await;
+        assert_eq!(answer["result"], expected, "probe to port {port}: {answer}");
+        assert!(answer["ms"].as_u64().is_some(), "{answer}");
+    }
+
     relay_stops[1].cancel();
     relay_stops[2].cancel();
     sessions[1].abort();
@@ -3644,6 +3650,7 @@ async fn test_artificial_turn_36_streams_coturn_limits_and_jitter() {
             ))),
             config: ObfsConfig::new(ObfsMode::Audio),
             write_state: Arc::new(ObfsState::new()),
+            counters: None,
         };
         dispatcher.register(channels);
     }
@@ -3912,6 +3919,7 @@ async fn start_fifty_stream_rig() -> FiftyStreamRig {
             ))),
             config: ObfsConfig::new(ObfsMode::Audio),
             write_state: Arc::new(ObfsState::new()),
+            counters: None,
         });
     }
 
@@ -4228,4 +4236,215 @@ async fn test_50_streams_full_capacity_100mbit_profile() {
     print_fifty_stream_report("capacity-1120B-100mbit", &report);
     assert_fifty_stream_healthy("capacity-1120B-100mbit", &report);
     shutdown_fifty_stream_rig(rig).await;
+}
+
+/// M-26: the server's repair round under load. 12 workers are desired and 10 start; the server reports [11, 12] missing
+/// after its 30 s grace while traffic runs through the 10, and the two held workers then come back. The tunnel must carry
+/// the load throughout, the Repair must reach the client and restart none of the live workers, and no session of this
+/// generation is purged. With `CSQTT_E2E_SERVER_LOG` (the bench's server log, read-only) the server's own lines are
+/// checked too: one Repair for [11, 12], no "Purged stale session" while the test runs.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "requires a separately started CSQTT WSL server and CSQTT_E2E_PEER"]
+async fn repair_round_under_load_restores_missing_workers() {
+    const DESIRED: usize = 12;
+    const STARTED: usize = 10;
+    const STREAM_RATE_BITS_PER_SECOND: u64 = 2_000_000;
+    const TARGET_MBIT: u64 = 8;
+    const RUN_SECONDS: u64 = 50;
+    const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+    const ECHO_PORT: u16 = 47_214;
+
+    let peer: SocketAddr = std::env::var("CSQTT_E2E_PEER")
+        .expect("CSQTT_E2E_PEER is required")
+        .parse()
+        .expect("CSQTT_E2E_PEER must be an IP:port socket address");
+    let server_log = std::env::var("CSQTT_E2E_SERVER_LOG").ok().filter(|path| !path.is_empty());
+    let log_lines = |needle: &str| -> Option<usize> {
+        let path = server_log.as_ref()?;
+        let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("server log {path}: {error}"));
+        Some(text.lines().filter(|line| line.contains(needle)).count())
+    };
+    let (test_tun, dispatcher_tun) = StdUnixDatagram::pair().unwrap();
+    test_tun.set_nonblocking(true).unwrap();
+    dispatcher_tun.set_nonblocking(true).unwrap();
+    let dispatcher_file = unsafe { File::from_raw_fd(dispatcher_tun.into_raw_fd()) };
+    let cancel = CancellationToken::new();
+    let pool = PacketPool::new(4_096);
+    let password: Arc<str> = Arc::from("e2e-local-password-20260830");
+    let wrap_key = derive_wrap_key(&password).unwrap();
+    let dispatcher = Dispatcher::start_test_tun(
+        dispatcher_file,
+        pool.clone(),
+        Arc::new(Stats::default()),
+        wrap_key,
+        ObfsMode::Unified,
+        cancel.clone(),
+    )
+    .await
+    .unwrap();
+    let repair = RepairState::new(DESIRED);
+    let server_stream_repair = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(ShutdownCoordinator::new());
+    let (config_tx, mut config_rx) = tokio::sync::mpsc::channel(1);
+    let delivered = Arc::new(AtomicBool::new(false));
+    let in_flight = Arc::new(AtomicBool::new(true));
+    // A mock relay waits only 3 s for its client's first packet, so the held workers get theirs when they start.
+    let relay_runtime = start_limited_relay_runtime(peer, STARTED, STREAM_RATE_BITS_PER_SECOND);
+    // One generation and salt for the whole run, as the worker loop keeps them across restarts.
+    let spawn_worker = |id: usize, endpoint: Arc<str>| {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let get_config = id == 1;
+        let session = tokio::spawn(run_session(
+            SessionConfig {
+                id,
+                peer,
+                turn_host: None,
+                turn_port: None,
+                turn_transport: TurnTransportMode::Udp,
+                srtp_mode: SrtpMode::Auto,
+                local_port: Arc::from("0"),
+                password: password.clone(),
+                generation: 20_261_120,
+                turn_endpoint_cursor: 0,
+                salt: Arc::from("e2e-repair-under-load"),
+                mode: ObfsMode::Unified,
+                wrap_key,
+                client_wrap_key: wrap_key,
+                get_config,
+                server_stream_repair: server_stream_repair.clone(),
+                repair: repair.clone(),
+                configured_workers: DESIRED,
+            },
+            TurnCredentials {
+                username: Arc::from(USERNAME),
+                password: Arc::from(PASSWORD),
+                server_addresses: vec![endpoint].into(),
+            },
+            SessionRuntime {
+                dispatcher: dispatcher.clone(),
+                pool: pool.clone(),
+                stats: Arc::new(Stats::default()),
+                events: Events::new(false),
+                config_tx: config_tx.clone(),
+                config_delivery: get_config.then(|| ConfigDeliveryState {
+                    sent: delivered.clone(),
+                    in_flight: in_flight.clone(),
+                }),
+                cancel: cancel.clone(),
+                shutdown: shutdown.clone(),
+                ready_tx: Some(ready_tx),
+                allocation_started: None,
+                allocation_ready: None,
+                scale_notify: None,
+                target_workers: None,
+                configured_workers: DESIRED,
+            },
+        ));
+        (session, ready_rx)
+    };
+
+    let mut sessions = Vec::with_capacity(DESIRED);
+    let mut ready = Vec::with_capacity(STARTED);
+    for id in 1..=STARTED {
+        let (session, ready_rx) = spawn_worker(id, relay_runtime.endpoints[id - 1].clone());
+        sessions.push(session);
+        ready.push(ready_rx);
+    }
+    let configuration = tokio::time::timeout(Duration::from_secs(30), config_rx.recv())
+        .await
+        .expect("the first worker did not receive TUNCONF")
+        .expect("the configuration channel was closed");
+    assert!(configuration.contains(&format!("workers={DESIRED}")), "{configuration}");
+    let tunnel_ip = e2e_tunnel_ip(&configuration);
+    for ready_rx in ready {
+        tokio::time::timeout(Duration::from_secs(20), ready_rx)
+            .await
+            .expect("a worker was not registered")
+            .expect("a worker ready signal was dropped");
+    }
+    assert_eq!(dispatcher.active_count(), STARTED);
+    // Earlier cases' sessions (other salts) were purged when this run registered; count from here on.
+    let purged_before = log_lines("Purged stale session");
+    let repairs_before = log_lines("missing=[11, 12]/12");
+
+    let load = start_e2e_tun_runtime(test_tun, tunnel_ip, ECHO_PORT, TARGET_MBIT, RUN_SECONDS, PROBE_INTERVAL);
+    let started = Instant::now();
+
+    // Phase 1: the server's Repair for [11, 12] after its 30 s grace (reconciled every 3 s).
+    let repaired = loop {
+        if repair.restart_generation(11) != 0 && repair.restart_generation(12) != 0 {
+            break started.elapsed();
+        }
+        assert!(started.elapsed() < Duration::from_secs(45), "no Repair for the two missing workers within 45 s");
+        assert!(!cancel.is_cancelled(), "the tunnel was cancelled while waiting for the Repair");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    for id in 1..=STARTED {
+        assert_eq!(repair.restart_generation(id), 0, "the Repair restarted live worker {id}");
+    }
+    assert_eq!(dispatcher.active_count(), STARTED, "a live worker left after the Repair");
+
+    // Phase 2: the held workers come back, with the run's generation and salt.
+    let late_relays = start_limited_relay_runtime(peer, DESIRED - STARTED, STREAM_RATE_BITS_PER_SECOND);
+    let mut late = Vec::new();
+    for id in STARTED + 1..=DESIRED {
+        let (session, ready_rx) = spawn_worker(id, late_relays.endpoints[id - STARTED - 1].clone());
+        sessions.push(session);
+        late.push(ready_rx);
+    }
+    drop(config_tx);
+    for ready_rx in late {
+        tokio::time::timeout(Duration::from_secs(20), ready_rx)
+            .await
+            .expect("a held worker was not registered")
+            .expect("a held worker ready signal was dropped");
+    }
+    assert_eq!(dispatcher.active_count(), DESIRED);
+
+    let result = load.finish().await;
+    let elapsed = started.elapsed();
+    assert!(!cancel.is_cancelled(), "the tunnel was cancelled during the run");
+    for id in 1..=DESIRED {
+        let expected = u64::from(id > STARTED);
+        assert_eq!(repair.restart_generation(id), expected, "worker {id}: unexpected restarts");
+        assert_eq!(repair.credential_generation(id), 0, "worker {id}: the Repair escalated");
+    }
+    // The load held throughout: the echoes came back, and the 100 ms liveness probes with them.
+    let expected_probes = (RUN_SECONDS * 1_000 / PROBE_INTERVAL.as_millis() as u64) as usize;
+    let mut rtt_us = result.burst_probe_rtt_us;
+    rtt_us.sort_unstable();
+    let p95_ms = rtt_us.get(rtt_us.len().saturating_sub(1) * 95 / 100).copied().unwrap_or(u64::MAX) / 1_000;
+    eprintln!(
+        "[E2E repair] Repair after {:.1} s; run {:.1} s; sent {} B, echoed {} B ({} packets); probes {}/{}, p95 {} ms",
+        repaired.as_secs_f64(),
+        elapsed.as_secs_f64(),
+        result.sent_bytes,
+        result.received_bytes,
+        result.received_packets,
+        rtt_us.len(),
+        expected_probes,
+        p95_ms
+    );
+    assert!(
+        result.received_bytes * 10 >= result.sent_bytes * 9,
+        "echoed {} of {} bytes",
+        result.received_bytes,
+        result.sent_bytes
+    );
+    assert!(rtt_us.len() * 10 >= expected_probes * 9, "only {} of {expected_probes} probes returned", rtt_us.len());
+    assert!(p95_ms <= 500, "probe RTT p95 was {p95_ms} ms");
+    if let (Some(before), Some(after)) = (purged_before, log_lines("Purged stale session")) {
+        assert_eq!(after, before, "the server purged a session during the run");
+        let repairs = log_lines("missing=[11, 12]/12").unwrap() - repairs_before.unwrap();
+        assert_eq!(repairs, 1, "the server sent {repairs} Repairs for [11, 12]");
+    } else {
+        eprintln!("[E2E repair] CSQTT_E2E_SERVER_LOG not set: the server's own lines were not checked");
+    }
+
+    cancel.cancel();
+    for session in sessions {
+        let _ = tokio::time::timeout(Duration::from_secs(12), session).await;
+    }
+    dispatcher.shutdown().await;
 }

@@ -165,7 +165,7 @@ jobs:
           sudo recipe/ci/e2e-server.sh up out/cores/csqtt-linux-amd64 "$RUNNER_TEMP/e2e"
           set -a; . "$RUNNER_TEMP/e2e/env"; set +a
           rc=0
-          CSQTT_E2E_PEER=$PEER CSQTT_E2E_WEB=$WEB CSQTT_E2E_MIN_MBIT=64 CSQTT_E2E_MIN_STREAM_KBIT=800 \
+          CSQTT_E2E_PEER=$PEER CSQTT_E2E_WEB=$WEB CSQTT_E2E_SERVER_LOG=$LOG CSQTT_E2E_MIN_MBIT=64 CSQTT_E2E_MIN_STREAM_KBIT=800 \
             recipe/ci/test.sh src e2e || rc=$?
           # the wrong-password case ends in a timeout either way; the server must still be running after every case
           sudo kill -0 "$PID" || { echo "the server process $PID is gone"; rc=1; }
