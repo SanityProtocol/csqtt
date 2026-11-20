@@ -40,6 +40,7 @@ import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.DpiSplitMode
 import com.csqtt.client.WorkerCountPolicy
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidator
@@ -141,6 +142,7 @@ internal fun SettingsTabContent(
     val turnTransport by settingsStore.turnTransport.collectAsStateWithLifecycle(
         initialValue = SettingsStore.cachedTurnTransport ?: CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT,
     )
+    val dpiSplit by settingsStore.dpiSplit.collectAsStateWithLifecycle(initialValue = DpiSplitMode.OFF)
     val tcpTransportRiskAcknowledged by settingsStore.tcpTransportRiskAcknowledged.collectAsStateWithLifecycle(
         initialValue = false,
     )
@@ -820,6 +822,18 @@ internal fun SettingsTabContent(
                     onInfo = { transport -> showTurnTransportDetailDialog = transport },
                     onSelected = ::requestTurnTransport,
                 )
+
+                if (DpiSplitMode.isAvailable(turnTransport)) {
+                    CompactDropdownSetting(
+                        title = "Обход DPI",
+                        selectedKey = dpiSplit.storedValue,
+                        options = DpiSplitMode.entries.map { it.storedValue to it.label },
+                        enabled = true,
+                        onSelected = { value ->
+                            scope.launch { settingsStore.saveDpiSplit(DpiSplitMode.fromStored(value)) }
+                        },
+                    )
+                }
 
                 TunnelWorkersControl(
                     value = currentWorkers,

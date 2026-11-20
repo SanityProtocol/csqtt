@@ -228,6 +228,7 @@ pub struct TurnConnectTarget<'a> {
     pub override_host: Option<&'a str>,
     pub override_port: Option<&'a str>,
     pub transport_mode: TurnTransportMode,
+    pub dpi_split: crate::dpi_split::DpiSplit,
 }
 
 #[derive(Clone)]
@@ -389,7 +390,7 @@ impl TurnAllocation {
             target.override_port,
             target.transport_mode,
         )?;
-        let (outbound, inbound, server, transport) = connect_transport(&endpoints).await?;
+        let (outbound, inbound, server, transport) = connect_transport(&endpoints, target.dpi_split).await?;
         crate::log_error!("[TURN] Транспорт: {}", transport.as_str());
         let control_transport = if transport == TurnWireTransport::Udp {
             TurnControlTransport::Datagram
@@ -817,6 +818,7 @@ impl Drop for TurnAllocation {
 
 async fn connect_transport(
     endpoints: &[TurnEndpoint],
+    dpi_split: crate::dpi_split::DpiSplit,
 ) -> Result<(TurnOutbound, TurnInbound, SocketAddr, TurnWireTransport)> {
     let mut failures = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
@@ -845,7 +847,7 @@ async fn connect_transport(
                 }
                 TurnWireTransport::Tcp | TurnWireTransport::Tls => {
                     let (writer, reader, write_failure) =
-                        turn_stream::connect(endpoint, server).await?;
+                        turn_stream::connect(endpoint, server, dpi_split).await?;
                     Ok((
                         TurnOutbound::Stream(writer),
                         TurnInbound::Stream(reader, write_failure),

@@ -382,6 +382,7 @@ async fn connect(
                 override_host: None,
                 override_port: None,
                 transport_mode: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
             },
             Arc::from(USERNAME),
             Arc::from(PASSWORD),
@@ -396,6 +397,19 @@ async fn connect(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tcp_turn_transport_allocates_without_udp_fallback() {
+    tcp_turn_flow(crate::dpi_split::DpiSplit::OFF).await;
+}
+
+/// The whole TCP flow with both Allocates written in pieces: the relay's stream parser sees the
+/// same messages, so the split changes nothing past the segment boundaries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_turn_flow_with_dpi_split_completes() {
+    for level in ["light", "medium", "heavy"] {
+        tcp_turn_flow(crate::dpi_split::DpiSplit::parse(level, false).unwrap()).await;
+    }
+}
+
+async fn tcp_turn_flow(dpi_split: crate::dpi_split::DpiSplit) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_address = listener.local_addr().unwrap();
     let relay: SocketAddr = "127.0.0.1:49009".parse().unwrap();
@@ -453,6 +467,7 @@ async fn tcp_turn_transport_allocates_without_udp_fallback() {
             override_host: None,
             override_port: None,
             transport_mode: TurnTransportMode::TcpTls,
+            dpi_split,
         },
         Arc::from(USERNAME),
         Arc::from(PASSWORD),
@@ -811,6 +826,7 @@ async fn final_allocate_errors_preserve_stun_codes() {
                     override_host: None,
                     override_port: None,
                     transport_mode: TurnTransportMode::Udp,
+                    dpi_split: crate::dpi_split::DpiSplit::OFF,
                 },
                 Arc::from(USERNAME),
                 Arc::from(PASSWORD),
@@ -986,6 +1002,7 @@ async fn cancelled_connect_deallocates_server_allocation_after_late_success() {
                 override_host: None,
                 override_port: None,
                 transport_mode: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
             },
             Arc::from(USERNAME),
             Arc::from(PASSWORD),
@@ -1650,6 +1667,7 @@ async fn windows_client_reaches_wsl_server_through_a_real_turn_channel_and_dispa
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from(local_port),
             password: password.clone(),
@@ -1825,6 +1843,7 @@ async fn windows_client_reaches_wsl_server_over_dtls_srtp() {
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Dtls,
             local_port: Arc::from(local_port),
             password: password.clone(),
@@ -2004,6 +2023,7 @@ async fn getconf_timeout_recovers_without_terminating_the_tunnel() {
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Wrap, // GETCONF without a DTLS handshake first, so the dropped replies are GETCONF's own
             local_port: Arc::from(local_port.clone()),
             password: password.clone(),
@@ -2078,6 +2098,7 @@ async fn getconf_timeout_recovers_without_terminating_the_tunnel() {
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from(local_port),
             password: password.clone(),
@@ -2192,6 +2213,7 @@ async fn running_client_receives_hot_dns_configuration_without_reconnect() {
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from(local_port),
             password: password.clone(),
@@ -2371,6 +2393,7 @@ async fn owner_hashes_arrive_after_tunconf() {
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from(local_port),
             password: password.clone(),
@@ -2522,6 +2545,7 @@ async fn nine_windows_workers_register_with_a_wsl_server_without_missing_or_dupl
                 turn_host: None,
                 turn_port: None,
                 turn_transport: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
                 srtp_mode: SrtpMode::Auto,
                 local_port: Arc::from(local_port.clone()),
                 password: password.clone(),
@@ -2979,6 +3003,7 @@ async fn linux_workers_hold_per_stream_rate_through_server_dataplane() {
                 turn_host: None,
                 turn_port: None,
                 turn_transport: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
                 srtp_mode: SrtpMode::Auto,
                 local_port: Arc::from("0"),
                 password: password.clone(),
@@ -3233,6 +3258,7 @@ async fn assert_fatal_auth_case(wrap_pwd: &str, session_pwd: &str, expected_need
             turn_host: None,
             turn_port: None,
             turn_transport: TurnTransportMode::Udp,
+            dpi_split: crate::dpi_split::DpiSplit::OFF,
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from(local_port),
             password: Arc::from(session_pwd),
@@ -3388,6 +3414,7 @@ async fn streams_partial_death_keeps_tunnel_and_dataplane_alive() {
                 turn_host: None,
                 turn_port: None,
                 turn_transport: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
                 srtp_mode: SrtpMode::Auto,
                 local_port: Arc::from(local_port.clone()),
                 password: password.clone(),
@@ -4302,6 +4329,7 @@ async fn repair_round_under_load_restores_missing_workers() {
                 turn_host: None,
                 turn_port: None,
                 turn_transport: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
                 srtp_mode: SrtpMode::Auto,
                 local_port: Arc::from("0"),
                 password: password.clone(),

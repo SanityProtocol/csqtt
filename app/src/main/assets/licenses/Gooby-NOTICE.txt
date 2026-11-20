@@ -1,0 +1,16 @@
+Gooby
+Copyright 2026 Gooby contributors
+
+Licensed under the Apache License, Version 2.0.
+
+This repository is an independent Rust implementation of a SOCKS5 traffic
+strategy engine. It does not contain copied source code from NoDPI.
+
+---
+Source: https://github.com/Endlad2/Gooby, revision c85b1a9744162bdafb8b6f1572fbb8c035ca605f.
+
+CSQTT modifications: CSQTT uses Gooby's TURN Allocate split and TLS ClientHello re-framing
+strategies (the gentle, current and extended presets, shown as Лёгкая, Средняя and Тяжёлая),
+ported into the client core (rust-client/dpi_split.rs). They run on the client's own TURN
+connection, without Gooby's SOCKS5 listener, rule engine or Lua/SQLite/ZIP support; the TTL-1
+step also covers IPv6.

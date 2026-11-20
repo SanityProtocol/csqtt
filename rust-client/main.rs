@@ -7,6 +7,7 @@ mod cpu_task;
 pub mod direct_relay;
 mod diag;
 mod dispatcher;
+mod dpi_split;
 mod dns;
 #[path = "../shared/dtls.rs"]
 pub mod dtls;
@@ -44,6 +45,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use captcha::CaptchaSolver;
 use clap::Parser;
 use dispatcher::{Dispatcher, Termination};
+use dpi_split::DpiSplit;
 use events::Events;
 use obfs::ObfsMode;
 use packet::{PacketPool, packet_pool_size};
@@ -113,6 +115,12 @@ struct Arguments {
     obfs: String,
     #[arg(long, default_value = "udp")]
     turn_transport: String,
+    /// TURN over TCP/TLS only: write the stream's setup bytes in pieces (off, light, medium, heavy).
+    #[arg(long, default_value = "off")]
+    dpi_split: String,
+    /// Never send the TTL-1 first piece of the DPI split's ClientHello.
+    #[arg(long, default_value_t = false)]
+    dpi_no_low_ttl: bool,
     #[arg(long, default_value = "auto")]
     srtp_mode: String,
     #[arg(long = "gen", default_value_t = 0)]
@@ -246,6 +254,10 @@ async fn run(arguments: Arguments) -> Result<i32> {
     let peer = resolve_peer(&arguments.peer).await?;
     let mode = ObfsMode::parse(&arguments.obfs)?;
     let turn_transport = TurnTransportMode::parse(&arguments.turn_transport)?;
+    let dpi_split = effective_dpi_split(
+        turn_transport,
+        DpiSplit::parse(&arguments.dpi_split, arguments.dpi_no_low_ttl)?,
+    );
     let srtp_mode = SrtpMode::parse(&arguments.srtp_mode)?;
     let wrap_key = derive_wrap_key(&password)?;
     let client_wrap_key = wrap_key;
@@ -385,6 +397,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
         turn_port: (!arguments.port.is_empty()).then(|| Arc::from(arguments.port.as_str())),
         turn_ip_pool,
         turn_transport,
+        dpi_split,
         srtp_mode,
         hashes: hashes.into(),
         wrap_key,
@@ -569,6 +582,15 @@ fn normalize_worker_count(requested: usize) -> usize {
     requested.clamp(WORKERS_PER_GROUP, MAX_WORKERS) / WORKERS_PER_GROUP * WORKERS_PER_GROUP
 }
 
+/// The split acts on TURN over TCP/TLS only; with UDP the setting is kept but unused.
+fn effective_dpi_split(transport: TurnTransportMode, split: DpiSplit) -> DpiSplit {
+    if transport == TurnTransportMode::TcpTls {
+        split
+    } else {
+        DpiSplit::OFF
+    }
+}
+
 fn should_leave_js_creator(js_hash_mode: bool, js_auth_mode: bool) -> bool {
     js_hash_mode && js_auth_mode
 }
@@ -592,6 +614,8 @@ fn normalize_cli_argument(argument: String) -> String {
         "fingerprint",
         "obfs",
         "turn-transport",
+        "dpi-split",
+        "dpi-no-low-ttl",
         "srtp-mode",
         "gen",
         "salt",
@@ -886,6 +910,15 @@ fn print_configuration(
         srtp_mode.as_str(),
         arguments.obfs,
     );
+    if params.dpi_split.is_on() {
+        crate::log_error!(
+            "[КЛИЕНТ] Обход DPI: {} (TTL-1: {})",
+            params.dpi_split.as_str(),
+            if params.dpi_split.low_ttl { "ВКЛ" } else { "ВЫКЛ" }
+        );
+    } else if DpiSplit::parse(&arguments.dpi_split, false).is_ok_and(DpiSplit::is_on) {
+        crate::log_error!("[КЛИЕНТ] Обход DPI: только для TCP, при UDP не применяется");
+    }
     crate::log_error!("[WRAP] WRAP Ключ вычислен ✓");
     crate::log_error!("[КЛИЕНТ] Captcha: {captcha}");
     if arguments.domain_routing {
@@ -1105,5 +1138,36 @@ mod worker_count_tests {
         let arguments = Arguments::try_parse_from(normalized).unwrap();
         assert!(arguments.template_domains);
         assert_eq!(arguments.domains_file, vec!["domains.txt"]);
+    }
+
+    #[test]
+    fn single_dash_dpi_split_flags_parse() {
+        let raw_args = [
+            "csqtt-client",
+            "-turn-transport",
+            "tcp_tls",
+            "-dpi-split",
+            "heavy",
+            "-dpi-no-low-ttl",
+        ];
+        let arguments = Arguments::try_parse_from(
+            raw_args.iter().map(|s| normalize_cli_argument(s.to_string())),
+        )
+        .unwrap();
+        let split = DpiSplit::parse(&arguments.dpi_split, arguments.dpi_no_low_ttl).unwrap();
+        assert_eq!(split.as_str(), "heavy");
+        assert!(!split.low_ttl);
+        let defaults = Arguments::try_parse_from(["csqtt-client"]).unwrap();
+        assert_eq!(
+            DpiSplit::parse(&defaults.dpi_split, defaults.dpi_no_low_ttl).unwrap(),
+            DpiSplit::OFF
+        );
+    }
+
+    #[test]
+    fn udp_transport_ignores_split() {
+        let split = DpiSplit::parse("medium", false).unwrap();
+        assert_eq!(effective_dpi_split(TurnTransportMode::Udp, split), DpiSplit::OFF);
+        assert_eq!(effective_dpi_split(TurnTransportMode::TcpTls, split), split);
     }
 }
