@@ -11,7 +11,7 @@ import javax.net.ssl.SSLContext
 /**
  * HTTPS test servers for subscriptions (M-171): a subscription is only ever fetched over HTTPS, so the importer's tests run
  * over TLS. The server presents a self-signed certificate, as a csqtt panel or a swg-panel without a domain does, valid for
- * the name 127.0.0.1 (not "localhost"). It is made at run time by the JDK's keytool, so no key, even a test one, is kept
+ * 127.0.0.1 and panel.fixture.invalid (not "localhost"). It is made at run time by the JDK's keytool, so no key, even a test one, is kept
  * in the repository.
  */
 internal object SubscriptionTestServers {
@@ -22,7 +22,7 @@ internal object SubscriptionTestServers {
             val keytool = java.io.File(System.getProperty("java.home"), "bin/keytool").path
             val process = ProcessBuilder(
                 keytool, "-genkeypair", "-alias", "fixture", "-keyalg", "EC", "-groupname", "secp256r1",
-                "-dname", "CN=subscription.fixture.invalid", "-ext", "san=ip:127.0.0.1", "-validity", "3650",
+                "-dname", "CN=subscription.fixture.invalid", "-ext", "san=ip:127.0.0.1,dns:panel.fixture.invalid", "-validity", "3650",
                 "-storetype", "PKCS12", "-keystore", file.path, "-storepass", "fixture", "-keypass", "fixture",
             ).redirectErrorStream(true).start()
             val output = process.inputStream.bufferedReader().readText()

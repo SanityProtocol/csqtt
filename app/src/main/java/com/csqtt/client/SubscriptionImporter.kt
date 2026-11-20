@@ -71,48 +71,87 @@ internal data class SubscriptionImportSummary(
 internal fun subscriptionTransportUrl(url: String): String =
     if (url.startsWith("http://", ignoreCase = true)) "https://" + url.substring(7) else url
 
-/**
- * A leaf certificate as a marked subscription records it: SHA-256 (hex), notAfter (epoch ms), and whether its chain was
- * CA-validated (whatever its name).
- */
-internal data class SubscriptionCertRecord(val sha256: String, val notAfterMs: Long, val fromCa: Boolean = false)
+/** How a marked subscription's server showed a leaf certificate. */
+internal enum class CertKind(val stored: String) {
+    /** The platform refused its chain (a self-signed panel, a lapsed certificate). */
+    SELF("self"),
+
+    /** The platform accepted its chain and its name. */
+    CA("ca"),
+
+    /** The platform accepted its chain, but it names another host than the subscription URL's (review F4). */
+    CA_OTHER("ca_other");
+
+    companion object {
+        fun fromStored(value: String?): CertKind = entries.firstOrNull { it.stored == value } ?: SELF
+    }
+}
 
 /**
- * How a subscription's own server is trusted (M-171). [pinned]: the user marked it (V2's «Скачивать по HTTP», or an
- * `http://` URL they typed) — a certificate the platform refuses is held to [record], the leaf it was last trusted with.
- * Otherwise the platform's full checks only.
+ * A leaf certificate as a marked subscription records it: SHA-256 (hex), notAfter (epoch ms), how it was shown, and the
+ * names it certifies (DNS and IP alternative names, else its CN; never localhost or a loopback address).
  */
-internal data class SubscriptionTrust(val pinned: Boolean = false, val record: SubscriptionCertRecord? = null)
+internal data class SubscriptionCertRecord(
+    val sha256: String,
+    val notAfterMs: Long,
+    val kind: CertKind = CertKind.SELF,
+    val names: Set<String> = emptySet(),
+)
 
 /**
- * A certificate the platform refused (its chain, or its name) on a marked subscription's own server is accepted when it is
- * the recorded leaf, when none is recorded yet (trust on first use), or when the recorded leaf has expired: the panels the
- * app deploys replace a certificate only once it has expired (a 365-day self-signed fallback, a lapsed Let's Encrypt one;
- * review F2). A recorded leaf without a known expiry never expires.
- *
- * But once the server has shown a CA-validated chain, a certificate whose chain the platform refuses never replaces it,
- * expired or not (the operator, 2026-11-20: the short-lived Let's Encrypt certificates of the panels the app deploys
- * expire between most refreshes, and an on-path self-signed certificate would otherwise get in then). A lapse of Let's
- * Encrypt stops the refresh until a CA chain is back (said in the log); a panel that drops it for good needs P3's re-trust.
+ * How a marked subscription's server is trusted (M-171; reviews F2–F4 and V1, the operator's decisions of 2026-11-20).
+ * A certificate the platform accepts, name included, is always used. Otherwise, against [record], the leaf last trusted:
+ * - nothing recorded yet: trust on first use;
+ * - a CA chain for another name: never after a fully verified record; else only if it shares a name with the recorded
+ *   leaf — a renewal keeps the panel's IP or the owner's domain, and nobody else can get a CA certificate for those, while
+ *   any CA will sign an attacker's own domain;
+ * - a chain the platform refuses: never after any CA record (a lapse of Let's Encrypt pauses the refresh, said in the log);
+ *   after a self-signed record, only that leaf, or any once it has expired (the panels the app deploys replace a
+ *   self-signed certificate only then). A recorded leaf without a known expiry never expires.
  */
-internal fun pinAccepts(record: SubscriptionCertRecord?, leaf: SubscriptionCertRecord, nowMs: Long): Boolean {
-    if (record?.fromCa == true && !leaf.fromCa) return false
-    return record == null || record.sha256.equals(leaf.sha256, ignoreCase = true) ||
+internal fun certAccepts(record: SubscriptionCertRecord?, candidate: SubscriptionCertRecord, nowMs: Long): Boolean = when {
+    candidate.kind == CertKind.CA -> true
+    record == null -> true
+    candidate.kind == CertKind.CA_OTHER -> record.kind != CertKind.CA && record.names.intersect(candidate.names).isNotEmpty()
+    record.kind != CertKind.SELF -> false
+    else -> record.sha256.equals(candidate.sha256, ignoreCase = true) ||
         (record.notAfterMs > 0L && record.notAfterMs < nowMs)
 }
 
-internal fun certRecordOf(leaf: java.security.cert.X509Certificate, fromCa: Boolean): SubscriptionCertRecord =
+/**
+ * How a subscription's own server is trusted (M-171). [pinned]: the user marked it (V2's «Скачивать по HTTP», or an
+ * `http://` URL they typed) — a certificate the platform refuses is judged by [certAccepts] against [record], the leaf it
+ * was last trusted with. Otherwise the platform's full checks only.
+ */
+internal data class SubscriptionTrust(val pinned: Boolean = false, val record: SubscriptionCertRecord? = null)
+
+private val LOOPBACK_NAMES = setOf("localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1")
+
+/** The names a certificate vouches for: its DNS and IP alternative names, else its CN; loopback names left out. */
+internal fun certNames(leaf: java.security.cert.X509Certificate): Set<String> {
+    val alternative = runCatching { leaf.subjectAlternativeNames }.getOrNull().orEmpty()
+        .filter { (it.getOrNull(0) as? Int) in setOf(2, 7) }
+        .mapNotNull { (it.getOrNull(1) as? String)?.trim()?.lowercase(Locale.ROOT) }
+    val names = alternative.ifEmpty {
+        Regex("(?:^|,)\\s*CN=([^,]+)").find(leaf.subjectX500Principal.name)?.groupValues?.get(1)?.trim()
+            ?.lowercase(Locale.ROOT)?.let(::listOf).orEmpty()
+    }
+    return names.filter { it.isNotEmpty() && it !in LOOPBACK_NAMES }.toSet()
+}
+
+internal fun certRecordOf(leaf: java.security.cert.X509Certificate, kind: CertKind): SubscriptionCertRecord =
     SubscriptionCertRecord(
         sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(leaf.encoded).joinToString("") { "%02x".format(it) },
         notAfterMs = leaf.notAfter.time,
-        fromCa = fromCa,
+        kind = kind,
+        names = certNames(leaf),
     )
 
 /**
  * One fetch's trust for a marked subscription's own host and port; any other host gets the platform's checks. A certificate
- * the platform accepts, name included, is used as for any server and becomes the recorded leaf (so a later certificate it
- * refuses cannot take its place while it is current: review F3). One it refuses — a self-signed panel, or a CA certificate
- * for another name than the URL's (review F4) — must pass [pinAccepts]; then the pin, not a CA, vouches for the name.
+ * the platform accepts, name included, is used as for any server and becomes the recorded leaf. One it refuses — a
+ * self-signed panel, or a CA certificate for another name than the URL's — must pass [certAccepts]; then the record, not
+ * the URL's name, vouches for the server.
  */
 internal class SubscriptionCertPin(
     private val host: String,
@@ -136,10 +175,9 @@ internal class SubscriptionCertPin(
     var refusedByPin: Boolean = false
         private set
 
-    /** [chainFromCa]: the platform validated the chain and only the name failed (review F4). */
-    private fun pinOrRefuse(leaf: java.security.cert.X509Certificate, chainFromCa: Boolean): Boolean {
-        val candidate = certRecordOf(leaf, chainFromCa)
-        if (!pinAccepts(record, candidate, nowMs)) {
+    private fun pinOrRefuse(leaf: java.security.cert.X509Certificate, kind: CertKind): Boolean {
+        val candidate = certRecordOf(leaf, kind)
+        if (!certAccepts(record, candidate, nowMs)) {
             refusedByPin = true
             return false
         }
@@ -158,10 +196,10 @@ internal class SubscriptionCertPin(
             byPin = false
             if (runCatching { platform.checkServerTrusted(chain, authType) }.isSuccess) {
                 // recorded once the fetch succeeds, i.e. once its name passed too (a mismatch goes to the pin rule)
-                observed = certRecordOf(leaf, fromCa = true)
+                observed = certRecordOf(leaf, CertKind.CA)
                 return
             }
-            if (!pinOrRefuse(leaf, chainFromCa = false)) throw java.security.cert.CertificateException(MISMATCH)
+            if (!pinOrRefuse(leaf, CertKind.SELF)) throw java.security.cert.CertificateException(MISMATCH)
         }
 
         override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = platform.acceptedIssuers
@@ -174,7 +212,7 @@ internal class SubscriptionCertPin(
     val hostnameVerifier = javax.net.ssl.HostnameVerifier { name, session ->
         byPin || javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(name, session) ||
             runCatching { session.peerCertificates.first() as java.security.cert.X509Certificate }
-                .getOrNull()?.let { pinOrRefuse(it, chainFromCa = true) } == true
+                .getOrNull()?.let { pinOrRefuse(it, CertKind.CA_OTHER) } == true
     }
 
     val socketFactory: javax.net.ssl.SSLSocketFactory by lazy {

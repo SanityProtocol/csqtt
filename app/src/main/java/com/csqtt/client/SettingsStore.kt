@@ -148,8 +148,9 @@ internal data class SubscriptionMeta(
      */
     val certSha256: String = "",
     val certNotAfter: Long = 0L,
-    /** That leaf's chain was CA-validated: no certificate the platform refuses replaces it (the operator, 2026-11-20). */
-    val certFromCa: Boolean = false,
+    /** How that leaf was shown ([CertKind.stored]) and the names it certifies, comma-joined (review V1). */
+    val certKind: String = "",
+    val certNames: String = "",
 ) {
     fun needsUpdate(now: Long): Boolean {
         if (autoUpdateMinutes <= 0 || url.isBlank()) return false
@@ -179,7 +180,8 @@ private fun decodeSubscriptionMeta(raw: String?): Map<String, SubscriptionMeta> 
             allowHttp = entry.optBoolean("allowHttp", false),
             certSha256 = entry.optString("certSha256").trim(),
             certNotAfter = entry.optLong("certNotAfter", 0L).coerceAtLeast(0L),
-            certFromCa = entry.optBoolean("certFromCa", false),
+            certKind = entry.optString("certKind").trim(),
+            certNames = entry.optString("certNames").trim(),
         )
     }
     return result
@@ -201,7 +203,8 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
                 if (value.certSha256.isNotBlank()) {
                     put("certSha256", value.certSha256)
                     put("certNotAfter", value.certNotAfter)
-                    put("certFromCa", value.certFromCa)
+                    put("certKind", value.certKind)
+                    put("certNames", value.certNames)
                 }
             },
         )
@@ -1399,7 +1402,8 @@ class SettingsStore(context: Context) {
                 allowHttp = allowHttp || existing?.allowHttp == true,
                 certSha256 = existing?.certSha256.orEmpty(),
                 certNotAfter = existing?.certNotAfter ?: 0L,
-                certFromCa = existing?.certFromCa ?: false,
+                certKind = existing?.certKind.orEmpty(),
+                certNames = existing?.certNames.orEmpty(),
             )
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
         }
@@ -1409,10 +1413,14 @@ class SettingsStore(context: Context) {
     internal suspend fun recordSubscriptionCertificate(url: String, cert: SubscriptionCertRecord) {
         if (cert.sha256.isBlank()) return
         updateSubscriptionMeta(url) { meta ->
-            if (meta.certSha256 == cert.sha256 && meta.certNotAfter == cert.notAfterMs && meta.certFromCa == cert.fromCa) {
+            val kind = cert.kind.stored
+            val names = cert.names.sorted().joinToString(",")
+            if (meta.certSha256 == cert.sha256 && meta.certNotAfter == cert.notAfterMs && meta.certKind == kind &&
+                meta.certNames == names
+            ) {
                 meta
             } else {
-                meta.copy(certSha256 = cert.sha256, certNotAfter = cert.notAfterMs, certFromCa = cert.fromCa)
+                meta.copy(certSha256 = cert.sha256, certNotAfter = cert.notAfterMs, certKind = kind, certNames = names)
             }
         }
     }

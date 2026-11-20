@@ -61,12 +61,12 @@ class SubscriptionTlsTest {
         val renewed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(past)))
         assertTrue(renewed is SubscriptionFetchResult.Success)
         assertEquals(SubscriptionTestServers.fixtureSha256, (renewed as SubscriptionFetchResult.Success).cert!!.sha256)
-        assertFalse(renewed.cert!!.fromCa)
+        assertEquals(CertKind.SELF, renewed.cert!!.kind)
     }
 
     @Test
     fun `a server that showed a CA chain is never displaced by a self-signed certificate, even after expiry`() = withHttps { port ->
-        val caRecord = SubscriptionCertRecord("ab".repeat(32), past, fromCa = true)
+        val caRecord = SubscriptionCertRecord("ab".repeat(32), past, CertKind.CA)
         val result = SubscriptionImporter.fetch("https://127.0.0.1:$port/sub", SubscriptionTrust(true, caRecord))
         assertTrue(result is SubscriptionFetchResult.Failure)
         assertTrue((result as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки не совпадает"))
@@ -166,38 +166,60 @@ class SubscriptionTlsTest {
         assertEquals(200, through(pin, "https://127.0.0.1:$port/sub"))
         assertFalse(pin.byPin)
         assertEquals(SubscriptionTestServers.fixtureSha256, pin.observed?.sha256)
-        assertTrue(pin.observed!!.fromCa)
+        assertEquals(CertKind.CA, pin.observed!!.kind)
+        assertEquals(setOf("panel.fixture.invalid"), pin.observed!!.names)
     }
 
     @Test
-    fun `a CA certificate for another name falls to the pin rule`() = withHttps { port ->
+    fun `a CA certificate for another name is taken only with a name the recorded one had`() = withHttps { port ->
         // the URL's host ("localhost") is not in the certificate, as a domain pointed at a panel with an IP certificate
+        val url = "https://localhost:$port/sub"
         val first = SubscriptionCertPin("localhost", port, null, platform = acceptAll)
-        assertEquals(200, through(first, "https://localhost:$port/sub"))
+        assertEquals(200, through(first, url))
         assertTrue(first.byPin)
-        assertTrue("its chain is a CA's: it is recorded as such", first.observed!!.fromCa)
+        assertEquals(CertKind.CA_OTHER, first.observed!!.kind)
 
-        // a CA chain for another name keeps the expiry rule, also after a CA record (the renewal of an IP certificate)
-        val renewal = SubscriptionCertPin("localhost", port, other(past).copy(fromCa = true), platform = acceptAll)
-        assertEquals(200, through(renewal, "https://localhost:$port/sub"))
+        // its renewal (another key, the same name), before the old one expires
+        val panelNames = setOf("panel.fixture.invalid")
+        val renewal = SubscriptionCertPin("localhost", port, other(future).copy(kind = CertKind.CA_OTHER, names = panelNames), platform = acceptAll)
+        assertEquals(200, through(renewal, url))
+        // a self-signed fallback named the panel's IP, then Let's Encrypt for that IP
+        val fromFallback = SubscriptionCertPin("localhost", port, other(future).copy(names = panelNames), platform = acceptAll)
+        assertEquals(200, through(fromFallback, url))
 
-        val refused = SubscriptionCertPin("localhost", port, other(future), platform = acceptAll)
-        assertNull(through(refused, "https://localhost:$port/sub"))
-        assertTrue(refused.refusedByPin)
+        // an on-path attacker's free certificate for their own domain, after the recorded leaf expired (review V1)
+        val attacker = SubscriptionCertPin("localhost", port, other(past).copy(kind = CertKind.CA_OTHER, names = setOf("victim-panel.example")), platform = acceptAll)
+        assertNull(through(attacker, url))
+        assertTrue(attacker.refusedByPin)
+        // and never after a fully verified record
+        val afterVerified = SubscriptionCertPin("localhost", port, other(past).copy(kind = CertKind.CA, names = panelNames), platform = acceptAll)
+        assertNull(through(afterVerified, url))
     }
 
     @Test
-    fun `the pin rule`() {
+    fun `the trust rule`() {
         val now = 1_000_000L
-        val leaf = SubscriptionCertRecord("cd".repeat(32), now + 10)
-        assertTrue("nothing recorded: trust on first use", pinAccepts(null, leaf, now))
-        assertTrue(pinAccepts(SubscriptionCertRecord("CD".repeat(32), now + 5), leaf, now))
-        assertFalse(pinAccepts(SubscriptionCertRecord("ab".repeat(32), now + 5), leaf, now))
-        assertTrue(pinAccepts(SubscriptionCertRecord("ab".repeat(32), now - 5), leaf, now))
-        assertFalse("an unknown expiry never expires", pinAccepts(SubscriptionCertRecord("ab".repeat(32), 0L), leaf, now))
-        val ca = SubscriptionCertRecord("ab".repeat(32), now - 5, fromCa = true)
-        assertFalse("after a CA chain, a refused chain never replaces it", pinAccepts(ca, leaf, now))
-        assertTrue("a CA chain for another name keeps the expiry rule", pinAccepts(ca, leaf.copy(fromCa = true), now))
+        val self = SubscriptionCertRecord("cd".repeat(32), now + 10, CertKind.SELF)
+        val other = SubscriptionCertRecord("cd".repeat(32), now + 10, CertKind.CA_OTHER, setOf("203.0.113.9"))
+        val verified = SubscriptionCertRecord("cd".repeat(32), now + 10, CertKind.CA, setOf("203.0.113.9"))
+        fun rec(kind: CertKind, notAfter: Long, names: Set<String> = emptySet(), sha: String = "ab".repeat(32)) =
+            SubscriptionCertRecord(sha, notAfter, kind, names)
+
+        assertTrue("a fully verified certificate is always used", certAccepts(rec(CertKind.CA, now + 5), verified, now))
+        assertTrue("nothing recorded: trust on first use", certAccepts(null, self, now))
+        assertTrue(certAccepts(null, other, now))
+        // a self-signed candidate
+        assertTrue(certAccepts(rec(CertKind.SELF, now + 5, sha = "CD".repeat(32)), self, now))
+        assertFalse(certAccepts(rec(CertKind.SELF, now + 5), self, now))
+        assertTrue(certAccepts(rec(CertKind.SELF, now - 5), self, now))
+        assertFalse("an unknown expiry never expires", certAccepts(rec(CertKind.SELF, 0L), self, now))
+        assertFalse("never after a CA record, even expired", certAccepts(rec(CertKind.CA, now - 5), self, now))
+        assertFalse(certAccepts(rec(CertKind.CA_OTHER, now - 5), self, now))
+        // a CA chain for another name
+        assertTrue(certAccepts(rec(CertKind.CA_OTHER, now + 5, setOf("203.0.113.9", "x")), other, now))
+        assertTrue(certAccepts(rec(CertKind.SELF, now + 5, setOf("203.0.113.9")), other, now))
+        assertFalse("no shared name", certAccepts(rec(CertKind.CA_OTHER, now - 5, setOf("198.51.100.1")), other, now))
+        assertFalse("never after a fully verified record", certAccepts(rec(CertKind.CA, now - 5, setOf("203.0.113.9")), other, now))
         assertNull(SubscriptionCertPin.forUrl("https://h/x", SubscriptionTrust()))
     }
 
