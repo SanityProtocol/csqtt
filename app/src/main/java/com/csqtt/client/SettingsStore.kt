@@ -1747,6 +1747,12 @@ class SettingsStore(context: Context) {
         }
     }
 
+    /** The deploy form's SSH port alone, while «Ручные порты» is off (the profile's own ports stay). */
+    suspend fun saveDeploySshPort(sshPortStr: String) {
+        val profile = activeProfile.first()
+        dataStore.edit { prefs -> prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] = sshPortStr }
+    }
+
     suspend fun saveServerPeerPort(peer: Int) {
         if (peer !in 1..65535) return
         dataStore.edit { prefs ->

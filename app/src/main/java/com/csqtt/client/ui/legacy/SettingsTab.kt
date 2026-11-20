@@ -317,8 +317,8 @@ internal fun SettingsTabContent(
         initialized = true
     }
 
-    // The field shows the port the tunnel dials: the profile's stored one, whatever «Ручные порты» says (a profile from a
-    // link or the V2 design can carry its own; turning «Ручные порты» off stores 46000 again)
+    // The field shows the port the tunnel dials: the profile's stored one, whatever «Ручные порты» says (the deploy switch
+    // no longer changes it; a successful deploy does)
     LaunchedEffect(activeProfile, manualPortsEnabled, savedServerPeerPort) {
         if (!peerPortEdited) {
             val targetPort = savedServerPeerPort.toString()

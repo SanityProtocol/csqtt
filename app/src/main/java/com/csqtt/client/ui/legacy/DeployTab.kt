@@ -313,7 +313,10 @@ internal fun DeployTab(
         val ssh = sshPort.toIntOrNull()
         val peer = peerPort.toIntOrNull()
         val web = webPort.toIntOrNull()
-        if (ssh in 1..65535 && peer in 1..65535 && web in 1..65535) {
+        if (!savedManualPorts) {
+            // only the SSH port is the form's then: the profile's ports are what the tunnel dials (M-85)
+            if (ssh in 1..65535) settingsStore.saveDeploySshPort(ssh.toString())
+        } else if (ssh in 1..65535 && peer in 1..65535 && web in 1..65535) {
             settingsStore.savePorts(peer!!, web!!, ssh.toString())
         }
     }
@@ -546,8 +549,10 @@ internal fun DeployTab(
                 }
                 is DeployAction.ManualPortsChanged -> {
                     if (!action.enabled) {
-                        peerPort = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT.toString()
-                        webPort = CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT.toString()
+                        // the fields go back to the profile's ports, which the switch no longer changes (M-85): a later
+                        // autosave or an «on» again must not carry 46000 into a profile that dials another port
+                        peerPort = savedServerPeerPort.toString()
+                        webPort = savedServerWebPort.toString()
                         portsEdited = false
                     }
                     scope.launch { settingsStore.saveManualPortsEnabled(action.enabled) }
@@ -585,7 +590,8 @@ internal fun DeployTab(
                             checkPlan = planDeploy(
                                 inventory = inventory,
                                 manualPorts = if (savedManualPorts) resolveServerPorts(true, sshPort, peerPort, webPort) else null,
-                                profilePeerPort = resolveServerPorts(savedManualPorts, sshPort, peerPort, webPort).peer,
+                                // the port the tunnel dials, whatever the switch says
+                                profilePeerPort = savedServerPeerPort,
                                 dockerInstall = dockerInstall,
                                 appVersion = BuildConfig.VERSION_NAME.removePrefix("v"),
                             )
@@ -649,7 +655,7 @@ internal fun DeployTab(
         )
     }
 
-    val profilePeer = resolveServerPorts(savedManualPorts, sshPort, peerPort, webPort).peer
+    val profilePeer = savedServerPeerPort  // the port the tunnel dials, whatever the switch says
     checkPlan?.let { plan ->
         ServerCheckDialog(
             title = "На сервере",
