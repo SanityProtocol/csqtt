@@ -756,9 +756,10 @@ async fn deallocate_flushes_a_packet_the_writer_already_popped() {
         .await
         .unwrap()
         .unwrap();
-    // The writer holds the packet between its pop and its send for this long; the flush wait
-    // (OUTBOUND_FLUSH_WAIT, 250 ms) covers it.
-    allocation.set_outbound_send_delay(Duration::from_millis(100));
+    // The writer holds the packet between its pop and its send. Without the fix deallocate sets
+    // `closing` within microseconds, so 20 ms always fails; with it, the 250 ms flush wait
+    // (OUTBOUND_FLUSH_WAIT) leaves ~230 ms of margin on a loaded runner.
+    allocation.set_outbound_send_delay(Duration::from_millis(20));
     let mut packet = pool.acquire();
     packet.read_area()[..11].copy_from_slice(b"last-packet");
     packet.set_read_len(11).unwrap();
