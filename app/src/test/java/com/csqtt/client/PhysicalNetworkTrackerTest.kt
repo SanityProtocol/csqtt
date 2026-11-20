@@ -95,4 +95,20 @@ class PhysicalNetworkTrackerTest {
             ),
         )
     }
+
+    @Test
+    fun usableFollowsTheSetUnderItsLock() {
+        val tracker = PhysicalNetworkTracker<String>()
+        org.junit.Assert.assertFalse(tracker.usable.value)
+        tracker.update("mobile", true)
+        org.junit.Assert.assertTrue(tracker.usable.value)
+        tracker.update("wifi", true)
+        tracker.update("mobile", false)
+        org.junit.Assert.assertTrue(tracker.usable.value)
+        tracker.update("wifi", false)
+        org.junit.Assert.assertFalse(tracker.usable.value)
+        tracker.update("wifi", true)
+        tracker.clear()
+        org.junit.Assert.assertFalse(tracker.usable.value)
+    }
 }

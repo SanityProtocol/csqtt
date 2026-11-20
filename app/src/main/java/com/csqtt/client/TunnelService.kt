@@ -37,7 +37,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -97,8 +96,6 @@ class TunnelService : Service() {
     private var networkSwapJob: Job? = null
     private var networkLossJob: Job? = null
     private val physicalNetworks = PhysicalNetworkTracker<Network>()
-    // physicalNetworks has a network VK answers on: what a start waiting for one waits for
-    private val vkNetworkUsable = MutableStateFlow(false)
     private val physicalCandidates = mutableSetOf<Network>()
     private val vkProbeJobs = mutableMapOf<Network, Job>()
     private val vkProbeLock = Any()
@@ -171,6 +168,9 @@ class TunnelService : Service() {
                 startJob = serviceScope.launch {
                     try {
                         val store = SettingsStore(applicationContext)
+                        // the run is wanted from now on, however long it waits for a network: a kill and the system's
+                        // restart (restoreTunnel) bring it back; every way a start ends saves false (stopTunnel)
+                        store.saveTunnelWasRunning(true)
                         autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
                         TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                         if (reconcileWifiAutoPause()) {
@@ -837,38 +837,41 @@ class TunnelService : Service() {
      * (suspendForNoNetwork): «Нет сети — ожидание», ended only by a stop, a Wi-Fi pause or a deploy, which cancel the
      * start job. There was a 60 s limit here: after it 2.5.3 left the service in the foreground saying «Запуск...», and
      * ending the run instead dropped the user's intent on a Wi-Fi auto-pause resume in a lift or the metro.
-     * The wait follows the network callbacks (no poll), and lets the CPU sleep: a new network wakes the app anyway.
+     * The wait follows the network callbacks (no poll) and holds the CPU as a running tunnel does, so a network that
+     * comes back without a callback (data back on the same mobile network) is found by its probe within seconds;
+     * «Экономия батареи» lets the lock go, as for a running tunnel.
      */
     private suspend fun awaitVkNetwork() {
         if (physicalNetworks.hasUsableNetwork()) return
         kickPhysicalCandidateProbes()
-        coroutineScope {
-            val waiting = launch {
-                // the first VK probe of a network that is there takes a moment: say «Нет сети» only after it
-                delay(AWAIT_NETWORK_SHOWN_AFTER_MS)
-                TunnelManager.awaitingNetwork.value = true
-                TunnelManager.updateLog(
-                    "vk_network_wait",
-                    "[СЕТЬ] Нет сети, через которую доступен VK · ожидание",
-                    2,
-                    false,
-                    LogLevel.NET,
-                )
-                updateNotification("Нет сети — ожидание")
-                releaseWakeLock()
-                // a safety net for a missed callback (or none registered): look at the networks again, rarely
-                while (isActive) {
-                    delay(AWAIT_NETWORK_RESCAN_MS)
-                    kickPhysicalCandidateProbes()
+        try {
+            coroutineScope {
+                val waiting = launch {
+                    // the first VK probe of a network that is there takes a moment: say «Нет сети» only after it
+                    delay(AWAIT_NETWORK_SHOWN_AFTER_MS)
+                    TunnelManager.awaitingNetwork.value = true
+                    TunnelManager.updateLog(
+                        "vk_network_wait",
+                        "[СЕТЬ] Нет сети, через которую доступен VK · ожидание",
+                        2,
+                        false,
+                        LogLevel.NET,
+                    )
+                    withContext(Dispatchers.Main) { if (!isStopping) updateNotification("Нет сети — ожидание") }
+                    while (isActive) {
+                        delay(AWAIT_NETWORK_RESCAN_MS)
+                        // the lock renewed as the running tunnel's 2 s loop renews it; the networks looked at again in
+                        // case a callback was missed
+                        withContext(Dispatchers.Main) { if (!isStopping) acquireWakeLock() }
+                        kickPhysicalCandidateProbes()
+                    }
                 }
-            }
-            try {
-                vkNetworkUsable.first { it }
-                acquireWakeLock() // the start goes on: VK calls, then the tunnel
-            } finally {
+                physicalNetworks.usable.first { it }
                 waiting.cancel()
-                TunnelManager.awaitingNetwork.value = false
             }
+        } finally {
+            // after the scope has joined the waiting child: nothing sets the flag again after this
+            TunnelManager.awaitingNetwork.value = false
         }
     }
 
@@ -941,7 +944,6 @@ class TunnelService : Service() {
 
     private fun updatePhysicalNetwork(network: Network, usable: Boolean) {
         val transition = physicalNetworks.update(network, usable)
-        vkNetworkUsable.value = physicalNetworks.hasUsableNetwork()
         if (autoPausedForWifi) return
         when (transition) {
             PhysicalNetworkTransition.AVAILABLE -> {
@@ -1606,7 +1608,6 @@ class TunnelService : Service() {
         }
         airplaneModeReceiver = null
         physicalNetworks.clear()
-        vkNetworkUsable.value = false
         synchronized(wifiNetworkLock) {
             physicalWifiNetworks.clear()
         }

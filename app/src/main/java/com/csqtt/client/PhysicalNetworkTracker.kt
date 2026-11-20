@@ -1,5 +1,8 @@
 package com.csqtt.client
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+
 internal enum class PhysicalNetworkTransition {
     NONE,
     AVAILABLE,
@@ -24,12 +27,17 @@ internal fun isEligiblePhysicalNetwork(
 
 internal class PhysicalNetworkTracker<T> {
     private val active = mutableSetOf<T>()
+    private val usableState = MutableStateFlow(false)
+
+    /** Whether a usable network exists, written under the same lock as the set: never a stale value last. */
+    val usable: StateFlow<Boolean> get() = usableState
 
     @Synchronized
     fun update(network: T, usable: Boolean): PhysicalNetworkTransition {
         val wasAvailable = active.isNotEmpty()
         val changed = if (usable) active.add(network) else active.remove(network)
         val isAvailable = active.isNotEmpty()
+        usableState.value = isAvailable
         return when {
             !wasAvailable && isAvailable -> PhysicalNetworkTransition.AVAILABLE
             wasAvailable && !isAvailable -> PhysicalNetworkTransition.UNAVAILABLE
@@ -41,6 +49,7 @@ internal class PhysicalNetworkTracker<T> {
     @Synchronized
     fun clear() {
         active.clear()
+        usableState.value = false
     }
 
     @Synchronized
