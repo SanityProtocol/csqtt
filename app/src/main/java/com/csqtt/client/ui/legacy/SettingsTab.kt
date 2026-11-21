@@ -482,6 +482,9 @@ internal fun SettingsTabContent(
         field = if (participantMode) linkText else peerInput,
         tunnelBusy = tunnelRunning || tunnelStarting || tunnelStopping || tunnelPaused,
     )
+    // a field a text action follows keeps it close, so it reads as that field's alternative
+    val linkFieldGap = if (modeAction == ProfileModeAction.ENTER_SERVER) 0.dp else 16.dp
+    val peerFieldGap = if (modeAction == ProfileModeAction.USE_LINK) 0.dp else 16.dp
     fun switchProfileMode(linkMode: Boolean) {
         // checked again at the click; the store checks again that the profile is still empty
         val busy = TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value ||
@@ -611,7 +614,7 @@ internal fun SettingsTabContent(
                         placeholder = { Text("csqtt://connect?v=2&host=ip&peer=порт&password=пароль", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
                         singleLine = true,
                         isError = linkRequiredError || (linkText.isNotBlank() && parsedCsqttLink == null),
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = linkFieldGap),
                         shape = CsqttShapes.Control,
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -706,7 +709,7 @@ internal fun SettingsTabContent(
                     )
                     if (showPeerPort) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = peerFieldGap),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             OutlinedTextField(
@@ -792,7 +795,7 @@ internal fun SettingsTabContent(
                             },
                             singleLine = true,
                             isError = peerRequiredError || (!isPeerValid && peerInput.isNotEmpty()),
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = peerFieldGap),
                             shape = CsqttShapes.Control,
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = MaterialTheme.colorScheme.primary,
