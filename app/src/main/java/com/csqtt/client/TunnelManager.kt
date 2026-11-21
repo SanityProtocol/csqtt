@@ -1346,7 +1346,11 @@ object TunnelManager {
                 restartJob?.cancel()
                 restartJob = null
                 if (isSwitching) terminateProcessLocked(processIdentity)
-                if (isSwitching) currentParams = params
+                if (isSwitching) {
+                    currentParams = params
+                    // a profile switch may bring another captcha method (the recovery's restart keeps its own)
+                    currentCaptchaSolveMethod = params.captchaSolveMethod
+                }
                 startProcessLocked(appContext, params, epoch)
             }
         }

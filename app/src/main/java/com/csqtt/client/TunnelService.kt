@@ -325,6 +325,7 @@ class TunnelService : Service() {
             }
             CsqttConstants.General.ACTION_RESTART_WHEN_VK_REACHABLE -> verifyVkAndRestart()
             CsqttConstants.General.ACTION_VERIFY_VK_REACHABILITY -> verifyVkAndSuspend()
+            CsqttConstants.General.ACTION_SWITCH_PROFILE -> switchProfile()
             CsqttConstants.General.ACTION_RECOVER_VK_CALL -> {
                 recoverUnavailableVkCall(
                     intent.getStringExtra(CsqttConstants.General.EXTRA_UNAVAILABLE_VK_HASH).orEmpty(),
@@ -381,14 +382,27 @@ class TunnelService : Service() {
         return START_STICKY
     }
 
-    private fun restoreTunnel(): Boolean {
+    /**
+     * The operator (2026-11-21): a profile picked while the tunnel is on — the run reconnects onto it, resolved from the
+     * store as a restore is, the VPN staying up (a switching start). A stopping run ends; a Wi-Fi-paused one resumes from
+     * the active profile anyway. The old run's per-connect VK calls end with it.
+     */
+    private fun switchProfile() {
+        if (isStopping || autoPausedForWifi) return
+        if (!TunnelManager.running.value && !TunnelManager.starting.value) return
+        VkAutoCallsManager.finishActiveCalls()
+        if (!restoreTunnel(switching = true)) stopTunnel()
+    }
+
+    /** [switching]: a profile switch of a run that is on, not the system's restart or a Wi-Fi resume. */
+    private fun restoreTunnel(switching: Boolean = false): Boolean {
         if (isStopping || !serviceJob.isActive) return false
         startJob?.cancel()
         val requestGeneration = ++startGeneration
         isStopping = false
         resourcesReleased = false
         TunnelManager.beginStartRequest(applicationContext)
-        val notification = createNotification("Восстановление соединения...")
+        val notification = createNotification(if (switching) "Переключение профиля..." else "Восстановление соединения...")
         if (!tryStartPersistentForeground(notification, "восстановление VPN")) {
             TunnelManager.starting.value = false
             TunnelManager.recordRunFailure(StopCause.FOREGROUND_REFUSED, applicationContext)
@@ -530,7 +544,7 @@ class TunnelService : Service() {
                     )
                 ) {
                     launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) startTunnel(params)
+                        if (isCurrentStart(requestGeneration)) startTunnel(params, switching)
                     }
                 } else {
                     TunnelManager.updateLog(
@@ -637,17 +651,24 @@ class TunnelService : Service() {
         }
         serviceScope.launch {
             var restartScheduled = false
-            // the run's own identity: resolveConnectionSource below sets it to the active profile's. Unless the run
-            // restarts onto that profile it is put back, for the next recovery's guard (review F2, verify V1), S8's
-            // hashes and the log's masking
-            val runProfile = TunnelManager.sourceProfile
-            val runLink = TunnelManager.sourceLink
-            val runOwnerHashes = TunnelManager.ownerHashes
             try {
                 val previous = TunnelManager.getCurrentParams() ?: return@launch
+                // the run's own identity: resolveConnectionSource sets it to the active profile's. It is put back at once
+                // (a recovery can outlive its run, B5h1 verify 2) and the active one is assigned only where the run
+                // restarts onto it — for the next recovery's guard (review F2, V1), S8's hashes and the log's masking
+                val runProfile = TunnelManager.sourceProfile
+                val runLink = TunnelManager.sourceLink
+                val runOwnerHashes = TunnelManager.ownerHashes
                 val store = SettingsStore(applicationContext)
                 val vkHashMode = store.vkHashMode.first()
-                val source = resolveConnectionSource(store) ?: return@launch
+                val resolvedSource = resolveConnectionSource(store)
+                val activeProfileOf = TunnelManager.sourceProfile
+                val activeLink = TunnelManager.sourceLink
+                val activeOwnerHashes = TunnelManager.ownerHashes
+                TunnelManager.sourceProfile = runProfile
+                TunnelManager.sourceLink = runLink
+                TunnelManager.ownerHashes = runOwnerHashes
+                val source = resolvedSource ?: return@launch
                 if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL && !source.tokenFromLink) {
                     return@launch
                 }
@@ -690,6 +711,8 @@ class TunnelService : Service() {
                     runHasLiveHashes = TunnelManager.runHasLiveHashes(),
                     runProfileActive = runProfile == store.activeProfile.first(),
                 )
+                // B5h1 H1: a recovery that outlived its run (a stop, a Wi-Fi pause, a switch) acts on nothing
+                if (TunnelManager.getCurrentParams() !== previous) return@launch
                 if (outcome is RecoveryOutcome.Stop) {
                     TunnelManager.recordRunFailure(outcome.cause, applicationContext)
                     launch(Dispatchers.Main) { TunnelManager.stop() }
@@ -716,16 +739,14 @@ class TunnelService : Service() {
                     vkAccessToken = resolved.accessToken,
                 )
                 launch(Dispatchers.Main) {
+                    TunnelManager.sourceProfile = activeProfileOf
+                    TunnelManager.sourceLink = activeLink
+                    TunnelManager.ownerHashes = activeOwnerHashes
                     TunnelManager.start(applicationContext, next, isSwitching = true)
                 }
                 restartScheduled = true
             } finally {
-                if (!restartScheduled) {
-                    TunnelManager.sourceProfile = runProfile
-                    TunnelManager.sourceLink = runLink
-                    TunnelManager.ownerHashes = runOwnerHashes
-                    TunnelManager.completeVkCallRecovery()
-                }
+                if (!restartScheduled) TunnelManager.completeVkCallRecovery()
             }
         }
     }
@@ -749,7 +770,7 @@ class TunnelService : Service() {
     private fun isCurrentStart(generation: Long): Boolean =
         generation == startGeneration && !isStopping && serviceJob.isActive
 
-    private fun startTunnel(params: TunnelParams) {
+    private fun startTunnel(params: TunnelParams, switching: Boolean = false) {
         if (isStopping || !serviceJob.isActive) return
         autoPauseRequested = true
         if (autoPauseOnWifiEnabled && wifiConnectedForAutoPause()) {
@@ -766,7 +787,11 @@ class TunnelService : Service() {
             runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(true) }
         }
 
-        TunnelManager.start(this, params)
+        // a switch replaces the running process under the live VPN; with no process yet it is a plain start
+        val switchingRun = switching && TunnelManager.running.value
+        TunnelManager.start(this, params, isSwitching = switchingRun)
+        // `running` does not change on a switch, so nothing else ends the `starting` its restore began
+        if (switchingRun) TunnelManager.starting.value = false
         if (!physicalNetworks.hasUsableNetwork()) {
             TunnelManager.suspendForNoNetwork(physicalNetworkPauseReason(isAirplaneModeOn()))
         }

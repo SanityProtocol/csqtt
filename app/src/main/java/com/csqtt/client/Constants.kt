@@ -9,6 +9,8 @@ object CsqttConstants {
         const val ACTION_RESTART_WHEN_VK_REACHABLE = "com.csqtt.client.RESTART_WHEN_VK_REACHABLE"
         const val ACTION_VERIFY_VK_REACHABILITY = "com.csqtt.client.VERIFY_VK_REACHABILITY"
         const val ACTION_RECOVER_VK_CALL = "com.csqtt.client.RECOVER_VK_CALL"
+        // a profile picked while the tunnel is on: the run reconnects onto it (the operator, 2026-11-21)
+        const val ACTION_SWITCH_PROFILE = "com.csqtt.client.SWITCH_PROFILE"
         const val EXTRA_UNAVAILABLE_VK_HASH = "unavailable_vk_hash"
     }
 

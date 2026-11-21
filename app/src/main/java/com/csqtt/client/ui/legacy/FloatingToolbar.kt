@@ -27,6 +27,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.verticalScroll
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.ProfileSwitch
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.ui.legacy.components.CsqttSettingRow
 import com.csqtt.client.ui.legacy.design.CsqttShapes
@@ -275,9 +276,19 @@ fun FloatingToolbar(
                         enabled = true,
                         onSelected = { key ->
                             if (key == ADD_PROFILE_KEY) {
-                                scope.launch {
-                                    if (settingsStore.addProfile() == null) {
-                                        Toast.makeText(context, "Все 32 профиля заняты", Toast.LENGTH_SHORT).show()
+                                // the new profile is empty and becomes active: with the tunnel on, the reconnect onto it
+                                // could only stop the run
+                                if (ProfileSwitch.addRefused(
+                                        TunnelManager.running.value, TunnelManager.starting.value,
+                                        TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
+                                    )
+                                ) {
+                                    Toast.makeText(context, "Отключите туннель, чтобы добавить профиль", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    scope.launch {
+                                        if (settingsStore.addProfile() == null) {
+                                            Toast.makeText(context, "Все 32 профиля заняты", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             } else {

@@ -517,7 +517,24 @@ fun MainScreen(
                     csqttLinkMode = csqttLinkMode,
                     activeProfile = activeProfile,
                     onActiveProfileChange = { profile ->
-                        scope.launch { settingsStore.saveActiveProfile(profile) }
+                        if (profile != activeProfile) {
+                            scope.launch {
+                                settingsStore.saveActiveProfile(profile)
+                                // the operator (2026-11-21): a profile picked while the tunnel is on reconnects onto it
+                                if (ProfileSwitch.reconnects(
+                                        TunnelManager.running.value, TunnelManager.starting.value,
+                                        TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
+                                    )
+                                ) {
+                                    runCatching {
+                                        context.startService(
+                                            Intent(context, TunnelService::class.java)
+                                                .setAction(CsqttConstants.General.ACTION_SWITCH_PROFILE),
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     },
                     currentTheme = themeMode,
                     onThemeChange = onThemeChange,
