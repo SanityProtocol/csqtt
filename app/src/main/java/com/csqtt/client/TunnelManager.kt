@@ -168,6 +168,17 @@ object TunnelManager {
     @Volatile
     internal var sourceLink: String? = null
 
+    /** The run's own profile, link and owner hashes (resolveConnectionSource writes them for the profile it resolves). */
+    internal data class RunIdentity(val profile: Int, val link: String?, val ownerHashes: List<String>)
+
+    internal fun runIdentity(): RunIdentity = RunIdentity(sourceProfile, sourceLink, ownerHashes)
+
+    internal fun applyRunIdentity(identity: RunIdentity) {
+        sourceProfile = identity.profile
+        sourceLink = identity.link
+        ownerHashes = identity.ownerHashes
+    }
+
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
@@ -1346,12 +1357,64 @@ object TunnelManager {
                 restartJob?.cancel()
                 restartJob = null
                 if (isSwitching) terminateProcessLocked(processIdentity)
-                if (isSwitching) {
-                    currentParams = params
-                    // a profile switch may bring another captcha method (the recovery's restart keeps its own)
-                    currentCaptchaSolveMethod = params.captchaSolveMethod
-                }
+                if (isSwitching) currentParams = params
                 startProcessLocked(appContext, params, epoch)
+            }
+        }
+    }
+
+    /**
+     * The operator (2026-11-21): a run moved onto another profile in place, the VPN staying up while the core is
+     * replaced. Unlike a recovery's restart (the same run on new hashes) it is a new connection: the old run's captcha is
+     * cancelled, its core ends the VK calls it made itself («Авто ВК»), [identity] becomes the run's only once its process
+     * starts, and every per-server state starts fresh, so the old server's address, DNS and rule are never replayed into
+     * the new one (profile-switch review F4, F5, F7, H2). Decided under the lock: with no run desired any more it is a
+     * plain start (review H1).
+     */
+    internal fun switchProfile(context: Context, params: TunnelParams, identity: RunIdentity) {
+        val command = lifecycleCommand.incrementAndGet()
+        autoPausedForWifi.value = false
+        stopping.value = false
+        activeScope.launch {
+            startStopMutex.withLock {
+                if (lifecycleCommand.get() != command) return@withLock
+                val appContext = context.applicationContext
+                val replacing = lifecycleState.isDesiredRunning()
+                ManlCaptchaWebViewManager.cancelCaptcha()
+                CaptchaWebViewManager.onTunnelStop()
+                CaptchaWebViewManager.onTunnelStart(appContext)
+                restartJob?.cancel()
+                restartJob = null
+                if (replacing) terminateProcessLocked(processIdentity, finishVkCalls = true)
+                applyRunIdentity(identity)
+                clearLogs()
+                config.value = null
+                wrapAuthTimeoutCount = 0
+                crashRestartStreak = 0
+                processStartedAtMs = 0L
+                currentParams = params
+                strongAppContext = appContext
+                lastContext = WeakReference(appContext)
+                activeSettingsStore = SettingsStore(appContext)
+                lastTunnelDiagnostic.value = ""
+                currentCaptchaSolveMethod = params.captchaSolveMethod
+                runFatal.set(FirstFatal())
+                failure.value = null
+                everConnected.value = false
+                tunconfThisProcess.value = false
+                serverSilent.value = false
+                targetWorkers.value = 0
+                serverRoutingActive.value = false
+                activeServerRoutingRule.value = null
+                serverAssignedWorkers.value = null
+                lastAppliedDns = null
+                vpnRebuildPending.set(false)
+                trafficTracker.reset()
+                traffic.value = null
+                val epoch = if (replacing) lifecycleState.requestRestart() ?: return@withLock else lifecycleState.requestStart()
+                startProcessLocked(appContext, params, epoch)
+                // `running` does not change on a switch, so nothing else ends the `starting` its restore began
+                starting.value = false
             }
         }
     }
