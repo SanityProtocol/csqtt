@@ -33,6 +33,27 @@ class LogRedactionTest {
     }
 
     @Test
+    fun `the core's VK request URLs in an error lose the hash and the session key`() {
+        assertEquals(
+            "[КРЕД #1] Ошибка: error sending request for url (https://api.vk.ru/method/calls.getAnonymousToken?" +
+                "link=https%3A%2F%2Fvk.ru%2Fcall%2Fjoin%2F[скрыто]&name=x)",
+            redact("[КРЕД #1] Ошибка: error sending request for url (https://api.vk.ru/method/calls.getAnonymousToken?" +
+                "link=https%3A%2F%2Fvk.ru%2Fcall%2Fjoin%2FAbC_d-123&name=x)"),
+        )
+        assertEquals(
+            "fb.do?joinLink=[скрыто]&isVideo=false&anonymToken=[скрыто]&session_key=[скрыто]",
+            redact("fb.do?joinLink=AbC_d-123&isVideo=false&anonymToken=tok&session_key=sk1"),
+        )
+    }
+
+    @Test
+    fun `a code name ending in Token keeps the words after it`() {
+        val line = "[ФАТАЛ] messages.getCallToken: error sending request"
+        assertEquals(line, redact(line))
+        assertEquals("password:\nследующая строка", redact("password:\nследующая строка"))
+    }
+
+    @Test
     fun `ordinary lines stay as they are`() {
         listOf(
             "[КЛИЕНТ] Нужен пароль в переменной CSQTT_PASSWORD",
