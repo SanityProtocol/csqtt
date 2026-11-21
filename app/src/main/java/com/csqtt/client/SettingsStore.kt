@@ -806,10 +806,7 @@ class SettingsStore(context: Context) {
                 ).forEach { prefs.remove(getProfileKey(it, profile)) }
                 if (parseCsqttLink(link)?.hashes.orEmpty().isNotEmpty()) prefs.remove(getProfileKey(VK_HASHES, profile))
             }
-            // S8: hashes received for another link never outlive it — a subscription refresh writes through here too
-            // (B5e3a review F1)
-            if (prefs[getProfileKey(CSQTT_LINK, profile)] != link) prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
-            prefs[getProfileKey(CSQTT_LINK, profile)] = link
+            writeLinkKeys(prefs, profile, link)
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
         }
 
@@ -891,6 +888,15 @@ class SettingsStore(context: Context) {
             val before = prefs[key]
             if (hashes.isEmpty() || hashes == link.hashes) prefs.remove(key) else prefs[key] = hashes.joinToString(",")
             return prefs[key] != before
+        }
+
+        /**
+         * Every write of a profile's link: S8's hashes received for another link never outlive it (B5e3a review F1 and
+         * verify V1 — the subscription refresh, the imports and the settings JSON all write through here).
+         */
+        internal fun writeLinkKeys(prefs: MutablePreferences, profile: Int, link: String) {
+            if (prefs[getProfileKey(CSQTT_LINK, profile)] != link) prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
+            prefs[getProfileKey(CSQTT_LINK, profile)] = link
         }
 
         /** M-70: what an import can write into, read in one pass. */
@@ -1441,7 +1447,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveProfileParticipantLink(profile: Int, link: String) {
         dataStore.edit { prefs ->
-            prefs[getProfileKey(CSQTT_LINK, profile)] = link.trim()
+            writeLinkKeys(prefs, profile, link.trim())
         }
     }
 
@@ -1958,7 +1964,7 @@ class SettingsStore(context: Context) {
     suspend fun saveCsqttLink(link: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(CSQTT_LINK, profile)] = link
+            writeLinkKeys(prefs, profile, link)
         }
     }
 
@@ -2928,7 +2934,7 @@ class SettingsStore(context: Context) {
                     }
                     if (deploy.has("workers_per_hash")) mutable[getProfileKey(WORKERS_PER_HASH, p)] = deploy.getInt("workers_per_hash")
                     if (deploy.has("extra_workers")) mutable[getProfileKey(EXTRA_WORKERS, p)] = deploy.getBoolean("extra_workers")
-                    if (deploy.has("csqtt_link")) mutable[getProfileKey(CSQTT_LINK, p)] = deploy.getString("csqtt_link")
+                    if (deploy.has("csqtt_link")) writeLinkKeys(mutable, p, deploy.getString("csqtt_link"))
                     if (deploy.has("csqtt_link_mode")) mutable[getProfileKey(CSQTT_LINK_MODE, p)] = deploy.getBoolean("csqtt_link_mode")
                 }
                 if (includeExceptions && root.has("exceptions")) {

@@ -62,6 +62,16 @@ class ReceivedHashesStoreTest {
         assertNull(prefs[stringPreferencesKey("received_hashes_3")])
     }
 
+    @Test fun everyLinkWriteDropsTheSetOfAnotherLink() {
+        // verify V1: the profile-settings JSON import writes the link through writeLinkKeys too
+        val prefs = load(Store253Snapshots.participant)
+        SettingsStore.receivedHashesKeys(prefs, 3, fresh, Store253Snapshots.participantLink)
+        SettingsStore.writeLinkKeys(prefs, 3, Store253Snapshots.participantLink)
+        assertEquals(fresh.joinToString(","), prefs[stringPreferencesKey("received_hashes_3")])
+        SettingsStore.writeLinkKeys(prefs, 3, Store253Snapshots.participantLink.replace("46000", "46010"))
+        assertNull(prefs[stringPreferencesKey("received_hashes_3")])
+    }
+
     @Test fun aSubscriptionRefreshWithANewLinkDropsTheOldSetAndTheSameLinkKeepsIt() {
         // review F1: the owner replaced dead hashes; the refresh writes the new link, the old received set must go
         val prefs = load(Store253Snapshots.participant)
