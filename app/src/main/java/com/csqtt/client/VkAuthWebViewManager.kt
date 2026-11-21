@@ -45,8 +45,13 @@ internal object VkAuthWebViewManager {
 
     fun acquire(context: Context): WebView = createWebView(context)
 
-    fun clearVkSessionCookies() {
+    /**
+     * Expires VK's session cookies; [onCleared] runs on the main thread once every deletion has landed (or failed), so a
+     * sign-in opened from it can never see the old session and quietly bring its account back (B5e2 review F1).
+     */
+    fun clearVkSessionCookies(onCleared: () -> Unit = {}) {
         mainHandler.post {
+            val done = { mainHandler.post(onCleared) }
             runCatching {
                 val manager = CookieManager.getInstance()
                 val deletions = VK_AUTH_COOKIE_ORIGINS.flatMap { origin ->
@@ -54,15 +59,19 @@ internal object VkAuthWebViewManager {
                 }
                 if (deletions.isEmpty()) {
                     manager.flush()
+                    done()
                 } else {
                     val remaining = AtomicInteger(deletions.size)
                     deletions.forEach { (origin, header) ->
                         manager.setCookie(origin, header) {
-                            if (remaining.decrementAndGet() == 0) manager.flush()
+                            if (remaining.decrementAndGet() == 0) {
+                                manager.flush()
+                                done()
+                            }
                         }
                     }
                 }
-            }
+            }.onFailure { done() }
         }
     }
 

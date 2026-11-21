@@ -193,8 +193,8 @@ class MainActivity : ComponentActivity() {
                             if (vkAccountChangeBlocked()) {
                                 authContext.showRaisedToast(VkTokenPolicy.CHANGE_WHILE_RUNNING, Toast.LENGTH_SHORT)
                             } else {
-                                VkAuthWebViewManager.clearVkSessionCookies()
-                                showVkAuthDialog = true
+                                // the dialog opens once the old session's cookies are gone (review F1)
+                                VkAuthWebViewManager.clearVkSessionCookies { showVkAuthDialog = true }
                             }
                         },
                     )
