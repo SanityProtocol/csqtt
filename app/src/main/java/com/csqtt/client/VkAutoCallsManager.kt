@@ -148,6 +148,50 @@ object VkAutoCallsManager {
         }
     }
 
+    /**
+     * D6 (a1): fills the owner's pool (B5e3b) to one call per 10 of [workers]. Unlike [startAutoCalls], its calls are not
+     * registered here, so a stop does not end them. An invalid token is cleared as there; the live pool still serves.
+     */
+    internal suspend fun fillPool(
+        context: Context,
+        token: String,
+        pool: List<String>,
+        dead: String?,
+        workers: Int,
+    ): VkHashPool.Fill {
+        synchronized(pendingLogsLock) { pendingLogs.clear() }
+        val target = callCountForWorkers(workers)
+        val requestPacer = VkRequestPacer(
+            requestDelayForCallCount(target),
+            SystemClock::elapsedRealtime,
+            { waitMs -> delay(waitMs) },
+        )
+        val fill = VkHashPool.fill(pool, dead, target) {
+            if (token.isBlank()) {
+                VkApiResult.Failed("нет токена VK")
+            } else {
+                runVkCallAttempts {
+                    requestPacer.awaitRequestSlot()
+                    withContext(Dispatchers.IO) { VkApi.startCall(token) }
+                }
+            }
+        }
+        fill.errors.forEach { log("vk_auto_call_error", "[ERR] Звонок VK не создан · $it", 90, true) }
+        if (fill.tokenInvalid) {
+            runCatching { SettingsStore(context).clearVkAccessToken() }
+            log("vk_token_invalidated", "[ERR] Токен VK недействителен · войдите снова", 95, true)
+        }
+        if (fill.hashes.isNotEmpty()) {
+            log(
+                "vk_pool",
+                "[OK] Пул звонков VK: ${fill.hashes.size}" + if (fill.minted > 0) " · новых ${fill.minted}" else "",
+                16,
+                false,
+            )
+        }
+        return fill
+    }
+
     fun replayPendingLogs() {
         val copy = synchronized(pendingLogsLock) {
             val snapshot = ArrayList(pendingLogs)

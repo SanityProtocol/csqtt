@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import org.json.JSONObject
 import com.csqtt.client.ProfileKeyGroup.CONNECTION
@@ -58,6 +59,17 @@ internal fun MutablePreferences.putSecretValue(
         this[encryptedKey] = encrypt(value)
     }
     remove(legacyKey)
+}
+
+/** D6 (a1): the server panel an owner's pool is handed to, and the VPS record that keeps the pool (B5e3b). */
+internal data class PoolPanel(
+    val vps: Int,
+    val host: String,
+    val webPort: Int,
+    val secretPath: String,
+    val webPassword: String,
+) {
+    override fun toString(): String = "PoolPanel(vps=$vps, host=$host, webPort=$webPort)"
 }
 
 internal data class DeploySettingsSnapshot(
@@ -333,6 +345,8 @@ class SettingsStore(context: Context) {
         // the deploy form's ports with «Ручные порты» on: a draft until a deploy succeeds and writes the profile's ports
         private val DEPLOY_PEER_PORT = profileInt("deploy_peer_port", VPS)
         private val DEPLOY_WEB_PORT = profileInt("deploy_web_port", VPS)
+        // D6 (a1): the VK call hashes this app minted for the server, live ones only, comma-separated (B5e3b)
+        private val DEPLOY_VK_POOL = profileString("deploy_vk_pool", VPS)
 
 
         private val VK_AUTH_MODE = profileString("vk_auth_mode")
@@ -897,6 +911,33 @@ class SettingsStore(context: Context) {
         internal fun writeLinkKeys(prefs: MutablePreferences, profile: Int, link: String) {
             if (prefs[getProfileKey(CSQTT_LINK, profile)] != link) prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
             prefs[getProfileKey(CSQTT_LINK, profile)] = link
+        }
+
+        /**
+         * D6 (a1): the VPS record whose pool an owner run of [profile] uses: an owner profile whose linked record has the
+         * server's IP, web password and secret path, the fields «Панель управления» opens it with. Null for every other
+         * run, which keeps per-connect calls ended at stop (B5e3b).
+         */
+        internal fun poolPanelOf(prefs: Preferences, profile: Int, webPassword: (Int) -> String): PoolPanel? {
+            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) return null
+            val vps = linkedVps(prefs, profile) ?: return null
+            val host = prefs[getProfileKey(DEPLOY_IP, vps)].orEmpty().trim()
+            val path = prefs[getProfileKey(DEPLOY_SECRET_PATH_UUID, vps)].orEmpty().trim().trim('/')
+            if (host.isEmpty() || path.isEmpty()) return null
+            val password = webPassword(vps).takeIf { it.isNotEmpty() } ?: return null
+            val port = prefs[getProfileKey(SERVER_WEB_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_WEB_PORT
+            return PoolPanel(vps, host, port, path, password)
+        }
+
+        internal fun vkPoolOf(prefs: Preferences, vps: Int): List<String> =
+            prefs[getProfileKey(DEPLOY_VK_POOL, vps)].orEmpty().split(",").map(String::trim).filter(String::isNotEmpty)
+
+        /** The pool of [vps], written only while the record still has its server (a deleted record is not revived). */
+        internal fun writeVkPool(prefs: MutablePreferences, vps: Int, pool: List<String>): Boolean {
+            if (vps !in profileIndices || prefs[getProfileKey(DEPLOY_IP, vps)].isNullOrBlank()) return false
+            if (pool.isEmpty()) prefs.remove(getProfileKey(DEPLOY_VK_POOL, vps))
+            else prefs[getProfileKey(DEPLOY_VK_POOL, vps)] = pool.joinToString(",")
+            return true
         }
 
         /** M-70: what an import can write into, read in one pass. */
@@ -1665,6 +1706,20 @@ class SettingsStore(context: Context) {
 
     val receivedHashes: Flow<List<String>> = dataStore.data.map { prefs ->
         prefs[getProfileKey(RECEIVED_HASHES, prefs[ACTIVE_PROFILE] ?: 0)].orEmpty().split(",").filter(String::isNotBlank)
+    }
+
+    /** D6: the active profile's pool record, when its owner run uses one (B5e3b). */
+    internal suspend fun activePoolPanel(): PoolPanel? = withContext(Dispatchers.IO) {
+        val prefs = dataStore.data.first()
+        poolPanelOf(prefs, prefs[ACTIVE_PROFILE] ?: 0) { vps ->
+            readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, vps)
+        }
+    }
+
+    internal suspend fun vkPool(vps: Int): List<String> = vkPoolOf(dataStore.data.first(), vps)
+
+    internal suspend fun saveVkPool(vps: Int, pool: List<String>) {
+        dataStore.edit { prefs -> writeVkPool(prefs, vps, pool) }
     }
 
     /** S8: true when [profile]'s stored set changed (written only for a link profile). */

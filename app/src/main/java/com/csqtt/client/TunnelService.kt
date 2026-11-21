@@ -542,10 +542,24 @@ class TunnelService : Service() {
         forcedMode: String? = null,
         accessTokenOverride: String? = null,
         tokenFromLink: Boolean = false,
+        deadHash: String? = null,
     ): ResolvedVkHashes? {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
                 val token = accessTokenOverride ?: store.vkAccessToken.first()
+                // D6 (a1): an owner whose server this app can reach runs on its pool, which outlives the tunnel (B5e3b)
+                val panel = if (tokenFromLink) null else store.activePoolPanel()
+                if (panel != null) {
+                    val pool = store.vkPool(panel.vps)
+                    val fill = VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash)
+                    if (fill.hashes != pool) store.saveVkPool(panel.vps, fill.hashes)
+                    if (fill.hashes.isEmpty()) return null
+                    return ResolvedVkHashes(
+                        fill.hashes.joinToString(","),
+                        fill.hashes.size < VkAutoCallsManager.callCountForWorkers(workersPerHash),
+                        mode,
+                    )
+                }
                 val result = VkAutoCallsManager.startAutoCalls(
                     applicationContext,
                     token,
@@ -614,6 +628,7 @@ class TunnelService : Service() {
                         forcedMode = if (source.tokenFromLink) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
                         accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
                         tokenFromLink = source.tokenFromLink,
+                        deadHash = hash,
                     )
                     else -> ResolvedVkHashes(source.hashes, false)
                 } ?: return@launch
