@@ -442,6 +442,14 @@ class SettingsStore(context: Context) {
         @Volatile
         internal var cachedCsqttLinkMode: Boolean? = null
 
+        // the tab switches as last read in this process: a recreated screen starts from them, not from the defaults,
+        // so its nav bar does not change on the first frames (roles batch review F2)
+        @Volatile
+        internal var cachedShowDeployTab: Boolean? = null
+
+        @Volatile
+        internal var cachedShowLogsTab: Boolean? = null
+
         @Volatile
         internal var cachedWorkersPerHash: Int? = null
 
@@ -1887,10 +1895,14 @@ class SettingsStore(context: Context) {
     // other threads at once. Above the flows they read, a collector could run before its flow was assigned and call
     // collect on null, which crashed the app at launch on slower phones (Redmi).
     /** «Показывать логи», app-wide (the roles batch): on unless turned off. */
-    val showLogsTab: Flow<Boolean> = dataStore.data.map { it[SHOW_LOGS_TAB] ?: true }
+    val showLogsTab: Flow<Boolean> = dataStore.data.map { prefs ->
+        (prefs[SHOW_LOGS_TAB] ?: true).also { cachedShowLogsTab = it }
+    }
 
     /** «Показывать деплой», app-wide: off unless turned on; store step 5 turned it on for owners and anyone with a server. */
-    val showDeployTab: Flow<Boolean> = dataStore.data.map { it[SHOW_DEPLOY_TAB] ?: false }
+    val showDeployTab: Flow<Boolean> = dataStore.data.map { prefs ->
+        (prefs[SHOW_DEPLOY_TAB] ?: false).also { cachedShowDeployTab = it }
+    }
 
     init {
         if (uiCacheStarted.compareAndSet(false, true)) {

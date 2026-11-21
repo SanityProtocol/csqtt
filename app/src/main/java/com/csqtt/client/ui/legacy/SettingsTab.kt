@@ -137,6 +137,7 @@ internal fun SettingsTabContent(
     val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
     val tunnelPaused by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
     val emptyProfileMode by settingsStore.emptyProfileMode.collectAsStateWithLifecycle(initialValue = null)
+    val storedPeer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = null)
     var showHashModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showHashModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showWorkModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
@@ -353,6 +354,14 @@ internal fun SettingsTabContent(
                 peerPortInput = targetPort
             }
         }
+    }
+
+    // The address follows the store too while no edit of it is pending (roles batch review F1): a deploy's end writes the
+    // server it installed into the profile this tab shows, and may turn an empty link profile into this form; a later
+    // save of the form must not write the old empty field back over it
+    LaunchedEffect(storedPeer, participantMode) {
+        val stored = storedPeer ?: return@LaunchedEffect
+        if (!participantMode && saveJob?.isActive != true && peerInput != stored) peerInput = stored
     }
 
     LaunchedEffect(activeProfile, showPeerPort) {

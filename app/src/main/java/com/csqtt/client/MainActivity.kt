@@ -394,9 +394,12 @@ fun MainScreen(
     val csqttLinkMode = tunnelAuthSettings.csqttLinkMode
     // the roles batch: the Деплой and Логи tabs follow two app-wide switches, null until the store has emitted, so the
     // tab is corrected only from loaded values (§4.2 rule 3)
-    val storedShowDeploy by settingsStore.showDeployTab.collectAsStateWithLifecycle(initialValue = null)
-    val storedShowLogs by settingsStore.showLogsTab.collectAsStateWithLifecycle(initialValue = null)
-    val showDeployTab = storedShowDeploy ?: false
+    val storedShowDeploy by settingsStore.showDeployTab.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.cachedShowDeployTab,
+    )
+    val storedShowLogs by settingsStore.showLogsTab.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.cachedShowLogsTab,
+    )
     val showLogsTab = storedShowLogs ?: true
     val navInputsLoaded = storedShowDeploy != null && storedShowLogs != null
     val autoPauseOnWifi by settingsStore.autoPauseOnWifi.collectAsStateWithLifecycle(initialValue = false)
@@ -413,6 +416,8 @@ fun MainScreen(
     val infoActionsExpanded by settingsStore.infoActionsExpanded.collectAsStateWithLifecycle(initialValue = false)
     val infoProjectExpanded by settingsStore.infoProjectExpanded.collectAsStateWithLifecycle(initialValue = false)
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    // until the store has emitted, a Деплой tab restored after process death counts as shown (review F2)
+    val showDeployTab = storedShowDeploy ?: (selectedTab == 2)
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
     val dragTargetIndex = remember { mutableIntStateOf(-1) }
     val dragProgress = remember { mutableFloatStateOf(0f) }
