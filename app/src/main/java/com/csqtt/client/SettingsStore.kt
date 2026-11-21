@@ -1731,6 +1731,11 @@ class SettingsStore(context: Context) {
     // Last in the class, after every property: Kotlin assigns them top to bottom, and the collectors below start on
     // other threads at once. Above the flows they read, a collector could run before its flow was assigned and call
     // collect on null, which crashed the app at launch on slower phones (Redmi).
+    /** M-75: the user's role, «Владелец» (true) or «Участник»; until step 4 has run, what the active profile shows. */
+    val uiOwnerMode: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[UI_OWNER_MODE] ?: (prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] != true)
+    }
+
     init {
         if (uiCacheStarted.compareAndSet(false, true)) {
             // the numbered steps ran already (StoreMigrations); these need the keystore or the package list
@@ -1971,11 +1976,6 @@ class SettingsStore(context: Context) {
             importParticipantLinkKeys(prefs, link, intoNew, activate)?.let { written = it to profileDisplayName(prefs, it) }
         }
         return written
-    }
-
-    /** M-75: the user's role, «Владелец» (true) or «Участник»; until step 4 has run, what the active profile shows. */
-    val uiOwnerMode: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[UI_OWNER_MODE] ?: (prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] != true)
     }
 
     suspend fun saveUiOwnerMode(owner: Boolean) {
