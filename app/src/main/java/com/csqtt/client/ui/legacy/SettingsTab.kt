@@ -1,5 +1,6 @@
 package com.csqtt.client.ui.legacy
 
+import com.csqtt.client.copySensitive
 import com.csqtt.client.showRaisedToast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -62,8 +63,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.widget.Toast
 
 private const val WORKERS_PER_GROUP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
@@ -515,9 +514,7 @@ internal fun SettingsTabContent(
             onCopyToken = {
                 val token = savedVkAccessToken.orEmpty()
                 if (token.isNotBlank()) {
-                    val clipboard = context.getSystemService(ClipboardManager::class.java)
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(ClipData.newPlainText("VK token", token))
+                    if (context.copySensitive("VK token", token)) {
                         context.showRaisedToast("Бессрочный VK токен скопирован", Toast.LENGTH_SHORT)
                     } else {
                         context.showRaisedToast("Не удалось скопировать VK токен", Toast.LENGTH_SHORT)

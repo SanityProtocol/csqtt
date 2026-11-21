@@ -168,7 +168,11 @@ fn main() {
             let _ = stderr.flush();
         }
     }));
-    let arguments = Arguments::parse_from(normalized_arguments());
+    let mut arguments = Arguments::parse_from(normalized_arguments());
+    arguments.vk = resolve_vk_hashes(
+        std::mem::take(&mut arguments.vk),
+        std::env::var(VK_HASHES_ENV).ok(),
+    );
     let runtime = match build_runtime(runtime_worker_threads(
         arguments.workers,
         arguments.runtime_threads,
@@ -593,6 +597,18 @@ fn effective_dpi_split(transport: TurnTransportMode, split: DpiSplit) -> DpiSpli
 
 fn should_leave_js_creator(js_hash_mode: bool, js_auth_mode: bool) -> bool {
     js_hash_mode && js_auth_mode
+}
+
+/// The VK hashes come in this variable, never in argv, where any process of the box could read them (M-172).
+/// `--vk` is still accepted, and wins, for wrappers that pass it.
+const VK_HASHES_ENV: &str = "CSQTT_VK_HASHES";
+
+fn resolve_vk_hashes(flag: String, env: Option<String>) -> String {
+    if flag.is_empty() {
+        env.unwrap_or_default()
+    } else {
+        flag
+    }
 }
 
 fn normalized_arguments() -> Vec<String> {
@@ -1053,6 +1069,20 @@ mod worker_count_tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn vk_hashes_come_from_env_unless_the_flag_carries_them() {
+        assert_eq!(
+            resolve_vk_hashes(String::new(), Some("-Wabc,-Wdef".to_owned())),
+            "-Wabc,-Wdef"
+        );
+        assert_eq!(
+            resolve_vk_hashes("-Wflag".to_owned(), Some("-Wenv".to_owned())),
+            "-Wflag"
+        );
+        assert_eq!(resolve_vk_hashes("-Wflag".to_owned(), None), "-Wflag");
+        assert_eq!(resolve_vk_hashes(String::new(), None), "");
     }
 
     #[test]

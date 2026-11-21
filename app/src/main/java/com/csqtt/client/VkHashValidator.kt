@@ -74,13 +74,14 @@ object VkHashValidator {
             CsqttConstants.Tunnel.BINARY_NAME,
         )
         if (!binary.isFile) return@withContext emptyMap()
-        val command = buildCommand(binary.absolutePath, hashes, fingerprint, clientIds)
+        val command = buildCommand(binary.absolutePath, fingerprint, clientIds)
         val process = runCatching {
             ProcessBuilder(command)
                 .directory(context.filesDir)
                 .redirectErrorStream(true)
                 .apply {
                     environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
+                    environment().putAll(coreSecretEnv("", hashes))
                 }
                 .start()
         }.getOrNull() ?: return@withContext emptyMap()
@@ -102,14 +103,11 @@ object VkHashValidator {
 
     internal fun buildCommand(
         binary: String,
-        hashes: List<String>,
         fingerprint: String,
         clientIds: String,
     ): List<String> = buildList {
         add(binary)
         add("--validate-vk-hashes")
-        add("--vk")
-        add(hashes.joinToString(","))
         add("--fingerprint")
         add(fingerprint)
         add("--client-ids")

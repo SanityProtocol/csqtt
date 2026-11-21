@@ -28,13 +28,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.csqtt.client.SettingsStore
+import com.csqtt.client.copySensitive
 import com.csqtt.client.ui.legacy.appSectionCardBorderColor
 import com.csqtt.client.ui.legacy.appSectionCardColor
 import com.csqtt.client.ui.legacy.components.CsqttSegmentedControl
@@ -260,8 +260,9 @@ fun ImportExportDialog(
                                     isProcessing = true
                                     try {
                                         val json = exportJson()
-                                        clipboardManager.setText(AnnotatedString(json))
-                                        Toast.makeText(context, "Конфиг скопирован в буфер ✓", Toast.LENGTH_SHORT).show()
+                                        if (context.copySensitive("CSQTT config", json)) {
+                                            Toast.makeText(context, "Конфиг скопирован в буфер ✓", Toast.LENGTH_SHORT).show()
+                                        }
                                     } catch (e: Exception) {
                                         Toast.makeText(context, "Ошибка экспорта: ${e.message}", Toast.LENGTH_SHORT).show()
                                     } finally {

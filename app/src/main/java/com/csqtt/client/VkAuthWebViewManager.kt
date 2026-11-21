@@ -26,6 +26,20 @@ internal data class VkAuthPayload(
 
 internal enum class VkAuthPhase { LOGIN, TOKEN }
 
+/** The VK login WebView's navigation rules (M-80), pure so they are tested without a WebView. */
+internal object VkLoginNavigation {
+    /** Only web pages load in the login WebView; `vk://`, `intent://` and the like are dropped, not failed on. */
+    fun isWebScheme(scheme: String?): Boolean =
+        scheme.equals("https", ignoreCase = true) || scheme.equals("http", ignoreCase = true)
+
+    /**
+     * After a main-frame error and its grace period, the login fails only if the view still shows the failed page. A
+     * redirect cut short by the next one also reports an error, but the view has moved on by then (L-59).
+     */
+    fun failsAfterGrace(currentUrl: String?, failedUrl: String): Boolean =
+        currentUrl.isNullOrBlank() || currentUrl == failedUrl
+}
+
 internal object VkAuthWebViewManager {
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -106,6 +120,7 @@ internal class VkAuthSession(
     private var phase = VkAuthPhase.LOGIN
     private var paused = false
     private var pendingAuthorizationRetry = false
+    private var handledToken: String? = null
 
     fun attach(view: WebView) {
         webView = view
@@ -129,6 +144,7 @@ internal class VkAuthSession(
             }
 
             override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean {
+                if (!VkLoginNavigation.isWebScheme(request.url.scheme)) return true
                 val url = request.url.toString()
                 if (url.contains("access_token=")) {
                     handleUrl(url)
@@ -159,7 +175,12 @@ internal class VkAuthSession(
             override fun onReceivedError(v: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (!request.isForMainFrame) return
                 if (finished) return
-                finishWithError("Не удалось открыть страницу авторизации VK — проверьте интернет")
+                val failedUrl = request.url.toString()
+                mainHandler.postDelayed({
+                    if (!finished && VkLoginNavigation.failsAfterGrace(webView?.url, failedUrl)) {
+                        finishWithError("Не удалось открыть страницу авторизации VK — проверьте интернет")
+                    }
+                }, CsqttConstants.VkAutoHash.AUTH_ERROR_GRACE_MS)
             }
         }
 
@@ -323,6 +344,7 @@ internal class VkAuthSession(
     }
 
     private fun handleUrl(url: String) {
+        if (finished) return
         val uri = runCatching { url.toUri() }.getOrNull()
         val raw = uri?.fragment ?: url.substringAfter("#", "").ifEmpty { url.substringAfter("?", "") }
         val fragment = raw.substringAfter("#").substringAfter("?")
@@ -349,6 +371,9 @@ internal class VkAuthSession(
             finishWithError("Не удалось извлечь access_token из URL")
             return
         }
+        // the same token URL reaches here from shouldOverrideUrlLoading, onPageFinished and the monitor: handle it once
+        if (token == handledToken) return
+        handledToken = token
         val expiresIn = params["expires_in"]?.toLongOrNull() ?: 0L
         if (expiresIn == 0L) {
             finished = true

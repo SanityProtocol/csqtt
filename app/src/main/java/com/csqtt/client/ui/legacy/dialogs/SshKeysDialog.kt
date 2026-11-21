@@ -48,6 +48,7 @@ import com.csqtt.client.ui.legacy.appSectionCardBorderColor
 import com.csqtt.client.ui.legacy.appSectionCardColor
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
+import com.csqtt.client.ui.legacy.utils.rememberHiddenOnStop
 
 private const val PRIVATE_KEY_PLACEHOLDER =
     "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
@@ -107,7 +108,7 @@ internal fun SshKeysDialog(
     var privateKey by rememberSaveable { mutableStateOf(initialPrivateKey) }
     var passphrase by rememberSaveable { mutableStateOf(initialPassphrase) }
     var certificate by rememberSaveable { mutableStateOf(initialCertificate) }
-    var passphraseVisible by rememberSaveable { mutableStateOf(false) }
+    var passphraseVisible by rememberHiddenOnStop()
     var privateKeyError by rememberSaveable { mutableStateOf<String?>(null) }
     var certificateError by rememberSaveable { mutableStateOf<String?>(null) }
 

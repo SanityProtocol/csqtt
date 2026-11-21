@@ -1,9 +1,8 @@
 package com.csqtt.client.ui.legacy
 
+import com.csqtt.client.copySensitive
+import com.csqtt.client.shareLogFile
 import com.csqtt.client.showRaisedToast
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +19,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -141,11 +141,23 @@ private fun LogsTerminal() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
+                onClick = { context.shareLogFile(logsText(currentLogs)) },
+                enabled = currentLogs.isNotEmpty(),
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Share,
+                    contentDescription = stringResource(R.string.action_share),
+                    tint = if (currentLogs.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.4f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            IconButton(
                 onClick = {
-                    val text = currentLogs.joinToString("\n") { "${it.message} (x${it.count})" }
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("CSQTT Logs", text))
-                    context.showRaisedToast(copiedMessage, Toast.LENGTH_SHORT)
+                    if (context.copySensitive("CSQTT Logs", logsText(currentLogs))) {
+                        context.showRaisedToast(copiedMessage, Toast.LENGTH_SHORT)
+                    }
                 },
                 enabled = currentLogs.isNotEmpty(),
                 modifier = Modifier.size(40.dp)
@@ -173,3 +185,5 @@ private fun LogsTerminal() {
     }
 }
 
+private fun logsText(entries: List<LogEntry>): String =
+    entries.joinToString("\n") { "${it.message} (x${it.count})" }

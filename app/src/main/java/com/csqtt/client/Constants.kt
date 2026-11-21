@@ -31,6 +31,8 @@ object CsqttConstants {
     object Tunnel {
         const val BINARY_NAME = "libclient.so"
         const val PROCESS_ENV_EVENTS = "CSQTT_EVENTS"
+        // the VK hashes reach the core in its environment, never in argv (M-172)
+        const val VK_HASHES_ENV = "CSQTT_VK_HASHES"
 
         const val DEFAULT_FINGERPRINT = "firefox"
         const val DEFAULT_CLIENT_IDS = "8202606,6287487"
@@ -153,13 +155,15 @@ object CsqttConstants {
                 "&response_type=token" +
                 "&revoke=1" +
                 "&v=5.199"
-        const val VK_LOGIN_URL = "https://vk.ru/"
+        const val VK_LOGIN_URL = "https://m.vk.ru/login"
         const val API_METHOD_BASE_URL = "https://api.vk.ru/method/"
         const val API_VERSION = "5.199"
 
         const val AUTH_TIMEOUT_MS = 300_000L
         const val AUTH_MONITOR_INTERVAL_MS = 200L
         const val AUTH_SILENT_RETRY_DELAY_MS = 1_500L
+        // a main-frame error fails the login only if no other page took over within this time (L-59)
+        const val AUTH_ERROR_GRACE_MS = 3_000L
 
         const val AUTO_CALL_SMALL_DELAY_MS = 380L
         const val AUTO_CALL_LARGE_DELAY_MS = 380L

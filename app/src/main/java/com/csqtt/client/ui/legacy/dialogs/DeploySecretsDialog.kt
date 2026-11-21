@@ -52,6 +52,7 @@ import com.csqtt.client.ui.legacy.utils.TUNNEL_PASSWORD_RULE
 import com.csqtt.client.ui.legacy.utils.generate16CharPassword
 import com.csqtt.client.ui.legacy.utils.isValidTunnelPassword
 import kotlinx.coroutines.launch
+import com.csqtt.client.ui.legacy.utils.rememberHiddenOnStop
 
 @Composable
 fun DeploySecretsDialog(
@@ -70,7 +71,7 @@ fun DeploySecretsDialog(
     }
     var webLoginInput by rememberSaveable { mutableStateOf(initialWebLogin) }
     var webPassInput by rememberSaveable { mutableStateOf(initialWebPass) }
-    var passwordsVisible by rememberSaveable { mutableStateOf(false) }
+    var passwordsVisible by rememberHiddenOnStop()
 
     Dialog(
         onDismissRequest = onDismiss,

@@ -51,6 +51,7 @@ import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
 import com.csqtt.client.ui.legacy.design.CsqttSpacing
 import com.csqtt.client.ui.legacy.design.CsqttTheme
+import com.csqtt.client.ui.legacy.utils.rememberHiddenOnStop
 
 @Composable
 internal fun DeployScreen(
@@ -59,7 +60,7 @@ internal fun DeployScreen(
     modifier: Modifier = Modifier,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
 ) {
-    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var passwordVisible by rememberHiddenOnStop()
     var showRegenConfirmDialog by rememberSaveable { mutableStateOf(false) }
     val scrollState = rememberScrollState()
 

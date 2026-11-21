@@ -95,6 +95,66 @@ internal fun withoutLogStickers(message: String): String = message
     .replace(Regex("[^\\S\r\n]+"), " ")
     .trim()
 
+/**
+ * The core's start command without its routing flags. It carries no secret: the hashes and the password travel in
+ * [coreSecretEnv], since a command line is readable by any process that may list processes (M-172).
+ */
+internal fun coreBaseCommand(
+    binaryPath: String,
+    params: TunnelParams,
+    totalWorkers: Int,
+    effectiveAuthMode: String,
+): List<String> = buildList {
+    addAll(
+        listOf(
+            binaryPath,
+            "-peer", params.peer,
+            "-n", totalWorkers.toString(),
+            "-listen", "${CsqttConstants.Network.LOCAL_LISTEN_HOST}:${params.port}",
+            "-tun-uds", "csqtt_tun_uds",
+        )
+    )
+    add("-vk-hash-mode")
+    add(params.vkHashMode)
+    if (params.fingerprint.isNotEmpty()) {
+        add("-fingerprint")
+        add(params.fingerprint)
+    }
+    if (params.clientIds.isNotEmpty()) {
+        add("-client-ids")
+        add(params.clientIds)
+    }
+    add("-obfs")
+    add(params.obfsMode)
+    add("-turn-transport")
+    add(params.turnTransport)
+    addAll(params.dpiSplit.arguments(params.turnTransport))
+    add("-srtp-mode")
+    add(params.srtpMode)
+    if (params.customTurnIps.isNotBlank()) {
+        add("-custom-turn-ips")
+        add(params.customTurnIps)
+    }
+    add("-vk-auth-mode")
+    add(effectiveAuthMode)
+    if (params.generationId > 0) {
+        add("-gen")
+        add(params.generationId.toString())
+    }
+    if (params.sessionSalt.isNotEmpty()) {
+        add("-salt")
+        add(params.sessionSalt)
+    }
+    add("-captcha-mode")
+    add(params.captchaMode)
+}
+
+/** The core's secrets, for its environment (the core reads CSQTT_PASSWORD and CSQTT_VK_HASHES). */
+internal fun coreSecretEnv(password: String, hashes: List<String>): Map<String, String> = buildMap {
+    if (password.isNotEmpty()) put("CSQTT_PASSWORD", password)
+    if (hashes.isNotEmpty()) put(CsqttConstants.Tunnel.VK_HASHES_ENV, hashes.joinToString(","))
+}
+
 object TunnelManager {
     // the server owner's VK hashes of the participant link in use, masked in every log line (resolveConnectionSource)
     @Volatile
@@ -1047,7 +1107,8 @@ object TunnelManager {
     ) {
         if (identity != null && !isCurrent(identity)) return
         if (!isLoggingEnabled && !TunnelLogPolicy.isAllowedWhenInactiveLogging(key, isError, level)) return
-        val cleanMessage = maskOwnerHashes(withoutLogStickers(message), ownerHashes).take(MAX_LOG_MESSAGE_LENGTH)
+        val cleanMessage = LogRedaction.redact(maskOwnerHashes(withoutLogStickers(message), ownerHashes))
+            .take(MAX_LOG_MESSAGE_LENGTH)
         if (cleanMessage.isEmpty()) return
         val pendingKey = "${identity?.generation ?: 0L}:$key:$priority:$isError:${level?.name.orEmpty()}"
         synchronized(pendingLogLock) {
@@ -1258,50 +1319,7 @@ object TunnelManager {
             hashList,
             params.allowHashRedistribution || jsHashMode,
         )
-        val cmd = mutableListOf(
-            binaryPath,
-            "-peer", params.peer,
-            "-n", totalWorkers.toString(),
-            "-listen", "${CsqttConstants.Network.LOCAL_LISTEN_HOST}:${params.port}",
-            "-tun-uds", "csqtt_tun_uds",
-        )
-        if (hashList.isNotEmpty()) {
-            cmd.add("-vk")
-            cmd.add(hashList.joinToString(","))
-        }
-        cmd.add("-vk-hash-mode")
-        cmd.add(params.vkHashMode)
-        if (params.fingerprint.isNotEmpty()) {
-            cmd.add("-fingerprint")
-            cmd.add(params.fingerprint)
-        }
-        if (params.clientIds.isNotEmpty()) {
-            cmd.add("-client-ids")
-            cmd.add(params.clientIds)
-        }
-        cmd.add("-obfs")
-        cmd.add(params.obfsMode)
-        cmd.add("-turn-transport")
-        cmd.add(params.turnTransport)
-        cmd.addAll(params.dpiSplit.arguments(params.turnTransport))
-        cmd.add("-srtp-mode")
-        cmd.add(params.srtpMode)
-        if (params.customTurnIps.isNotBlank()) {
-            cmd.add("-custom-turn-ips")
-            cmd.add(params.customTurnIps)
-        }
-        cmd.add("-vk-auth-mode")
-        cmd.add(effectiveAuthMode)
-        if (params.generationId > 0) {
-            cmd.add("-gen")
-            cmd.add(params.generationId.toString())
-        }
-        if (params.sessionSalt.isNotEmpty()) {
-            cmd.add("-salt")
-            cmd.add(params.sessionSalt)
-        }
-        cmd.add("-captcha-mode")
-        cmd.add(params.captchaMode)
+        val cmd = coreBaseCommand(binaryPath, params, totalWorkers, effectiveAuthMode).toMutableList()
         val isDomainRoutingActive = params.domainRoutingEnabled || params.excludeRuZones || params.templateDomains || params.directDomains.isNotBlank()
         if (isDomainRoutingActive) {
             cmd.add("--domain-routing")
@@ -1355,9 +1373,7 @@ object TunnelManager {
         pb.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
         pb.environment()[CsqttConstants.Tunnel.PROCESS_ENV_EVENTS] = "1"
         pb.environment()["RAYON_NUM_THREADS"] = "2"
-        if (params.connectionPassword.isNotEmpty()) {
-            pb.environment()["CSQTT_PASSWORD"] = params.connectionPassword
-        }
+        pb.environment().putAll(coreSecretEnv(params.connectionPassword, hashList))
 
         val ticket = lifecycleState.reserveProcess(epoch, process == null)
         if (ticket == null) {

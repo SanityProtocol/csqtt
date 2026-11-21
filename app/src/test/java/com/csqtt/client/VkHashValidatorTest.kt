@@ -68,12 +68,11 @@ class VkHashValidatorTest {
     fun validatorModeDoesNotContainTunnelOrTurnArguments() {
         val command = VkHashValidator.buildCommand(
             "/native/libclient.so",
-            listOf("hash-123456789012"),
             "firefox",
             "8202606,6287487",
         )
         assertTrue("--validate-vk-hashes" in command)
-        assertTrue("--vk" in command)
+        assertFalse("--vk" in command)
         assertFalse("--peer" in command)
         assertFalse("--password" in command)
         assertFalse("--workers" in command)

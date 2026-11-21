@@ -29,6 +29,7 @@ import com.csqtt.client.ui.legacy.utils.isValidTunnelPassword
 import kotlinx.coroutines.launch
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
+import com.csqtt.client.ui.legacy.utils.rememberHiddenOnStop
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,7 +41,7 @@ fun SecretsDialog(
 ) {
     val scope = rememberCoroutineScope()
     var passwordInput by rememberSaveable { mutableStateOf(initialPassword) }
-    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var passwordVisible by rememberHiddenOnStop()
 
     Dialog(
         onDismissRequest = onDismiss,
