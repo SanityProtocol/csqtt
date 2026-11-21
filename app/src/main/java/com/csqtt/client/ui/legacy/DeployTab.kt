@@ -42,6 +42,7 @@ import com.csqtt.client.DeployManager
 import com.csqtt.client.DeploySettingsSnapshot
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.VkPoolHandOver
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.R
@@ -443,6 +444,15 @@ internal fun DeployTab(
                         TunnelManager.addDeployErrorLog("Профиль, с которого шла установка, удалён: подключение не записано")
                     } else if (syncedPassword != null) {
                         TunnelManager.addDeployInfoLog("Пароль подключения синхронизирован с паролем сервера")
+                    }
+                    if (written && deployVps != null) {
+                        // D6 (a1): the new server's default hashes = the owner's pool, beside the deploy, not in its way
+                        DeployManager.scope.launch {
+                            VkPoolHandOver.atDeployEnd(context.applicationContext, settingsStore, deployProfile, deployVps)
+                                ?.let { (ok, line) ->
+                                    if (ok) TunnelManager.addDeploySuccessLog(line) else TunnelManager.addDeployErrorLog(line)
+                                }
+                        }
                     }
                     // the port fields are the profile's connection port: they follow the server just deployed. Once a
                     // field was edited they stopped following the store and kept the old ports, and a later edit of any

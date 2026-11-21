@@ -347,6 +347,9 @@ class SettingsStore(context: Context) {
         private val DEPLOY_WEB_PORT = profileInt("deploy_web_port", VPS)
         // D6 (a1): the VK call hashes this app minted for the server, live ones only, comma-separated (B5e3b)
         private val DEPLOY_VK_POOL = profileString("deploy_vk_pool", VPS)
+        // the pool as the server's panel last accepted it, and the panel's leaf certificate it was trusted with (JSON)
+        private val DEPLOY_VK_POOL_SENT = profileString("deploy_vk_pool_sent", VPS)
+        private val DEPLOY_PANEL_CERT = profileString("deploy_panel_cert", VPS)
 
 
         private val VK_AUTH_MODE = profileString("vk_auth_mode")
@@ -938,6 +941,38 @@ class SettingsStore(context: Context) {
             if (pool.isEmpty()) prefs.remove(getProfileKey(DEPLOY_VK_POOL, vps))
             else prefs[getProfileKey(DEPLOY_VK_POOL, vps)] = pool.joinToString(",")
             return true
+        }
+
+        internal fun encodePanelCert(cert: SubscriptionCertRecord): String = JSONObject()
+            .put("sha256", cert.sha256).put("notAfter", cert.notAfterMs).put("kind", cert.kind.stored)
+            .put("names", cert.names.joinToString(",")).toString()
+
+        internal fun decodePanelCert(raw: String?): SubscriptionCertRecord? = runCatching {
+            val json = JSONObject(raw ?: return null)
+            SubscriptionCertRecord(
+                sha256 = json.getString("sha256").takeIf { it.isNotBlank() } ?: return null,
+                notAfterMs = json.optLong("notAfter", 0L),
+                kind = CertKind.fromStored(json.optString("kind")),
+                names = json.optString("names").split(",").filter(String::isNotBlank).toSet(),
+            )
+        }.getOrNull()
+
+        /** What [vps]'s panel last accepted, and the leaf it was trusted with. */
+        internal fun handOverStateOf(prefs: Preferences, vps: Int): Pair<List<String>, SubscriptionCertRecord?> =
+            prefs[getProfileKey(DEPLOY_VK_POOL_SENT, vps)].orEmpty().split(",").filter(String::isNotBlank) to
+                decodePanelCert(prefs[getProfileKey(DEPLOY_PANEL_CERT, vps)])
+
+        /** A hand-over the panel accepted; a CA or first-use leaf becomes the one it is trusted with from now on. */
+        internal fun writeHandOver(prefs: MutablePreferences, vps: Int, sent: List<String>, cert: SubscriptionCertRecord?) {
+            if (vps !in profileIndices || prefs[getProfileKey(DEPLOY_IP, vps)].isNullOrBlank()) return
+            prefs[getProfileKey(DEPLOY_VK_POOL_SENT, vps)] = sent.joinToString(",")
+            if (cert != null) prefs[getProfileKey(DEPLOY_PANEL_CERT, vps)] = encodePanelCert(cert)
+        }
+
+        /** A deploy's end: a fresh install has no default hashes and may have a new self-signed leaf. */
+        internal fun clearHandOver(prefs: MutablePreferences, vps: Int) {
+            prefs.remove(getProfileKey(DEPLOY_VK_POOL_SENT, vps))
+            prefs.remove(getProfileKey(DEPLOY_PANEL_CERT, vps))
         }
 
         /** M-70: what an import can write into, read in one pass. */
@@ -1708,10 +1743,10 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(RECEIVED_HASHES, prefs[ACTIVE_PROFILE] ?: 0)].orEmpty().split(",").filter(String::isNotBlank)
     }
 
-    /** D6: the active profile's pool record, when its owner run uses one (B5e3b). */
-    internal suspend fun activePoolPanel(): PoolPanel? = withContext(Dispatchers.IO) {
+    /** D6: the pool record of [profile] (the active one by default), when its owner run uses one (B5e3b). */
+    internal suspend fun activePoolPanel(profile: Int? = null): PoolPanel? = withContext(Dispatchers.IO) {
         val prefs = dataStore.data.first()
-        poolPanelOf(prefs, prefs[ACTIVE_PROFILE] ?: 0) { vps ->
+        poolPanelOf(prefs, profile ?: prefs[ACTIVE_PROFILE] ?: 0) { vps ->
             readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, vps)
         }
     }
@@ -1720,6 +1755,16 @@ class SettingsStore(context: Context) {
 
     internal suspend fun saveVkPool(vps: Int, pool: List<String>) {
         dataStore.edit { prefs -> writeVkPool(prefs, vps, pool) }
+    }
+
+    internal suspend fun handOverState(vps: Int) = handOverStateOf(dataStore.data.first(), vps)
+
+    internal suspend fun recordHandOver(vps: Int, sent: List<String>, cert: SubscriptionCertRecord?) {
+        dataStore.edit { prefs -> writeHandOver(prefs, vps, sent, cert) }
+    }
+
+    internal suspend fun clearHandOver(vps: Int) {
+        dataStore.edit { prefs -> clearHandOver(prefs, vps) }
     }
 
     /** S8: true when [profile]'s stored set changed (written only for a link profile). */

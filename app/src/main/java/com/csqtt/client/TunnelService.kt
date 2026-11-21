@@ -554,6 +554,12 @@ class TunnelService : Service() {
                     val fill = VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash)
                     if (fill.hashes != pool) store.saveVkPool(panel.vps, fill.hashes)
                     if (fill.hashes.isEmpty()) return null
+                    // the server's default follows the pool: once, in the background; a failure waits for the next run
+                    serviceScope.launch {
+                        VkPoolHandOver.handOver(store, panel)?.let { (ok, line) ->
+                            TunnelManager.updateLog("vk_pool_handover", line, if (ok) 30 else 70, !ok)
+                        }
+                    }
                     return ResolvedVkHashes(
                         fill.hashes.joinToString(","),
                         fill.hashes.size < VkAutoCallsManager.callCountForWorkers(workersPerHash),
