@@ -65,6 +65,13 @@ class PanelHashesHandOverTest {
         assertNull(result.observed)
     }
 
+    @Test fun aPasswordTheHeaderCannotCarryIsNeverSent() = withPanel { port, seen ->
+        // the panel's x-api-key is visible ASCII only (HeaderValue::to_str); Android may print the value it refuses
+        val result = PanelApi.setDefaultHashes(panel(port).copy(webPassword = "пароль-панели"), pool, cert = null)
+        assertEquals(PanelApi.Outcome.PasswordNotAscii, result.outcome)
+        assertEquals("nothing reached the panel", "", seen.path)
+    }
+
     @Test fun anUnreachablePanelFails() {
         val port = java.net.ServerSocket(0).use { it.localPort }   // closed again: nothing listens there
         assertTrue(PanelApi.setDefaultHashes(panel(port), pool, cert = null).outcome is PanelApi.Outcome.Failed)

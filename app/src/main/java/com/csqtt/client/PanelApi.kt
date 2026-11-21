@@ -25,6 +25,8 @@ internal object PanelApi {
         data object Ok : Outcome()
         data class Refused(val code: Int, val message: String) : Outcome()
         data object CertificateChanged : Outcome()
+        /** The panel's API key header carries visible ASCII only; another password is never sent (review F1). */
+        data object PasswordNotAscii : Outcome()
         data class Failed(val reason: String) : Outcome()
     }
 
@@ -42,6 +44,7 @@ internal object PanelApi {
         cert: SubscriptionCertRecord?,
         nowMs: Long = System.currentTimeMillis(),
     ): Result {
+        if (panel.webPassword.any { it !in ' '..'~' }) return Result(Outcome.PasswordNotAscii, null)
         val url = runCatching { URL(settingsUrl(panel)) }.getOrElse { return Result(Outcome.Failed("неверный адрес"), null) }
         val pin = SubscriptionCertPin(url.host.trim('[', ']'), panel.webPort, cert, nowMs)
         var connection: HttpURLConnection? = null
@@ -99,6 +102,8 @@ internal object VkPoolHandOver {
                 401 -> "[ERR] Сервер не принял хеши: пароль панели не подошёл"
                 else -> "[ERR] Сервер не принял хеши · код=${outcome.code} ${outcome.message}"
             }
+            PanelApi.Outcome.PasswordNotAscii ->
+                false to "[ERR] Хеши не переданы: пароль панели не только из латиницы, цифр и знаков — API его не примет, смените пароль панели"
             PanelApi.Outcome.CertificateChanged ->
                 false to "[ERR] Хеши не переданы: сертификат панели сменился (обновите сервер на вкладке установки)"
             is PanelApi.Outcome.Failed ->
@@ -117,10 +122,13 @@ internal object VkPoolHandOver {
         if (store.activeProfile.first() != profile) return null
         val panel = store.activePoolPanel(profile)?.takeIf { it.vps == vps } ?: return null
         if (store.vkHashMode.first() != CsqttConstants.VkAutoHash.MODE_AUTO_API) return null
-        val pool = store.vkPool(vps)
         val workers = WorkerCountPolicy.normalize(store.workersPerHash.first())
-        val fill = VkAutoCallsManager.fillPool(context, store.vkAccessToken.first(), pool, null, workers)
-        if (fill.hashes != pool) store.saveVkPool(vps, fill.hashes)
+        val token = store.vkAccessToken.first()
+        VkHashPool.fillLock.withLock {
+            val pool = store.vkPool(vps)
+            val fill = VkAutoCallsManager.fillPool(context, token, pool, null, workers)
+            if (fill.hashes != pool) store.saveVkPool(vps, fill.hashes)
+        }
         var result: Pair<Boolean, String>? = null
         for (attempt in 1..3) {
             result = handOver(store, panel, force = true)

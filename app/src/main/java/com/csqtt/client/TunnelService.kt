@@ -550,9 +550,11 @@ class TunnelService : Service() {
                 // D6 (a1): an owner whose server this app can reach runs on its pool, which outlives the tunnel (B5e3b)
                 val panel = if (tokenFromLink) null else store.activePoolPanel()
                 if (panel != null) {
-                    val pool = store.vkPool(panel.vps)
-                    val fill = VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash)
-                    if (fill.hashes != pool) store.saveVkPool(panel.vps, fill.hashes)
+                    val fill = VkHashPool.fillLock.withLock {
+                        val pool = store.vkPool(panel.vps)
+                        VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash)
+                            .also { if (it.hashes != pool) store.saveVkPool(panel.vps, it.hashes) }
+                    }
                     if (fill.hashes.isEmpty()) return null
                     // the server's default follows the pool: once, in the background; a failure waits for the next run
                     serviceScope.launch {

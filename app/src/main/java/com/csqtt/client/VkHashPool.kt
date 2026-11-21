@@ -1,11 +1,16 @@
 package com.csqtt.client
 
+import kotlinx.coroutines.sync.Mutex
+
 /**
  * D6 (a1): the owner's pool of VK call hashes (B5e3b). The calls are minted by this app with the owner's token, outlive the
  * owner's tunnel (never ended at stop) and are handed to the server as its default hashes, so token-mode participants
  * join them with no token. A dead hash is dropped and replaced; live ones are kept, in order, and never re-minted.
  */
 internal object VkHashPool {
+    /** One read-fill-save of a pool at a time: a deploy's end and a connect right after it must not both mint (review F2). */
+    val fillLock = Mutex()
+
     data class Fill(
         /** The live pool after this fill: the kept hashes first, then the minted ones. */
         val hashes: List<String>,
