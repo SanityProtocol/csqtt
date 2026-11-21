@@ -639,6 +639,8 @@ class TunnelService : Service() {
             var restartScheduled = false
             try {
                 val previous = TunnelManager.getCurrentParams() ?: return@launch
+                // read before resolveConnectionSource sets it to the active profile (review F2)
+                val runProfile = TunnelManager.sourceProfile
                 val store = SettingsStore(applicationContext)
                 val vkHashMode = store.vkHashMode.first()
                 val source = resolveConnectionSource(store) ?: return@launch
@@ -681,6 +683,8 @@ class TunnelService : Service() {
                     autoJs = got?.mode == CsqttConstants.VkAutoHash.MODE_AUTO_JS,
                     tokenInvalid = (resolution as? HashResolution.Failed)?.tokenInvalid == true,
                     tokenFromLink = source.tokenFromLink,
+                    runHasLiveHashes = TunnelManager.runHasLiveHashes(),
+                    runProfileActive = runProfile == store.activeProfile.first(),
                 )
                 if (outcome is RecoveryOutcome.Stop) {
                     TunnelManager.recordRunFailure(outcome.cause, applicationContext)

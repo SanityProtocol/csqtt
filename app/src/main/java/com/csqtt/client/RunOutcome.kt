@@ -61,12 +61,21 @@ internal sealed class RecoveryOutcome {
 }
 
 /**
- * [hashes] are the recovery's new hashes, null when none could be got. A token VK refused can never mint again, so it
- * stops the run instead of leaving the core on a dead call forever; an empty set stops it too (an «Авто ВК» run needs none).
+ * [hashes] are the recovery's new hashes, null when none could be got. A token VK refused can never mint again, so once
+ * every hash of the run is dead ([runHasLiveHashes] false) it stops the run instead of leaving the core on a dead call
+ * forever; while some still live, they carry it (review F1). An empty set stops it too (an «Авто ВК» run needs none).
+ * The recovery reads the active profile: a Stop is decided only while that is still the run's (review F2).
  */
-internal fun recoveryOutcome(hashes: String?, autoJs: Boolean, tokenInvalid: Boolean, tokenFromLink: Boolean): RecoveryOutcome =
-    when {
-        hashes == null -> if (tokenInvalid) {
+internal fun recoveryOutcome(
+    hashes: String?,
+    autoJs: Boolean,
+    tokenInvalid: Boolean,
+    tokenFromLink: Boolean,
+    runHasLiveHashes: Boolean,
+    runProfileActive: Boolean,
+): RecoveryOutcome {
+    val outcome = when {
+        hashes == null -> if (tokenInvalid && !runHasLiveHashes) {
             RecoveryOutcome.Stop(StopCause.vkCallsNotCreated(tokenInvalid = true, tokenFromLink = tokenFromLink))
         } else {
             RecoveryOutcome.KeepRunning
@@ -74,13 +83,16 @@ internal fun recoveryOutcome(hashes: String?, autoJs: Boolean, tokenInvalid: Boo
         hashes.isBlank() && !autoJs -> RecoveryOutcome.Stop(StopCause.NO_HASHES_LEFT)
         else -> RecoveryOutcome.Restart
     }
+    return if (outcome is RecoveryOutcome.Stop && !runProfileActive) RecoveryOutcome.KeepRunning else outcome
+}
 
 /** The stop's own notification: «CSQTT отключён» and the cause; a tap opens the app, the next start withdraws it. */
 internal object StopNotice {
     private const val CHANNEL_ID = CsqttConstants.Notifications.STOP_CHANNEL_ID
     private const val NOTIFICATION_ID = CsqttConstants.Notifications.STOP_NOTIFICATION_ID
 
-    fun post(context: Context, cause: String) {
+    /** [silent]: no sound, for a stop the user may have made themselves (a VPN revoke, review F3). */
+    fun post(context: Context, cause: String, silent: Boolean = false) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -105,6 +117,7 @@ internal object StopNotice {
             .setStyle(NotificationCompat.BigTextStyle().bigText(cause))
             .setContentIntent(open)
             .setAutoCancel(true)
+            .setSilent(silent)
             .setCategory(NotificationCompat.CATEGORY_ERROR)
             .build()
         runCatching { manager.notify(NOTIFICATION_ID, notification) }

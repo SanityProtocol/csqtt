@@ -219,7 +219,8 @@ object TunnelManager {
         val inputLock = Any()
         val readyWorkers = mutableSetOf<Int>()
         val dtlsWorkers = mutableSetOf<Int>()
-        val unavailableManualHashes = mutableSetOf<String>()
+        // the hashes of this process reported dead (CALL_UNAVAILABLE), in every mode (B5h1 review F1)
+        val unavailableHashes = mutableSetOf<String>()
         // set synchronously, before any stop is launched: the reader's exit then never restarts this process (M-47)
         val fatal = FirstFatal()
         @Volatile
@@ -395,14 +396,14 @@ object TunnelManager {
      * The first fatal cause of the run is the one shown (M-47); a later one only goes to the log. B5h1: it is kept until
      * the next start, across process death too, and announced by its own notification while the app is not in front.
      */
-    internal fun recordRunFailure(cause: String, context: Context? = activeContext()) {
+    internal fun recordRunFailure(cause: String, context: Context? = activeContext(), silent: Boolean = false) {
         val fatal = runFatal.get()
         if (!fatal.record(withoutLogStickers(cause))) return
         val recorded = fatal.cause ?: return
         failure.value = recorded
         val appContext = context?.applicationContext ?: return
         scope.launch(stopCauseWriter) { runCatching { SettingsStore(appContext).saveLastStopCause(recorded) } }
-        if (StopCause.announces(MainActivity.isForeground)) StopNotice.post(appContext, recorded)
+        if (StopCause.announces(MainActivity.isForeground)) StopNotice.post(appContext, recorded, silent)
     }
 
     val cooldownActive = MutableStateFlow(false)
@@ -424,6 +425,18 @@ object TunnelManager {
     }
 
     fun getCurrentParams(): TunnelParams? = currentParams
+
+    /**
+     * B5h1 review F1: whether the run still has a hash no CALL_UNAVAILABLE named. A recovery whose token VK refused can
+     * mint no new call, so it stops the run only once none is left; until then the live calls carry it.
+     */
+    internal fun runHasLiveHashes(): Boolean {
+        val identity = processIdentity ?: return false
+        val hashes = currentParams?.vkHashes?.split(Regex("[,\\s\\n]+"))?.map(String::trim)?.filter(String::isNotEmpty)
+            ?: return false
+        val dead = synchronized(identity.unavailableHashes) { identity.unavailableHashes.toSet() }
+        return hashes.any { it !in dead }
+    }
 
     private fun processIdOf(activeProcess: Process): Int? {
         return runCatching {
@@ -561,7 +574,9 @@ object TunnelManager {
         recordTunnelDiagnostic(kind.code, diagnostic)
         updateLog("${kind.code}_terminal", "✗ VPN TUN: $diagnostic", 99, true)
         // B5h1: a revoke is another VPN app or the user in Android's settings, not a fault to read about
-        recordRunFailure(if (kind == VpnFailureKind.PermissionRevoked) StopCause.VPN_REVOKED else "VPN: $diagnostic")
+        // review F3: the user may have done it (Android's VPN panel, another VPN app), so its notice makes no sound
+        val revoked = kind == VpnFailureKind.PermissionRevoked
+        recordRunFailure(if (revoked) StopCause.VPN_REVOKED else "VPN: $diagnostic", silent = revoked)
         scope.launch {
             startStopMutex.withLock {
                 stopLocked(processIdentity)
@@ -819,6 +834,7 @@ object TunnelManager {
         val displayHash = displayVkHash(event.hash)
         val reason = if (event.code == TunnelEventParser.CALL_NOT_FOUND_CODE) "звонок не найден" else "код ${event.code}"
         if (shouldReplaceUnavailableVkHash(params.vkHashMode)) {
+            synchronized(identity.unavailableHashes) { identity.unavailableHashes.add(event.hash) }
             updateLog(
                 key = "vk_hash_auto_replace_$displayHash",
                 message = "[VK] Хеш \"$displayHash\" устарел · ошибка ${event.code} — $reason · создаём новый ✓",
@@ -829,8 +845,8 @@ object TunnelManager {
             return
         }
 
-        val isNewUnavailableHash = synchronized(identity.unavailableManualHashes) {
-            identity.unavailableManualHashes.add(event.hash)
+        val isNewUnavailableHash = synchronized(identity.unavailableHashes) {
+            identity.unavailableHashes.add(event.hash)
         }
         if (!isNewUnavailableHash) return
         updateProcessLog(
@@ -847,8 +863,8 @@ object TunnelManager {
                 .filter(String::isNotEmpty)
                 .distinct()
                 .count { hash ->
-                    synchronized(identity.unavailableManualHashes) {
-                        hash !in identity.unavailableManualHashes
+                    synchronized(identity.unavailableHashes) {
+                        hash !in identity.unavailableHashes
                     }
                 }
             if (remaining == 0 && isCurrent(identity)) {
