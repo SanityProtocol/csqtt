@@ -24,6 +24,10 @@ internal data class LinkImportPlan(
 )
 
 internal object LinkImport {
+    /** The tunnel is running, starting, stopping or paused for Wi-Fi: the active profile is not written (M-70). */
+    fun tunnelBusy(): Boolean = TunnelManager.running.value || TunnelManager.starting.value ||
+        TunnelManager.stopping.value || TunnelManager.autoPausedForWifi.value
+
     fun endpoint(host: String, port: Int): String = "${host.trim().trim('[', ']').lowercase()}:$port"
 
     /**

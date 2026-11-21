@@ -40,9 +40,14 @@ internal fun LinkImportDialog(settingsStore: SettingsStore, raw: String, onDone:
         }
         return
     }
-    val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
-    val state by produceState<LinkImportState?>(initialValue = null, tunnelRunning) {
-        value = settingsStore.linkImportState(tunnelRunning)
+    // busy as everywhere else in the app: a starting run (VK network wait, hashes, captcha) and a Wi-Fi pause too (review F2)
+    val running by TunnelManager.running.collectAsStateWithLifecycle()
+    val starting by TunnelManager.starting.collectAsStateWithLifecycle()
+    val stopping by TunnelManager.stopping.collectAsStateWithLifecycle()
+    val paused by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
+    val tunnelBusy = running || starting || stopping || paused
+    val state by produceState<LinkImportState?>(initialValue = null, tunnelBusy) {
+        value = settingsStore.linkImportState(tunnelBusy)
     }
     val plan = state?.let { LinkImport.plan(LinkImport.endpoint(link.host, link.port), it) }
 
@@ -50,7 +55,14 @@ internal fun LinkImportDialog(settingsStore: SettingsStore, raw: String, onDone:
         val appContext = context.applicationContext
         // the process-wide scope: closing the dialog never cuts the write short
         TunnelManager.scope.launch {
-            val written = settingsStore.importParticipantLink(raw.trim(), intoNew, activate = !TunnelManager.running.value)
+            val busyNow = LinkImport.tunnelBusy()
+            if (busyNow && !intoNew) {
+                withContext(Dispatchers.Main) {
+                    appContext.showRaisedToast("Туннель подключается: ссылка не сохранена в текущий профиль", Toast.LENGTH_SHORT)
+                }
+                return@launch
+            }
+            val written = settingsStore.importParticipantLink(raw.trim(), intoNew, activate = !busyNow)
             withContext(Dispatchers.Main) {
                 appContext.showRaisedToast(
                     written?.let { "Ссылка CSQTT сохранена в профиль «${it.second}»" } ?: "Все 32 профиля заняты",

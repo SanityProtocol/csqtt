@@ -71,6 +71,11 @@ fun FloatingToolbar(
         initialValue = CsqttConstants.VkAuth.MODE_CALLS,
     )
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
+    val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
+    val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
+    val tunnelPaused by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
+    // M-75 / review F2: a link-mode change waits for an idle tunnel, a starting or paused one included
+    val linkModeLocked = tunnelRunning || tunnelStarting || tunnelStopping || tunnelPaused
     val selectedTurnSubnet by settingsStore.selectedTurnSubnet.collectAsStateWithLifecycle(
         initialValue = "",
     )
@@ -318,9 +323,9 @@ fun FloatingToolbar(
                     // M-75: how this profile connects; a change mid-session would land at the next recovery restart
                     CsqttSettingRow(
                         title = "Подключение по ссылке",
-                        description = if (tunnelRunning) "Отключите туннель, чтобы переключить" else "Ссылка csqtt:// от владельца сервера",
+                        description = if (linkModeLocked) "Отключите туннель, чтобы переключить" else "Ссылка csqtt:// от владельца сервера",
                         checked = csqttLinkMode,
-                        enabled = !tunnelRunning,
+                        enabled = !linkModeLocked,
                         onCheckedChange = { enabled -> scope.launch { settingsStore.saveCsqttLinkMode(enabled) } },
                     )
 

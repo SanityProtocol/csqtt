@@ -526,6 +526,9 @@ class SettingsStore(context: Context) {
                     step { if (vpsRecordExists(prefs, profile)) prefs[getProfileKey(VPS_REF, profile)] = profile }
                 }
             }
+            // step 4 records the role the switch showed: read before step 3 turns a 2.5.3 subscription slot (owner mode
+            // there) into a link profile (B5e1 review F3)
+            val activeLinkModeShown = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] == true
             if (from < 3) {
                 // 2.6.0, B5c1: a subscription slot is the owner's link, not an owner-mode slot holding the owner's hashes
                 // as its own (M-170)
@@ -536,9 +539,7 @@ class SettingsStore(context: Context) {
             if (from < 4) {
                 // 2.6.0, B5e1 (M-75): the role the switch showed becomes the user's own, kept when profiles change
                 step {
-                    if (prefs[UI_OWNER_MODE] == null) {
-                        prefs[UI_OWNER_MODE] = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] != true
-                    }
+                    if (prefs[UI_OWNER_MODE] == null) prefs[UI_OWNER_MODE] = !activeLinkModeShown
                 }
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA

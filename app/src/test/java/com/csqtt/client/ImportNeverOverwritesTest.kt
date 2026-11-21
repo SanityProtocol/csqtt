@@ -18,7 +18,7 @@ class ImportNeverOverwritesTest {
     private fun state(empty: Boolean = false, endpoint: String? = "203.0.113.5:46100", free: Boolean = true, running: Boolean = false) =
         LinkImportState("Профиль 1", empty, endpoint, free, running)
 
-    @Test fun anotherServersProfileIsOfferedForReplacementOnlyAlongsideANewOne() {
+    @Test fun anotherServersProfileIsOfferedForReplacementByName() {
         val plan = LinkImport.plan(linkEndpoint, state())
         assertTrue(plan.intoActive)
         assertFalse(plan.activeIsSameOrEmpty)   // the dialog says «Заменить профиль «…»»

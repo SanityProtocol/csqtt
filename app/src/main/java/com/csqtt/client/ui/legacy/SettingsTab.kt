@@ -207,13 +207,16 @@ internal fun SettingsTabContent(
      * M-72: the field writes only a link that parses and differs from the stored one (a blank field clears it), through
      * the one import path (M-70): a new link starts with all its hashes and leaves any subscription.
      */
-    suspend fun persistLinkText(text: String) {
+    // the leave-screen flush runs from the first composition: it reads these, never that composition's values (review F1)
+    val latestLinkText by rememberUpdatedState(linkText)
+    val latestStoredLink by rememberUpdatedState(csqttLink)
+    suspend fun persistLinkText(text: String, stored: String) {
         val value = when {
             text.isBlank() -> ""
             parseCsqttLink(text) != null -> text
             else -> return
         }
-        if (value == csqttLink) return
+        if (value == stored) return
         if (value.isEmpty()) settingsStore.saveCsqttLink("") else settingsStore.saveCsqttParticipantLink(value)
     }
     var initialized by rememberSaveable(activeProfile) { mutableStateOf(false) }
@@ -359,8 +362,9 @@ internal fun SettingsTabContent(
             // a paste made just before leaving the screen is saved, not dropped
             if (linkSaveJob?.isActive == true) {
                 linkSaveJob?.cancel()
-                val pending = linkText
-                TunnelManager.scope.launch { persistLinkText(pending) }
+                val pending = latestLinkText
+                val stored = latestStoredLink
+                TunnelManager.scope.launch { persistLinkText(pending, stored) }
             }
             peerPortSaveJob?.cancel()
         }
@@ -583,7 +587,7 @@ internal fun SettingsTabContent(
                             linkSaveJob?.cancel()
                             linkSaveJob = scope.launch {
                                 delay(300)
-                                persistLinkText(linkText)
+                                persistLinkText(latestLinkText, latestStoredLink)
                             }
                         },
                         label = { Text("Ссылка csqtt://", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },

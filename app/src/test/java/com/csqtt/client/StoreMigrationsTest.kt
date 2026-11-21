@@ -140,4 +140,15 @@ class StoreMigrationsTest {
         )
         assertEquals(true, migrate(chosen).second["ui_owner_mode"])
     }
+
+    @Test
+    fun `step 4 reads the role before step 3 turns a 2_5_3 subscription slot into a link profile`() {
+        // the active slot is a subscription slot without auto-update: owner mode in 2.5.3, so the switch showed «Владелец»
+        val activeSubscription = Store253Snapshots.subscriptionAndToken.replace(
+            "\"ints\": {", "\"ints\": {\"active_profile\": 5, ",
+        )
+        val after = migrate(activeSubscription).second
+        assertEquals(true, after["csqtt_link_mode_5"])   // step 3 made it a link profile
+        assertEquals(true, after["ui_owner_mode"])        // the role stays the one shown
+    }
 }
