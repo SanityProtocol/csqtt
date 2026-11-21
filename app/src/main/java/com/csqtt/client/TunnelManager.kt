@@ -160,6 +160,10 @@ object TunnelManager {
     @Volatile
     internal var ownerHashes: List<String> = emptyList()
 
+    // S8: the profile this run started from (resolveConnectionSource); hashes the server sends are stored for it
+    @Volatile
+    internal var sourceProfile: Int = -1
+
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
@@ -642,6 +646,25 @@ object TunnelManager {
                             ensureVpnStarted(configStr, identity, reason = "tunconf")
                         } else {
                             updateProcessLog(identity, "vpn_config_err", "Получен неизвестный формат конфига", 99, true)
+                        }
+                    }
+                }
+            }
+            is TunnelEventParser.Event.Hashes -> {
+                // masked in every later line, like the link's; stored for the next connect, a recovery restart included
+                ownerHashes = (ownerHashes + event.hashes).distinct()
+                val profile = sourceProfile
+                activeContext()?.let { ctx ->
+                    activeScope.launch {
+                        if (SettingsStore(ctx).saveReceivedHashes(profile, event.hashes)) {
+                            updateProcessLog(
+                                identity,
+                                "server_hashes",
+                                "[СЕРВЕР] Владелец сменил хеши звонков: ${event.hashes.size} — применятся при следующем подключении",
+                                40,
+                                false,
+                                LogLevel.OK,
+                            )
                         }
                     }
                 }

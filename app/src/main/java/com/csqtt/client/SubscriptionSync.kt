@@ -28,14 +28,18 @@ internal object SubscriptionSync {
         }
     }
 
-    suspend fun refreshDue(store: SettingsStore, now: Long = System.currentTimeMillis()) {
-        if (TunnelManager.running.value ||
-            TunnelManager.starting.value ||
-            TunnelManager.stopping.value ||
-            TunnelManager.autoPausedForWifi.value
-        ) {
-            return
-        }
+    /**
+     * [whileConnected]: the tunnel service's hourly call (M-74). The app is outside its own VPN, so the fetch goes
+     * directly; what it writes reaches the tunnel at the next (re)connect, as S8's hashes do. The activity's loop keeps
+     * to the idle tunnel.
+     */
+    /** The activity's loop refreshes only with the tunnel idle; the tunnel service's hourly call while it runs (M-74). */
+    internal fun mayRefresh(tunnelActive: Boolean, whileConnected: Boolean): Boolean = whileConnected || !tunnelActive
+
+    suspend fun refreshDue(store: SettingsStore, now: Long = System.currentTimeMillis(), whileConnected: Boolean = false) {
+        val tunnelActive = TunnelManager.running.value || TunnelManager.starting.value ||
+            TunnelManager.stopping.value || TunnelManager.autoPausedForWifi.value
+        if (!mayRefresh(tunnelActive, whileConnected)) return
         val due = store.subscriptionMeta.first().values
             .filter { it.needsUpdate(now) }
             .sortedBy { maxOf(it.lastUpdatedAt, it.lastAttemptAt) }

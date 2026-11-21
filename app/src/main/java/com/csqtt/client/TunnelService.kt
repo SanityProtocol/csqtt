@@ -56,6 +56,8 @@ private const val AUTO_PAUSE_WIFI_RECONCILE_MS = 15_000L
 private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
 private const val AWAIT_NETWORK_SHOWN_AFTER_MS = 5_000L
 private const val AWAIT_NETWORK_RESCAN_MS = 15_000L
+// M-74: the tunnel service refreshes due subscriptions at most this often while connected
+private const val SUBSCRIPTION_CHECK_WHILE_CONNECTED_MS = 60 * 60_000L
 private const val WAKE_LOCK_RENEWAL_WINDOW_MS = 60 * 1_000L
 private const val VK_PROBE_CONNECT_TIMEOUT_MS = 3_000
 private const val VK_PROBE_READ_TIMEOUT_MS = 3_000
@@ -1390,9 +1392,17 @@ class TunnelService : Service() {
         updateJob = serviceScope.launch(Dispatchers.Main) {
             var wasEverUp = TunnelManager.running.value || TunnelManager.processStartedAtMs > 0L
             val startedAt = SystemClock.elapsedRealtime()
+            var subscriptionsCheckedAt = startedAt
             delay(1000)
             while (isActive) {
                 val running = TunnelManager.running.value
+                // M-74: subscriptions refresh while connected too, at most hourly, on this existing tick (no new wake-up)
+                if (running && SystemClock.elapsedRealtime() - subscriptionsCheckedAt >= SUBSCRIPTION_CHECK_WHILE_CONNECTED_MS) {
+                    subscriptionsCheckedAt = SystemClock.elapsedRealtime()
+                    serviceScope.launch {
+                        runCatching { SubscriptionSync.refreshDue(SettingsStore(applicationContext), whileConnected = true) }
+                    }
+                }
                 wasEverUp = wasEverUp || running || TunnelManager.processStartedAtMs > 0L
                 if (running) {
                     acquireWakeLock()

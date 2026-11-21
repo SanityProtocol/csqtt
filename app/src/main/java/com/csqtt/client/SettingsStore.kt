@@ -251,6 +251,8 @@ class SettingsStore(context: Context) {
         private val CSQTT_LINK_MODE = profileBoolean("csqtt_link_mode")
         // the owner's link hashes a participant took out of the connection (per profile, comma-separated)
         private val LINK_HASHES_REMOVED = profileString("link_hashes_removed")
+        // S8: the owner's hashes the server last sent for a link profile; they replace the link's at the next connect
+        private val RECEIVED_HASHES = profileString("received_hashes")
         private val PARTICIPANT_SHOW_LOGS = profileBoolean("participant_show_logs")
         private val SUBSCRIPTION_URL = profileString("subscription_url")
         private val SUBSCRIPTION_TITLE = profileString("subscription_title")
@@ -871,6 +873,19 @@ class SettingsStore(context: Context) {
             prefs[getProfileKey(DEPLOY_SSH_PORT, vps)] = ssh
         }
 
+        /**
+         * S8: [hashes] become [profile]'s received set when it is a link profile; a set equal to the link's own is
+         * dropped (nothing to replace). True when the stored value changed.
+         */
+        internal fun receivedHashesKeys(prefs: MutablePreferences, profile: Int, hashes: List<String>): Boolean {
+            if (profile !in profileIndices || prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) return false
+            val link = parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty()) ?: return false
+            val key = getProfileKey(RECEIVED_HASHES, profile)
+            val before = prefs[key]
+            if (hashes.isEmpty() || hashes == link.hashes) prefs.remove(key) else prefs[key] = hashes.joinToString(",")
+            return prefs[key] != before
+        }
+
         /** M-70: what an import can write into, read in one pass. */
         internal fun linkImportState(prefs: Preferences, tunnelRunning: Boolean): LinkImportState {
             val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
@@ -905,6 +920,7 @@ class SettingsStore(context: Context) {
             if (intoNew && !activate) prefs[ACTIVE_PROFILE] = previousActive
             useParticipantLink(prefs, target, link)
             prefs.remove(getProfileKey(LINK_HASHES_REMOVED, target))
+            prefs.remove(getProfileKey(RECEIVED_HASHES, target))   // a new link brings its own set
             listOf(SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE).forEach {
                 prefs.remove(getProfileKey(it, target))
             }
@@ -1632,6 +1648,17 @@ class SettingsStore(context: Context) {
             meta[key] = transform(meta[key] ?: SubscriptionMeta(url = key))
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
         }
+    }
+
+    val receivedHashes: Flow<List<String>> = dataStore.data.map { prefs ->
+        prefs[getProfileKey(RECEIVED_HASHES, prefs[ACTIVE_PROFILE] ?: 0)].orEmpty().split(",").filter(String::isNotBlank)
+    }
+
+    /** S8: true when [profile]'s stored set changed (written only for a link profile). */
+    internal suspend fun saveReceivedHashes(profile: Int, hashes: List<String>): Boolean {
+        var changed = false
+        dataStore.edit { prefs -> changed = receivedHashesKeys(prefs, profile, hashes) }
+        return changed
     }
 
     val linkHashesRemoved: Flow<Set<String>> = dataStore.data.map { prefs ->

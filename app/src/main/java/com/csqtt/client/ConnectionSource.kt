@@ -13,6 +13,27 @@ data class ConnectionSource(
     val tokenFromLink: Boolean,
 )
 
+/**
+ * S8: the owner's hashes the server sent for this password (`{"version":1,"hashes":[…]}`), checked like a link's: 1 to
+ * 16 distinct entries of 16–128 characters with no whitespace or separator. Null for anything else, so an empty or
+ * broken set never replaces a working one.
+ */
+internal object ReceivedHashes {
+    fun parse(json: String): List<String>? = runCatching {
+        val root = org.json.JSONObject(json)
+        if (root.optInt("version", 0) != 1) return null
+        val array = root.getJSONArray("hashes")
+        val hashes = (0 until array.length()).map { array.getString(it).trim() }
+        hashes.takeIf { list ->
+            list.size in 1..16 && list.distinct().size == list.size &&
+                list.all { h -> h.length in 16..128 && h.none { it.isWhitespace() || it == ',' || it == '+' } }
+        }
+    }.getOrNull()
+
+    /** The owner's set a participant connects with: what the server last sent, else the link's own. */
+    fun ownerSet(linkHashes: List<String>, received: List<String>): List<String> = received.ifEmpty { linkHashes }
+}
+
 /** A participant's hashes: the owner's from the link minus the ones taken out, then the participant's own. */
 internal fun participantHashes(linkHashes: List<String>, removed: Set<String>, ownHashes: String): String =
     (linkHashes.filterNot { it in removed } + ownHashes.split(Regex("[,\\s\\n]+")))
@@ -26,19 +47,24 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
         return (if (filtered.isNotEmpty()) filtered else rawList).joinToString(",")
     }
 
+    // S8: hashes the server sends during this run belong to the profile it started from, whatever is active by then
+    TunnelManager.sourceProfile = store.activeProfile.first()
     if (store.csqttLinkMode.first()) {
         val link = parseCsqttLink(store.csqttLink.first()) ?: return null
-        TunnelManager.ownerHashes = link.hashes
+        val received = store.receivedHashes.first()
+        val ownerSet = ReceivedHashes.ownerSet(link.hashes, received)
+        TunnelManager.ownerHashes = (link.hashes + received).distinct()
         val removed = store.linkHashesRemoved.first()
-        val tokenFromLink = link.vkAccessToken.isNotEmpty()
+        // hashes the server sent replace an old link's token too (S1: no link carries the owner's token any more)
+        val tokenFromLink = link.vkAccessToken.isNotEmpty() && received.isEmpty()
         return ConnectionSource(
             peer = link.peerAddress(),
             password = link.password,
-            hashes = if (tokenFromLink) "" else activeHashes(participantHashes(link.hashes, removed, store.vkHashes.first())),
+            hashes = if (tokenFromLink) "" else activeHashes(participantHashes(ownerSet, removed, store.vkHashes.first())),
             // a link with hashes hides the hash mode, so the participant's list (the owner's kept + their own) is used as
             // is — even with every owner hash taken out — never through a stored hash mode they cannot see
-            hashesFromLink = link.hashes.isNotEmpty(),
-            vkAccessToken = link.vkAccessToken,
+            hashesFromLink = ownerSet.isNotEmpty(),
+            vkAccessToken = if (tokenFromLink) link.vkAccessToken else "",
             tokenFromLink = tokenFromLink,
         )
     }
