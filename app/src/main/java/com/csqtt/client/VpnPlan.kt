@@ -61,6 +61,9 @@ internal data class VpnPlan(
     val lanBypass: Boolean = false,
     val failure: String? = null,
 ) {
+    /** The server's DNS for the «[SERVER] DNS применён» line — none when the device's DNS replaced it (review F3). */
+    fun serverDnsForLog(serverDns: String): String? = serverDns.takeUnless { dnsOverridden }
+
     companion object {
         /** M-62 / D24: VK's own apps never go through the tunnel that VK carries; shown locked on the classic screen. */
         val VK_PACKAGES = listOf(
@@ -131,7 +134,9 @@ internal data class VpnPlan(
             val transport = (listOf(ownPackage) + VK_PACKAGES).toSet()
             val override = settings.dnsOverride.takeIf { it.isNotBlank() }?.let { dnsOverride(it, settings.lanBypass) }
             val serverDnsList = serverDns.split(",").map(String::trim)
-                .filter { it.isNotEmpty() && !it.contains(":") && RoutingEntries.isValidIpv4(it) }   // IPv4 only (M-66)
+                // IPv4 only (M-66); Android refuses a loopback or any-address resolver, so those fall back too (review F1)
+                .filter { it.isNotEmpty() && !it.contains(":") && RoutingEntries.isValidIpv4(it) }
+                .filter { it.substringBefore('.').toInt() !in setOf(0, 127) }
                 .ifEmpty { listOf(FALLBACK_DNS) }
             val dns = override ?: serverDnsList
             // a private override (only allowed with LAN bypass) is reached directly; every other resolver — the server's

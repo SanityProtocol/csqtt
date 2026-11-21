@@ -220,7 +220,7 @@ class TunVpnService : VpnService() {
                     "[TUN] VPN-интерфейс переиспользован без пересборки (причина вызова: $reason)",
                     24,
                 )
-                sendTunFd(pfd = existing, previousInterface = null, dns = dns, isRoutingReload = isRoutingReload, builtRule = interfaceRule)
+                sendTunFd(pfd = existing, previousInterface = null, dns = plan.serverDnsForLog(dns), isRoutingReload = isRoutingReload, builtRule = interfaceRule)
                 return
             }
 
@@ -343,7 +343,7 @@ class TunVpnService : VpnService() {
                 TunnelManager.updateLog("vpn_lan_bypass", "[TUN] Локальная сеть — напрямую, мимо туннеля (обход LAN)", 32, level = LogLevel.NET)
             }
 
-            sendTunFd(pfd, previousInterface, dns, isRoutingReload, builtRule = serverRule)
+            sendTunFd(pfd, previousInterface, plan.serverDnsForLog(dns), isRoutingReload, builtRule = serverRule)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

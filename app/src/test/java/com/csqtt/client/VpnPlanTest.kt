@@ -134,6 +134,13 @@ class Ipv6BlockedTest {
     @Test fun anIpv6OnlyServerDnsFallsBackToAnIpv4One() {
         assertEquals(listOf("77.88.8.8"), plan(dns = "2001:4860:4860::8888").dnsServers)
     }
+
+    @Test fun aLoopbackOrAnyAddressServerDnsFallsBackLikeBefore() {
+        // Builder.addDnsServer refuses them; 9a07eb9 fell back to 77.88.8.8 (review F1)
+        assertEquals(listOf("77.88.8.8"), plan(dns = "127.0.0.53").dnsServers)
+        assertEquals(listOf("77.88.8.8"), plan(dns = "0.0.0.0").dnsServers)
+        assertEquals(listOf("8.8.8.8"), plan(dns = "127.0.0.1, 8.8.8.8").dnsServers)
+    }
 }
 
 /** M-67 / D26: the device's DNS replaces the server's; a private one only with LAN bypass, reached directly. */
@@ -144,6 +151,8 @@ class DnsOverrideTest {
         assertEquals(listOf("1.1.1.1", "9.9.9.9"), p.tunnelledDns)
         assertTrue(p.dnsOverridden)
         assertFalse(p.dnsOverrideRefused)
+        assertNull(p.serverDnsForLog("77.88.8.8"))
+        assertEquals("77.88.8.8", plan().serverDnsForLog("77.88.8.8"))
     }
 
     @Test fun aPrivateOverrideNeedsLanBypassAndThenGoesDirect() {

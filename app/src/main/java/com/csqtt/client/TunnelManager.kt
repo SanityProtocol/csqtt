@@ -2283,9 +2283,11 @@ object TunnelManager {
 
     private suspend fun logEffectiveLocalRouting(store: SettingsStore) {
         val routing = store.routingSnapshot.first()
-        val appsWhite = store.isWhitelist.first()
-        val apps = (if (appsWhite) store.whitelistApps.first() else store.excludedApps.first())
-            .split(",").count { it.isNotBlank() }
+        // «Все с VPN» (M-59) reads as a blacklist with nothing in it: «приложения — все с VPN» (review F3)
+        val allApps = store.appRoutingAll.first()
+        val appsWhite = !allApps && store.isWhitelist.first()
+        val apps = if (allApps) 0 else (if (appsWhite) store.whitelistApps.first() else store.excludedApps.first())
+            .split(",").count { it.isNotBlank() && it !in VpnPlan.VK_PACKAGES }
         fun count(list: String) = list.split(",").count { it.isNotBlank() }
         updateLog(
             "routing_effective",

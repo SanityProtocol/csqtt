@@ -187,11 +187,13 @@ fun ExceptionsTab(
         parseIpsFromText(directIpsStr)
     }
 
+    // VK's apps are never in a list (M-62): one an older version let the user pick is left out here, so it is neither
+    // counted nor kept by the next save (review F2)
     val persistedBlacklist = remember(savedExcluded) {
-        savedExcluded.split(',').filter(String::isNotBlank).toSet()
+        savedExcluded.split(',').filter { it.isNotBlank() && it !in VpnPlan.VK_PACKAGES }.toSet()
     }
     val persistedWhitelist = remember(savedWhitelist) {
-        savedWhitelist.split(',').filter(String::isNotBlank).toSet()
+        savedWhitelist.split(',').filter { it.isNotBlank() && it !in VpnPlan.VK_PACKAGES }.toSet()
     }
 
     var blacklistSelection by remember { mutableStateOf(persistedBlacklist) }
@@ -719,9 +721,9 @@ fun ExceptionsTab(
                         CsqttSettingRow(
                             title = "Все приложения через VPN",
                             description = if (allApps) {
-                                "Списки ниже сохранены и снова заработают, если выключить"
+                                "Списки сохранены, но не действуют"
                             } else {
-                                "Кроме приложений VK — они всегда напрямую"
+                                "Кроме VK: он всегда напрямую"
                             },
                             checked = allApps,
                             enabled = isMigrationReady,
