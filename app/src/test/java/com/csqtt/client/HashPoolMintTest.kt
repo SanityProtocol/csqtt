@@ -55,6 +55,14 @@ class HashPoolMintTest {
         assertEquals(0, vk.calls)
     }
 
+    @Test fun aDeadHashInAPoolAboveTheTargetIsReplacedToo() = runTest {
+        // the owner ran at 30 workers, then lowered to 20: the pool keeps 3, and a dead one is still replaced (review F1)
+        val vk = FakeVk(ok(hash('Z')))
+        val fill = VkHashPool.fill(listOf(hash('A'), hash('B'), hash('C')), dead = hash('B'), target = 2, mint = vk::mint)
+        assertEquals(listOf(hash('A'), hash('C'), hash('Z')), fill.hashes)
+        assertEquals(1, vk.calls)
+    }
+
     @Test fun anInvalidTokenStopsMintingAndKeepsTheLivePool() = runTest {
         val vk = FakeVk(VkApiResult.ApiError(5, "User authorization failed"), ok(hash('C')))
         val fill = VkHashPool.fill(listOf(hash('A')), dead = null, target = 3, mint = vk::mint)

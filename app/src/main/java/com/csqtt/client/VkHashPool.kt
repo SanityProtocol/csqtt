@@ -21,8 +21,9 @@ internal object VkHashPool {
         pool.map(String::trim).filter { it.isNotEmpty() && it != dead?.trim() }.distinct()
 
     /**
-     * Mints what [pool] lacks of [target] calls after dropping [dead]. A pool larger than the target is kept whole (it
-     * never shrinks: every live call serves participants). [mint] makes one call, its retries and pacing included.
+     * Mints what [pool] lacks of [target] calls after dropping [dead]. A pool larger than the target is kept whole, and
+     * its dead hash is replaced too (it never shrinks: every live call serves participants). [mint] makes one call, its
+     * retries and pacing included.
      */
     suspend fun fill(
         pool: List<String>,
@@ -31,9 +32,11 @@ internal object VkHashPool {
         mint: suspend () -> VkApiResult<VkApi.StartedCall>,
     ): Fill {
         val hashes = alive(pool, dead).toMutableList()
+        // a dead hash is replaced even in a pool above the target, which never shrinks (review F1)
+        val wanted = maxOf(target, alive(pool, null).size)
         val errors = ArrayList<String>()
         var minted = 0
-        repeat((target - hashes.size).coerceAtLeast(0)) {
+        repeat((wanted - hashes.size).coerceAtLeast(0)) {
             when (val result = mint()) {
                 is VkApiResult.Ok -> if (result.value.hash !in hashes) {
                     hashes += result.value.hash
