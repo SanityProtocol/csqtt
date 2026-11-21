@@ -288,6 +288,9 @@ class SettingsStore(context: Context) {
         private val DEPLOY_SERVER_NAME = profileString("deploy_server_name", VPS)
         private val DEPLOY_PROFILE_NAMES_CLEANED = booleanPreferencesKey("deploy_profile_names_cleaned_v2")
         private val DEFAULT_ROLE_DECIDED = booleanPreferencesKey("default_role_decided")
+        // M-75: the user's role — what the app shows (the Deploy tab, the config import) — apart from how each profile
+        // connects (CSQTT_LINK_MODE, per profile). Written once by store step 4 from the active profile's link mode.
+        private val UI_OWNER_MODE = booleanPreferencesKey("ui_owner_mode")
         private val DEPLOY_LOGIN = profileString("deploy_login", VPS)
         private val DEPLOY_PASSWORD = profileString("deploy_password", VPS)
         private val DEPLOY_PASSWORD_ENCRYPTED = profileString("deploy_password_encrypted", VPS)
@@ -473,7 +476,7 @@ class SettingsStore(context: Context) {
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 3
+        internal const val STORE_SCHEMA = 4
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -524,6 +527,14 @@ class SettingsStore(context: Context) {
                 // as its own (M-170)
                 for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
                     step { subscriptionSlotToLink(prefs, profile) }
+                }
+            }
+            if (from < 4) {
+                // 2.6.0, B5e1 (M-75): the role the switch showed becomes the user's own, kept when profiles change
+                step {
+                    if (prefs[UI_OWNER_MODE] == null) {
+                        prefs[UI_OWNER_MODE] = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] != true
+                    }
                 }
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
@@ -611,7 +622,7 @@ class SettingsStore(context: Context) {
                 TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
                 BATTERY_SAVER_MODE to StoredKind.STRING, BATTERY_SAVER_PERCENT to StoredKind.INT,
                 THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
-                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT,
+                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT, UI_OWNER_MODE to StoredKind.BOOLEAN,
             ).associate { (key, kind) -> key.name to kind }
         }
 
@@ -856,6 +867,47 @@ class SettingsStore(context: Context) {
             prefs[getProfileKey(DEPLOY_PEER_PORT, vps)] = peer
             prefs[getProfileKey(DEPLOY_WEB_PORT, vps)] = web
             prefs[getProfileKey(DEPLOY_SSH_PORT, vps)] = ssh
+        }
+
+        /** M-70: what an import can write into, read in one pass. */
+        internal fun linkImportState(prefs: Preferences, tunnelRunning: Boolean): LinkImportState {
+            val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            val endpoint = if (prefs[getProfileKey(CSQTT_LINK_MODE, active)] == true) {
+                parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, active)].orEmpty())?.let { LinkImport.endpoint(it.host, it.port) }
+            } else {
+                prefs[getProfileKey(PEER, active)]?.takeIf { it.isNotBlank() }?.let { peer ->
+                    LinkImport.endpoint(
+                        peer,
+                        prefs[getProfileKey(SERVER_PEER_PORT, active)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
+                    )
+                }
+            }
+            return LinkImportState(
+                activeName = profileDisplayName(prefs, active),
+                activeEmpty = listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL).all { prefs[getProfileKey(it, active)].isNullOrBlank() },
+                activeEndpoint = endpoint,
+                freeProfile = profileIndices.any { it != active && !profileInUse(prefs, it) },
+                tunnelRunning = tunnelRunning,
+            )
+        }
+
+        /**
+         * M-70: [link] into the active profile or a new one (made active only when [activate]: never while the tunnel
+         * runs). One store path for the deep link, the QR scan and the config dialog: a former owner profile's own
+         * fields go, the link starts with all its hashes in use, and the profile leaves any subscription it came from
+         * (whose next refresh would otherwise put its own node back). The profile written, or null with none free.
+         */
+        internal fun importParticipantLinkKeys(prefs: MutablePreferences, link: String, intoNew: Boolean, activate: Boolean): Int? {
+            val previousActive = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            val target = if (intoNew) addProfileKeys(prefs, linkMode = true) ?: return null else previousActive
+            if (intoNew && !activate) prefs[ACTIVE_PROFILE] = previousActive
+            useParticipantLink(prefs, target, link)
+            prefs.remove(getProfileKey(LINK_HASHES_REMOVED, target))
+            listOf(SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE).forEach {
+                prefs.remove(getProfileKey(it, target))
+            }
+            prefs.remove(getProfileKey(SUBSCRIPTION_POWER, target))
+            return target
         }
 
         /** «Добавить профиль»: the first free slot but the active one, cleared, in [linkMode], made active; null if none. */
@@ -1416,8 +1468,9 @@ class SettingsStore(context: Context) {
     suspend fun addProfile(): Int? {
         var added: Int? = null
         dataStore.edit { prefs ->
-            val linkMode = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] ?: false
-            added = addProfileKeys(prefs, linkMode)
+            // a participant's new profile waits for a link, an owner's for a server (M-75: by role, not by the profile)
+            val activeLinkMode = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] ?: false
+            added = addProfileKeys(prefs, linkMode = !(prefs[UI_OWNER_MODE] ?: !activeLinkMode))
         }
         return added
     }
@@ -1876,19 +1929,28 @@ class SettingsStore(context: Context) {
     }
 
     suspend fun saveCsqttParticipantLink(link: String) {
+        dataStore.edit { prefs -> importParticipantLinkKeys(prefs, link, intoNew = false, activate = true) }
+    }
+
+    internal suspend fun linkImportState(tunnelRunning: Boolean): LinkImportState =
+        linkImportState(dataStore.data.first(), tunnelRunning)
+
+    /** M-70: the profile [link] was written to and its name, or null when no profile was free. */
+    internal suspend fun importParticipantLink(link: String, intoNew: Boolean, activate: Boolean): Pair<Int, String>? {
+        var written: Pair<Int, String>? = null
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(CSQTT_LINK, profile)] = link
-            prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
-            // a new link from the owner (QR, csqtt:// link) starts with all of its hashes in use
-            prefs.remove(getProfileKey(LINK_HASHES_REMOVED, profile))
-            // the link replaces this configuration, so the slot leaves any subscription it came from: otherwise the
-            // subscription's next refresh would match the slot again and silently put its own node back
-            listOf(SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE).forEach {
-                prefs.remove(getProfileKey(it, profile))
-            }
-            prefs.remove(getProfileKey(SUBSCRIPTION_POWER, profile))
+            importParticipantLinkKeys(prefs, link, intoNew, activate)?.let { written = it to profileDisplayName(prefs, it) }
         }
+        return written
+    }
+
+    /** M-75: the user's role, «Владелец» (true) or «Участник»; until step 4 has run, what the active profile shows. */
+    val uiOwnerMode: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[UI_OWNER_MODE] ?: (prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] != true)
+    }
+
+    suspend fun saveUiOwnerMode(owner: Boolean) {
+        dataStore.edit { it[UI_OWNER_MODE] = owner }
     }
 
     suspend fun saveParticipantShowLogs(show: Boolean) {

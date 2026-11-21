@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.csqtt.client.BatterySaver
 import com.csqtt.client.ui.legacy.dialogs.ImportExportDialog
 import com.csqtt.client.ui.legacy.dialogs.QrScannerDialog
+import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
 import com.csqtt.client.ui.legacy.dialogs.SupportDeveloperDialog
 import com.csqtt.client.ui.legacy.dialogs.TurnSubnetsDialog
 
@@ -63,7 +64,9 @@ fun FloatingToolbar(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val selectedRole = if (csqttLinkMode) UsageRole.Participant else UsageRole.Owner
+    // M-75: the role is the user's (what the app shows); how this profile connects is its own switch below
+    val uiOwnerMode by settingsStore.uiOwnerMode.collectAsStateWithLifecycle(initialValue = !csqttLinkMode)
+    val selectedRole = if (uiOwnerMode) UsageRole.Owner else UsageRole.Participant
     val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(
         initialValue = CsqttConstants.VkAuth.MODE_CALLS,
     )
@@ -76,6 +79,7 @@ fun FloatingToolbar(
     )
     var isExpanded by rememberSaveable { mutableStateOf(false) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
+    var scannedLink by rememberSaveable { mutableStateOf<String?>(null) }
     var showSupportDeveloperDialog by rememberSaveable { mutableStateOf(false) }
     var showImportExportDialog by rememberSaveable { mutableStateOf(false) }
     var showAutoPauseInfo by rememberSaveable { mutableStateOf(false) }
@@ -127,7 +131,7 @@ fun FloatingToolbar(
             )
         }
 
-        if (!csqttLinkMode) {
+        if (uiOwnerMode) {
             IconButton(
                 onClick = { showImportExportDialog = true },
                 modifier = Modifier.size(38.dp),
@@ -190,18 +194,21 @@ fun FloatingToolbar(
         QrScannerDialog(
             onDismissRequest = { showQrScanner = false },
             onQrCodeScanned = { rawLink ->
-                val parsed = com.csqtt.client.ui.legacy.utils.parseCsqttLink(rawLink)
-                if (parsed != null) {
+                if (com.csqtt.client.ui.legacy.utils.parseCsqttLink(rawLink) != null) {
+                    // the same confirmation as a csqtt:// link (M-70): never written without asking
                     showQrScanner = false
-                    scope.launch {
-                        settingsStore.saveCsqttParticipantLink(rawLink.trim())
-                    }
-                    Toast.makeText(context, "Ссылка подключена из QR-кода ✓ Режим участника включён", Toast.LENGTH_LONG).show()
+                    scannedLink = rawLink.trim()
+                    true
                 } else {
                     Toast.makeText(context, "QR-код не содержит ссылку CSQTT", Toast.LENGTH_SHORT).show()
+                    false
                 }
             }
         )
+    }
+
+    scannedLink?.let { raw ->
+        LinkImportDialog(settingsStore = settingsStore, raw = raw, onDone = { scannedLink = null })
     }
 
     if (isExpanded) {
@@ -267,10 +274,8 @@ fun FloatingToolbar(
                         ),
                         selected = selectedRole,
                         onSelected = { role ->
-                            val participant = role == UsageRole.Participant
-                            if (participant != csqttLinkMode) {
-                                scope.launch { settingsStore.saveCsqttLinkMode(participant) }
-                            }
+                            val owner = role == UsageRole.Owner
+                            if (owner != uiOwnerMode) scope.launch { settingsStore.saveUiOwnerMode(owner) }
                         },
                         modifier = Modifier
                             .padding(horizontal = 4.dp)
@@ -308,6 +313,15 @@ fun FloatingToolbar(
                             confirmingDelete = false
                         },
                         itemEditable = { it != ADD_PROFILE_KEY },
+                    )
+
+                    // M-75: how this profile connects; a change mid-session would land at the next recovery restart
+                    CsqttSettingRow(
+                        title = "Подключение по ссылке",
+                        description = if (tunnelRunning) "Отключите туннель, чтобы переключить" else "Ссылка csqtt:// от владельца сервера",
+                        checked = csqttLinkMode,
+                        enabled = !tunnelRunning,
+                        onCheckedChange = { enabled -> scope.launch { settingsStore.saveCsqttLinkMode(enabled) } },
                     )
 
                     CompactDropdownSetting(
@@ -367,7 +381,7 @@ fun FloatingToolbar(
                         )
                     }
 
-                    if (csqttLinkMode) {
+                    if (!uiOwnerMode) {
                         CsqttSettingRow(
                             title = "Показывать логи",
                             checked = participantShowLogs,

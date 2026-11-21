@@ -55,6 +55,9 @@ internal data class SubscriptionImportSummary(
     val updated: Int,
     val skipped: Int,
     val firstProfile: Int?,
+    /** M-70: nodes left out because all 32 profiles are taken, or because another profile already uses the address. */
+    val noFreeProfile: Int = 0,
+    val endpointElsewhere: Int = 0,
 ) {
     val total: Int get() = imported + updated
 
@@ -62,7 +65,13 @@ internal data class SubscriptionImportSummary(
         val parts = mutableListOf<String>()
         if (imported > 0) parts += "добавлено: $imported"
         if (updated > 0) parts += "обновлено: $updated"
-        if (skipped > 0) parts += "пропущено: $skipped"
+        if (skipped > 0) {
+            val why = listOfNotNull(
+                "нет свободного профиля: $noFreeProfile".takeIf { noFreeProfile > 0 },
+                "адрес уже в другом профиле: $endpointElsewhere".takeIf { endpointElsewhere > 0 },
+            )
+            parts += "пропущено: $skipped" + if (why.isEmpty()) "" else " (${why.joinToString("; ")})"
+        }
         return if (parts.isEmpty()) "Подписка не изменилась" else "Подписка — ${parts.joinToString(", ")}"
     }
 }
@@ -359,6 +368,8 @@ internal object SubscriptionImporter {
         var imported = 0
         var updated = 0
         var skipped = preview.skipped
+        var noFreeProfile = 0
+        var endpointElsewhere = 0
 
         for (node in preview.nodes) {
             val endpoint = endpointKey(node.host, node.port)
@@ -390,12 +401,14 @@ internal object SubscriptionImporter {
             // subscription) — do not duplicate it in a limited set of slots.
             if (globalEndpoints.containsKey(endpoint)) {
                 skipped++
+                endpointElsewhere++
                 continue
             }
 
             val slot = freeSlots.firstOrNull { it !in usedSlots }
             if (slot == null) {
                 skipped++
+                noFreeProfile++
                 continue
             }
             usedSlots += slot
@@ -417,6 +430,8 @@ internal object SubscriptionImporter {
             updated = updated,
             skipped = skipped,
             firstProfile = writes.firstOrNull()?.profile,
+            noFreeProfile = noFreeProfile,
+            endpointElsewhere = endpointElsewhere,
         )
     }
 

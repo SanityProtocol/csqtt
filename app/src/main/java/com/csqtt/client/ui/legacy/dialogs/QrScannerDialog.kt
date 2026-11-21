@@ -48,7 +48,8 @@ import kotlin.math.min
 @Composable
 fun QrScannerDialog(
     onDismissRequest: () -> Unit,
-    onQrCodeScanned: (String) -> Unit,
+    /** True when the code was taken; false (not a csqtt link) resumes scanning after a pause (L-48). */
+    onQrCodeScanned: (String) -> Boolean,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -146,7 +147,7 @@ fun QrScannerDialog(
                                     scanned = true
                                     val text = result.text
                                     previewView.post {
-                                        onQrCodeScanned(text)
+                                        if (!onQrCodeScanned(text)) previewView.postDelayed({ scanned = false }, 2_000L)
                                     }
                                 }
                             } catch (_: NotFoundException) {

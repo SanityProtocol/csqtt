@@ -78,6 +78,7 @@ import com.csqtt.client.ui.legacy.InfoTab
 import com.csqtt.client.ui.legacy.components.LocalCsqttHeaderActions
 import com.csqtt.client.ui.legacy.design.CsqttMotion
 import com.csqtt.client.ui.legacy.design.CsqttShapes
+import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
 import com.csqtt.client.ui.legacy.dialogs.VkAuthDialog
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import kotlinx.coroutines.delay
@@ -104,6 +105,7 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val PENDING_DEEP_LINK = "pending_deep_link"
         @Volatile
         var activeActivities = 0
         val isForeground: Boolean
@@ -128,7 +130,14 @@ class MainActivity : ComponentActivity() {
         val discardStaleUiState = UpdateLaunchGuard.consumeStaleSavedState(this)
         super.onCreate(if (discardStaleUiState) null else savedInstanceState)
 
-        importCsqttLink(intent)
+        // M-71: the launching intent's link is read once. A recreate (theme, locale, process death) restores the link
+        // still waiting for its answer instead of reading the intent again, which showed the dialog a second time.
+        val restored = savedInstanceState?.takeUnless { discardStaleUiState }
+        if (restored == null) {
+            importCsqttLink(intent)
+        } else {
+            pendingDeepLink = restored.getString(PENDING_DEEP_LINK)
+        }
 
         TunnelManager.initObservers(this)
 
@@ -203,25 +212,10 @@ class MainActivity : ComponentActivity() {
                             },
                         )
                     }
-                    // A csqtt:// link, the classic way: confirm, then it replaces the current configuration. It stays
-                    // pending until the user chooses, so the dialog survives a rotation instead of losing the link.
+                    // A csqtt:// link: one confirmation naming where it goes (M-70). It stays pending until the user
+                    // chooses, so the dialog survives a rotation or a recreate instead of losing the link.
                     pendingDeepLink?.let { raw ->
-                        val link = remember(raw) { parseCsqttLink(raw) } ?: return@let
-                        AlertDialog(
-                            onDismissRequest = { pendingDeepLink = null },
-                            title = { Text("Импорт конфигурации CSQTT") },
-                            text = { Text("Хост: ${link.host}\nPeer: ${link.port}\n\nЗаменить текущую конфигурацию?") },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    pendingDeepLink = null
-                                    scope.launch {
-                                        settingsStore.saveCsqttParticipantLink(raw)
-                                        authContext.showRaisedToast("Конфигурация CSQTT успешно подключена", Toast.LENGTH_SHORT)
-                                    }
-                                }) { Text("Импортировать") }
-                            },
-                            dismissButton = { TextButton(onClick = { pendingDeepLink = null }) { Text("Отмена") } },
-                        )
+                        LinkImportDialog(settingsStore = settingsStore, raw = raw, onDone = { pendingDeepLink = null })
                     }
                 }
             }
@@ -241,6 +235,11 @@ class MainActivity : ComponentActivity() {
                 VkAuthDialog(onToken = onToken, onDismiss = { showVkAuthDialog = false })
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingDeepLink?.let { outState.putString(PENDING_DEEP_LINK, it) }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -345,10 +344,10 @@ internal fun navigationSwipeProgress(totalDrag: Float, containerWidth: Int): Flo
 
 internal fun shouldCommitNavigationSwipe(progress: Float): Boolean = progress > 0.4f
 
-internal fun resolveActiveNavIds(csqttLinkMode: Boolean, participantShowLogs: Boolean): List<Int> {
+internal fun resolveActiveNavIds(participantRole: Boolean, participantShowLogs: Boolean): List<Int> {
     val allIds = listOf(0, 1, 2, 3, 4)
     return allIds.filter { id ->
-        if (csqttLinkMode) {
+        if (participantRole) {
             if (id == 2) return@filter false
             if (id == 3 && !participantShowLogs) return@filter false
         }
@@ -381,10 +380,13 @@ fun MainScreen(
         initialValue = TunnelAuthSnapshot()
     )
     val csqttLinkMode = tunnelAuthSettings.csqttLinkMode
+    // M-75: the tabs follow the user's role; how the active profile connects is csqttLinkMode
+    val storedOwnerMode by settingsStore.uiOwnerMode.collectAsStateWithLifecycle(initialValue = null)
+    val participantRole = storedOwnerMode?.not() ?: csqttLinkMode
     // null until the store has emitted: the tab is corrected only from loaded values (§4.2 rule 3)
     val storedParticipantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(initialValue = null)
     val participantShowLogs = storedParticipantShowLogs ?: false
-    val navInputsLoaded = tunnelAuthSettings.isLoaded && storedParticipantShowLogs != null
+    val navInputsLoaded = tunnelAuthSettings.isLoaded && storedParticipantShowLogs != null && storedOwnerMode != null
     val autoPauseOnWifi by settingsStore.autoPauseOnWifi.collectAsStateWithLifecycle(initialValue = false)
     val excludedApps by settingsStore.excludedApps.collectAsStateWithLifecycle(
         initialValue = SettingsStore.cachedExcludedApps ?: ""
@@ -417,15 +419,15 @@ fun MainScreen(
 
     val serverRoutingActive by TunnelManager.serverRoutingActive.collectAsStateWithLifecycle()
 
-    val activeNavItems = remember(csqttLinkMode, participantShowLogs) {
-        val allowedIds = resolveActiveNavIds(csqttLinkMode, participantShowLogs)
+    val activeNavItems = remember(participantRole, participantShowLogs) {
+        val allowedIds = resolveActiveNavIds(participantRole, participantShowLogs)
         navItems.filter { it.id in allowedIds }
     }
     val tabStateHolder = rememberSaveableStateHolder()
     val profileEpoch by settingsStore.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
-    LaunchedEffect(navInputsLoaded, csqttLinkMode, participantShowLogs) {
+    LaunchedEffect(navInputsLoaded, participantRole, participantShowLogs) {
         if (!navInputsLoaded) return@LaunchedEffect
-        if (csqttLinkMode) {
+        if (participantRole) {
             if (selectedTab == 2 || (selectedTab == 3 && !participantShowLogs)) {
                 selectedTab = 0
             }
@@ -531,7 +533,7 @@ fun MainScreen(
                         .fillMaxSize()
                         .padding(padding)
                         .consumeWindowInsets(padding)
-                        .pointerInput(selectedTab, csqttLinkMode, participantShowLogs) {
+                        .pointerInput(selectedTab, participantRole, participantShowLogs) {
                         var totalDrag = 0f
                         detectHorizontalDragGestures(
                             onDragStart = {
@@ -612,12 +614,12 @@ fun MainScreen(
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }
-                                2 -> if (!csqttLinkMode) {
+                                2 -> if (!participantRole) {
                                     DeployTab(settingsStore, deploySettings)
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }
-                                3 -> if (!csqttLinkMode || participantShowLogs) {
+                                3 -> if (!participantRole || participantShowLogs) {
                                     LogsTab(settingsStore)
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())

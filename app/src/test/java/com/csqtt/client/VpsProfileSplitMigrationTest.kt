@@ -23,7 +23,7 @@ class VpsProfileSplitMigrationTest {
         val prefs = atVersion1(Store253Snapshots.owner)
         val before = asMap(prefs)
         SettingsStore.migrateStore(prefs)
-        assertEquals(setOf("vps_ref", "store_schema_version"), changedKeys(before, asMap(prefs)))
+        assertEquals(setOf("vps_ref", "store_schema_version", "ui_owner_mode"), changedKeys(before, asMap(prefs)))
         assertEquals(0, SettingsStore.linkedVps(prefs, 0))
         assertEquals(SettingsStore.STORE_SCHEMA, prefs[intPreferencesKey("store_schema_version")])
         assertTrue(SettingsStore.profileInUse(prefs, 0))
@@ -52,7 +52,7 @@ class VpsProfileSplitMigrationTest {
         val before = asMap(prefs)
         SettingsStore.migrateStore(prefs)
         assertNull(SettingsStore.linkedVps(prefs, 3))
-        assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(prefs)))
+        assertEquals(setOf("store_schema_version", "ui_owner_mode"), changedKeys(before, asMap(prefs)))
     }
 
     @Test

@@ -199,6 +199,20 @@ internal fun SettingsTabContent(
     var peerPortEdited by rememberSaveable(activeProfile) { mutableStateOf(false) }
     var linkSaveJob by remember { mutableStateOf<Job?>(null) }
     var linkText by remember(activeProfile, csqttLink) { mutableStateOf(csqttLink) }
+
+    /**
+     * M-72: the field writes only a link that parses and differs from the stored one (a blank field clears it), through
+     * the one import path (M-70): a new link starts with all its hashes and leaves any subscription.
+     */
+    suspend fun persistLinkText(text: String) {
+        val value = when {
+            text.isBlank() -> ""
+            parseCsqttLink(text) != null -> text
+            else -> return
+        }
+        if (value == csqttLink) return
+        if (value.isEmpty()) settingsStore.saveCsqttLink("") else settingsStore.saveCsqttParticipantLink(value)
+    }
     var initialized by rememberSaveable(activeProfile) { mutableStateOf(false) }
     val participantMode = csqttLinkMode
 
@@ -337,7 +351,12 @@ internal fun SettingsTabContent(
     DisposableEffect(Unit) {
         onDispose {
             saveJob?.cancel()
-            linkSaveJob?.cancel()
+            // a paste made just before leaving the screen is saved, not dropped
+            if (linkSaveJob?.isActive == true) {
+                linkSaveJob?.cancel()
+                val pending = linkText
+                TunnelManager.scope.launch { persistLinkText(pending) }
+            }
             peerPortSaveJob?.cancel()
         }
     }
@@ -552,7 +571,7 @@ internal fun SettingsTabContent(
                             linkSaveJob?.cancel()
                             linkSaveJob = scope.launch {
                                 delay(300)
-                                settingsStore.saveCsqttLink(linkText)
+                                persistLinkText(linkText)
                             }
                         },
                         label = { Text("Ссылка csqtt://", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
@@ -600,6 +619,21 @@ internal fun SettingsTabContent(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(bottom = 4.dp),
+                            )
+                            // L-54: servers no longer put the owner's token in links (S1); such a link is an old one
+                            Text(
+                                text = "Устаревшая ссылка: попросите у владельца новую",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 12.dp),
+                            )
+                        } else if (parsedCsqttLink != null) {
+                            // L-54: a link with no hashes and no token connects only with the participant's own
+                            Text(
+                                text = "В ссылке нет VK-хешей: добавьте свои или войдите в VK",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(bottom = 12.dp),
                             )
                         }

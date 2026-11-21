@@ -9,6 +9,7 @@ internal data class SubscriptionRefreshOutcome(
     val message: String,
     val title: String = "",
     val nodes: Int = 0,
+    val skipped: Int = 0,
 )
 
 /** Manual and scheduled subscription refreshes share one lock per URL. */
@@ -52,6 +53,13 @@ internal object SubscriptionSync {
                         99,
                         true,
                     )
+                } else if (outcome.skipped > 0) {
+                    // M-70: nodes that found no profile are said, with the reason, instead of vanishing
+                    TunnelManager.updateLog(
+                        "subscription_refresh_${meta.url.hashCode()}",
+                        "[ПОДПИСКА] «${current.title.ifBlank { "Подписка" }}»: ${outcome.message}",
+                        60,
+                    )
                 }
             }
         }
@@ -91,6 +99,7 @@ internal object SubscriptionSync {
                     message = summary.message(),
                     title = meta?.title?.takeIf { it.isNotBlank() } ?: result.preview.title,
                     nodes = result.preview.nodes.size,
+                    skipped = summary.skipped,
                 )
             }
             is SubscriptionFetchResult.Failure ->
