@@ -1626,6 +1626,11 @@ class SettingsStore(context: Context) {
     }
 
     /** Whether [profile] is the only one linking its VPS record (the delete dialog says the SSH data go too). */
+    /** Whether [profile] is a profile the user has (profileInUse); false for any index outside the slots. */
+    internal suspend fun isProfileInUse(profile: Int): Boolean =
+        profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX &&
+            dataStore.data.map { prefs -> profileInUse(prefs, profile) }.first()
+
     internal suspend fun profileHoldsOnlyLinkToVps(profile: Int): Boolean =
         dataStore.data.map { prefs -> isOnlyLinkToVps(prefs, profile) }.first()
 

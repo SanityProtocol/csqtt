@@ -277,7 +277,7 @@ fun FloatingToolbar(
                             if (key == ADD_PROFILE_KEY) {
                                 // the operator (2026-11-21): the new profile opens for editing and the tunnel stays on the
                                 // profile it runs on (adding is not a pick: nothing reconnects)
-                                val runName = profileList.firstOrNull { it.first == TunnelManager.sourceProfile }?.second
+                                val runName = profileList.firstOrNull { it.first == TunnelManager.runTargetProfile() }?.second
                                     ?.takeIf { TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.autoPausedForWifi.value }
                                 scope.launch {
                                     when {

@@ -525,7 +525,9 @@ fun MainScreen(
                                 TunnelManager.running.value, TunnelManager.starting.value,
                                 TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
                             )
-                            if (ProfileSwitch.pickReconnects(runOn, profile, TunnelManager.sourceProfile)) {
+                            // against where the run is going: a switch still pending counts as done (verify N1)
+                            if (ProfileSwitch.pickReconnects(runOn, profile, TunnelManager.runTargetProfile())) {
+                                TunnelManager.switchTarget = profile
                                 runCatching {
                                     context.startService(
                                         Intent(context, TunnelService::class.java)

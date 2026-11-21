@@ -173,6 +173,15 @@ object TunnelManager {
 
     internal fun runIdentity(): RunIdentity = RunIdentity(sourceProfile, sourceLink, ownerHashes)
 
+    /**
+     * The profile a pick is switching the run to, until switchProfile applies it or the run ends (verify N1): picks and
+     * the add toast compare against where the run is going, not the old profile it still runs on meanwhile.
+     */
+    @Volatile
+    internal var switchTarget: Int? = null
+
+    internal fun runTargetProfile(): Int = switchTarget ?: sourceProfile
+
     internal fun applyRunIdentity(identity: RunIdentity) {
         sourceProfile = identity.profile
         sourceLink = identity.link
@@ -1387,7 +1396,7 @@ object TunnelManager {
                 restartJob = null
                 if (replacing) terminateProcessLocked(processIdentity, finishVkCalls = true)
                 applyRunIdentity(identity)
-                clearLogs()
+                switchTarget = null
                 config.value = null
                 wrapAuthTimeoutCount = 0
                 crashRestartStreak = 0
@@ -2133,6 +2142,8 @@ object TunnelManager {
         lifecycleCommand.incrementAndGet()
         startStopMutex.withLock {
             autoPausedForWifi.value = true
+            // a pause that cancels a pending switch keeps the pick for the resume (verify N1)
+            switchTarget?.let { sourceProfile = it }
             stopLocked(processIdentity, preserveWifiAutoPause = true)
             starting.value = false
             updateLog(
@@ -2156,6 +2167,7 @@ object TunnelManager {
         notifyController: Boolean = true,
     ) {
         stopping.value = true
+        switchTarget = null
         lifecycleState.requestStop()
         if (!preserveWifiAutoPause) autoPausedForWifi.value = false
         pausedForNoNetwork.reset()

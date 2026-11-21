@@ -393,6 +393,8 @@ class TunnelService : Service() {
         if (isStopping || autoPausedForWifi || TunnelManager.stopping.value) return
         if (!TunnelManager.running.value && !TunnelManager.starting.value) return
         VkAutoCallsManager.finishActiveCalls()
+        // the new connection's log starts here, so the switch's own lines (its calls, its pool) stay (verify N6)
+        TunnelManager.clearLogs()
         if (!restoreTunnel(switching = true)) stopTunnel()
     }
 
@@ -426,7 +428,8 @@ class TunnelService : Service() {
                 // the operator (2026-11-21): a run resumes on its own profile, even while another one is open for editing
                 // (added while connected); a switch is the pick itself
                 if (!switching) {
-                    ProfileSwitch.resumeProfile(TunnelManager.sourceProfile, store.activeProfile.first())
+                    val runProfile = TunnelManager.sourceProfile
+                    ProfileSwitch.resumeProfile(runProfile, store.activeProfile.first(), store.isProfileInUse(runProfile))
                         ?.let { store.saveActiveProfile(it) }
                 }
                 autoPauseRequested = true

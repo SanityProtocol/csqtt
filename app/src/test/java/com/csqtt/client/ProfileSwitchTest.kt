@@ -29,9 +29,13 @@ class ProfileSwitchTest {
     }
 
     @Test
-    fun `a resume brings the run's own profile back while another one is open`() {
-        assertEquals(0, ProfileSwitch.resumeProfile(runProfile = 0, active = 3))
-        assertNull(ProfileSwitch.resumeProfile(runProfile = 3, active = 3))
-        assertNull("a process that died knows no run profile", ProfileSwitch.resumeProfile(runProfile = -1, active = 3))
+    fun `a resume brings the run's own profile back while another one is open, unless it was deleted`() {
+        assertEquals(0, ProfileSwitch.resumeProfile(runProfile = 0, active = 3, runProfileInUse = true))
+        assertNull(ProfileSwitch.resumeProfile(runProfile = 3, active = 3, runProfileInUse = true))
+        assertNull("deleted while paused", ProfileSwitch.resumeProfile(runProfile = 0, active = 3, runProfileInUse = false))
+        assertNull(
+            "a process that died knows no run profile",
+            ProfileSwitch.resumeProfile(runProfile = -1, active = 3, runProfileInUse = false),
+        )
     }
 }
