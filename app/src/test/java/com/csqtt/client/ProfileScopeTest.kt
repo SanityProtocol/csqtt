@@ -30,6 +30,18 @@ class ProfileScopeTest {
     }
 
     @Test
+    fun `deleting the run's profile leaves the run on the open one, deleting another keeps it`() {
+        val prefs = prefs(active = 3, run = 7)
+        prefs[androidx.datastore.preferences.core.stringPreferencesKey("peer_7")] = "192.0.2.7"
+        SettingsStore.deleteProfileKeys(prefs, 7)
+        assertEquals(null, prefs[intPreferencesKey("run_profile")])
+        assertEquals(3, SettingsStore.selectedProfileOf(prefs, ProfileScope.Run))
+        val other = prefs(active = 3, run = 7)
+        SettingsStore.deleteProfileKeys(other, 5)
+        assertEquals(7, SettingsStore.selectedProfileOf(other, ProfileScope.Run))
+    }
+
+    @Test
     fun `a fixed scope reads its profile`() {
         assertEquals(12, SettingsStore.selectedProfileOf(prefs(active = 3, run = 7), ProfileScope.Fixed(12)))
     }

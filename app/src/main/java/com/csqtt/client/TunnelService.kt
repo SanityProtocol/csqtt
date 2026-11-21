@@ -422,8 +422,11 @@ class TunnelService : Service() {
         startJob = serviceScope.launch {
             try {
                 // a resume and the system's restart come back on the run's own profile (run_profile); a switch resolves
-                // the pick, which is the active profile
-                val store = SettingsStore(appContext, if (switching) ProfileScope.Active else ProfileScope.Run)
+                // its pick, fixed (an add while it runs does not change it, run-profile review P1)
+                val store = SettingsStore(
+                    appContext,
+                    if (switching) TunnelManager.switchTarget?.let { ProfileScope.Fixed(it) } ?: ProfileScope.Active else ProfileScope.Run,
+                )
 
                 val wasRunning = store.tunnelWasRunning.first()
                 if (!wasRunning) {
@@ -620,7 +623,7 @@ class TunnelService : Service() {
                 if (panel != null) {
                     val fill = VkHashPool.fillLock.withLock {
                         val pool = store.vkPool(panel.vps)
-                        VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash)
+                        VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash, tokenStore = store)
                             .also { if (it.hashes != pool) store.saveVkPool(panel.vps, it.hashes) }
                     }
                     // a pool with live hashes serves on without a token (B5e3b); an empty one needs a sign-in to refill
@@ -643,6 +646,7 @@ class TunnelService : Service() {
                     applicationContext,
                     token,
                     workersPerHash,
+                    tokenStore = store,
                     clearStoredTokenOnInvalid = !tokenFromLink,
                 )
                 val result = attempt.result ?: return HashResolution.Failed(attempt.tokenInvalid)
@@ -1306,7 +1310,7 @@ class TunnelService : Service() {
         domainRoutingSettingsJob?.cancel()
         domainRoutingSettingsJob = serviceScope.launch {
             SettingsStore(applicationContext, ProfileScope.Run).routingSnapshot.drop(1).collect {
-                if (TunnelManager.running.value) TunnelManager.pushLocalRouting(applicationContext)
+                if (TunnelManager.running.value && !TunnelManager.stopping.value) TunnelManager.pushLocalRouting(applicationContext)
             }
         }
     }

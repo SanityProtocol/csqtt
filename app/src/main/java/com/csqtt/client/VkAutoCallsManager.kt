@@ -55,10 +55,12 @@ object VkAutoCallsManager {
             CsqttConstants.VkAutoHash.AUTO_CALL_LARGE_DELAY_MS
         }
 
+    /** [tokenStore]: the store [token] was read from — a refused token is cleared there, not in another profile. */
     suspend fun startAutoCalls(
         context: Context,
         token: String,
         workers: Int,
+        tokenStore: SettingsStore,
         clearStoredTokenOnInvalid: Boolean = true,
     ): StartAttempt {
         if (token.isBlank()) return StartAttempt(null, tokenInvalid = true)
@@ -105,7 +107,7 @@ object VkAutoCallsManager {
                     )
                     if (VkApi.isTokenInvalid(result)) {
                         if (clearStoredTokenOnInvalid) {
-                            runCatching { SettingsStore(context, ProfileScope.Run).clearVkAccessToken() }
+                            runCatching { tokenStore.clearVkAccessToken() }
                         }
                         log(
                             "vk_token_invalidated",
@@ -166,6 +168,7 @@ object VkAutoCallsManager {
         pool: List<String>,
         dead: String?,
         workers: Int,
+        tokenStore: SettingsStore,
     ): VkHashPool.Fill {
         synchronized(pendingLogsLock) { pendingLogs.clear() }
         val target = callCountForWorkers(workers)
@@ -186,7 +189,7 @@ object VkAutoCallsManager {
         }
         fill.errors.forEach { log("vk_auto_call_error", "[ERR] Звонок VK не создан · $it", 90, true) }
         if (fill.tokenInvalid) {
-            runCatching { SettingsStore(context, ProfileScope.Run).clearVkAccessToken() }
+            runCatching { tokenStore.clearVkAccessToken() }
             log("vk_token_invalidated", "[ERR] Токен VK недействителен · войдите снова", 95, true)
         }
         if (fill.hashes.isNotEmpty()) {

@@ -779,6 +779,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             val subscription = prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim().orEmpty()
             clearProfileKeys(prefs, profile, CONNECTION)
             bumpProfileEpoch(prefs)
+            // a run whose profile is deleted (allowed while paused on Wi-Fi) follows the open profile from now on
+            if (prefs[RUN_PROFILE] == profile) prefs.remove(RUN_PROFILE)
             if ((prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX) == profile) {
                 val next = profileIndices.firstOrNull { it != profile && profileInUse(prefs, it) } ?: profile
                 prefs[ACTIVE_PROFILE] = next

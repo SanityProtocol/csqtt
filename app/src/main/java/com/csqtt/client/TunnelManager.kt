@@ -2144,7 +2144,10 @@ object TunnelManager {
         startStopMutex.withLock {
             autoPausedForWifi.value = true
             // a pause that cancels a pending switch keeps the pick for the resume (verify N1)
-            switchTarget?.let { sourceProfile = it }
+            switchTarget?.let { target ->
+                sourceProfile = target
+                activeContext()?.let { ctx -> scope.launch { runCatching { SettingsStore(ctx).saveRunProfile(target) } } }
+            }
             stopLocked(processIdentity, preserveWifiAutoPause = true)
             starting.value = false
             updateLog(
@@ -2427,7 +2430,8 @@ object TunnelManager {
     internal fun importRoutingRules(ctx: Context, plan: RoutingImportPlan) {
         val appContext = ctx.applicationContext
         scope.launch {
-            SettingsStore(appContext, ProfileScope.Run).applyRoutingImport(plan)
+            // the screen's import edits the profile open in it (run-profile review F1)
+            SettingsStore(appContext).applyRoutingImport(plan)
             if (plan.apps != null) reloadVpn()
         }
     }

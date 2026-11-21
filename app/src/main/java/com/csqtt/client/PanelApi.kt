@@ -126,7 +126,7 @@ internal object VkPoolHandOver {
         val token = store.vkAccessToken.first()
         VkHashPool.fillLock.withLock {
             val pool = store.vkPool(vps)
-            val fill = VkAutoCallsManager.fillPool(context, token, pool, null, workers)
+            val fill = VkAutoCallsManager.fillPool(context, token, pool, null, workers, tokenStore = store)
             if (fill.hashes != pool) store.saveVkPool(vps, fill.hashes)
         }
         var result: Pair<Boolean, String>? = null
