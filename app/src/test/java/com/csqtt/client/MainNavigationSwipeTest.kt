@@ -21,12 +21,4 @@ class MainNavigationSwipeTest {
         assertTrue(shouldCommitNavigationSwipe(0.4001f))
         assertTrue(shouldCommitNavigationSwipe(1f))
     }
-
-    @Test
-    fun participantModeFiltersDeployAndLogsByDefault() {
-        assertEquals(listOf(0, 1, 2, 3, 4), resolveActiveNavIds(participantRole = false, participantShowLogs = false))
-        assertEquals(listOf(0, 1, 2, 3, 4), resolveActiveNavIds(participantRole = false, participantShowLogs = true))
-        assertEquals(listOf(0, 1, 4), resolveActiveNavIds(participantRole = true, participantShowLogs = false))
-        assertEquals(listOf(0, 1, 3, 4), resolveActiveNavIds(participantRole = true, participantShowLogs = true))
-    }
 }

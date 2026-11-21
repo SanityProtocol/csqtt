@@ -28,7 +28,6 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.verticalScroll
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.TunnelManager
-import com.csqtt.client.ui.legacy.components.CsqttSegmentedControl
 import com.csqtt.client.ui.legacy.components.CsqttSettingRow
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
@@ -46,8 +45,6 @@ import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
 import com.csqtt.client.ui.legacy.dialogs.SupportDeveloperDialog
 import com.csqtt.client.ui.legacy.dialogs.TurnSubnetsDialog
 
-private enum class UsageRole { Owner, Participant }
-
 @Composable
 fun FloatingToolbar(
     settingsStore: SettingsStore,
@@ -64,18 +61,13 @@ fun FloatingToolbar(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    // M-75: the role is the user's (what the app shows); how this profile connects is its own switch below
-    val uiOwnerMode by settingsStore.uiOwnerMode.collectAsStateWithLifecycle(initialValue = !csqttLinkMode)
-    val selectedRole = if (uiOwnerMode) UsageRole.Owner else UsageRole.Participant
+    // the roles batch: what the app shows, app-wide; how each profile connects follows what it holds (the Туннель tab)
+    val showDeployTab by settingsStore.showDeployTab.collectAsStateWithLifecycle(initialValue = false)
+    val showLogsTab by settingsStore.showLogsTab.collectAsStateWithLifecycle(initialValue = true)
     val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(
         initialValue = CsqttConstants.VkAuth.MODE_CALLS,
     )
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
-    val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
-    val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
-    val tunnelPaused by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
-    // M-75 / review F2: a link-mode change waits for an idle tunnel, a starting or paused one included
-    val linkModeLocked = tunnelRunning || tunnelStarting || tunnelStopping || tunnelPaused
     val selectedTurnSubnet by settingsStore.selectedTurnSubnet.collectAsStateWithLifecycle(
         initialValue = "",
     )
@@ -97,9 +89,6 @@ fun FloatingToolbar(
     )
     var showTurnSubnetsDialog by rememberSaveable { mutableStateOf(false) }
     val profileList by settingsStore.profileList.collectAsStateWithLifecycle(initialValue = emptyList())
-    val participantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(
-        initialValue = false,
-    )
     var editingProfileIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     var editingProfileName by rememberSaveable { mutableStateOf("") }
     // the delete confirmation inside the name dialog; true when the profile's VPS record (SSH data) goes with it
@@ -136,18 +125,16 @@ fun FloatingToolbar(
             )
         }
 
-        if (uiOwnerMode) {
-            IconButton(
-                onClick = { showImportExportDialog = true },
-                modifier = Modifier.size(38.dp),
-            ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_import_export),
-                    contentDescription = "Импорт и экспорт конфигурации",
-                    modifier = Modifier.size(24.dp),
-                    tint = settingsIconTint,
-                )
-            }
+        IconButton(
+            onClick = { showImportExportDialog = true },
+            modifier = Modifier.size(38.dp),
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_import_export),
+                contentDescription = "Импорт и экспорт конфигурации",
+                modifier = Modifier.size(24.dp),
+                tint = settingsIconTint,
+            )
         }
 
         IconButton(
@@ -261,30 +248,16 @@ fun FloatingToolbar(
                         }
                     }
 
-                    Text(
-                        "Ваша роль использования",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
+                    CsqttSettingRow(
+                        title = "Показывать деплой",
+                        checked = showDeployTab,
+                        onCheckedChange = { checked -> scope.launch { settingsStore.saveShowDeployTab(checked) } },
                     )
 
-                    CsqttSegmentedControl(
-                        options = listOf(
-                            UsageRole.Owner to "Владелец",
-                            UsageRole.Participant to "Участник",
-                        ),
-                        selected = selectedRole,
-                        onSelected = { role ->
-                            val owner = role == UsageRole.Owner
-                            if (owner != uiOwnerMode) scope.launch { settingsStore.saveUiOwnerMode(owner) }
-                        },
-                        modifier = Modifier
-                            .padding(horizontal = 4.dp)
-                            .height(CsqttSizes.CompactControlHeight),
+                    CsqttSettingRow(
+                        title = "Показывать логи",
+                        checked = showLogsTab,
+                        onCheckedChange = { checked -> scope.launch { settingsStore.saveShowLogsTab(checked) } },
                     )
 
                     HorizontalDivider(
@@ -318,15 +291,6 @@ fun FloatingToolbar(
                             confirmingDelete = false
                         },
                         itemEditable = { it != ADD_PROFILE_KEY },
-                    )
-
-                    // M-75: how this profile connects; a change mid-session would land at the next recovery restart
-                    CsqttSettingRow(
-                        title = "Подключение по ссылке",
-                        description = if (linkModeLocked) "Отключите туннель, чтобы переключить" else "Ссылка csqtt:// от владельца сервера",
-                        checked = csqttLinkMode,
-                        enabled = !linkModeLocked,
-                        onCheckedChange = { enabled -> scope.launch { settingsStore.saveCsqttLinkMode(enabled) } },
                     )
 
                     CompactDropdownSetting(
@@ -382,16 +346,6 @@ fun FloatingToolbar(
                             enabled = batterySaverMode == BatterySaver.MODE_LEVEL,
                             onSelected = { key ->
                                 key.toIntOrNull()?.let { percent -> scope.launch { settingsStore.saveBatterySaverPercent(percent) } }
-                            },
-                        )
-                    }
-
-                    if (!uiOwnerMode) {
-                        CsqttSettingRow(
-                            title = "Показывать логи",
-                            checked = participantShowLogs,
-                            onCheckedChange = { checked ->
-                                scope.launch { settingsStore.saveParticipantShowLogs(checked) }
                             },
                         )
                     }

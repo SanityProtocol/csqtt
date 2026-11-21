@@ -24,8 +24,8 @@ class StoreMigrationsTest {
         val (before, after) = migrate(Store253Snapshots.owner)
         assertEquals(
             // vps_ref: step 2 (B5b2) links its deploy data as record 0
-            // ui_owner_mode: step 4 (B5e1, M-75) records the role the switch showed
-            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref", "ui_owner_mode"),
+            // show_deploy_tab: steps 4 and 5 (B5e1, the roles batch) turn the owner role the switch showed into it
+            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref", "show_deploy_tab"),
             changedKeys(before, after),
         )
         assertNull(after["ui_design"])
@@ -42,7 +42,7 @@ class StoreMigrationsTest {
     @Test
     fun `a participant's own hashes lose the link's copies, so a taken-out owner hash stays out`() {
         val (before, after) = migrate(Store253Snapshots.participant)
-        assertEquals(setOf("vk_hashes_3", "workers_per_hash_3", "store_schema_version", "ui_owner_mode"), changedKeys(before, after))
+        assertEquals(setOf("vk_hashes_3", "workers_per_hash_3", "store_schema_version"), changedKeys(before, after))
         assertEquals(Store253Snapshots.ownHash, after["vk_hashes_3"])
         assertEquals(10, after["workers_per_hash_3"])
         // what the tunnel then uses: the owner's B (A was taken out), then the participant's C
@@ -74,7 +74,7 @@ class StoreMigrationsTest {
         noHashes[stringPreferencesKey("csqtt_link_3")] = "csqtt://connect?v=2&host=198.51.100.9&peer=46000&password=p"
         val before = asMap(noHashes)
         SettingsStore.migrateStore(noHashes)
-        assertEquals(setOf("workers_per_hash_3", "store_schema_version", "ui_owner_mode"), changedKeys(before, asMap(noHashes)))
+        assertEquals(setOf("workers_per_hash_3", "store_schema_version"), changedKeys(before, asMap(noHashes)))
     }
 
     @Test
@@ -83,7 +83,7 @@ class StoreMigrationsTest {
         // step 3 (B5c1, M-170): the subscription slot becomes the participant link it came from
         assertEquals(
             setOf(
-                "vk_auth_mode_2", "workers_per_hash_2", "store_schema_version", "ui_owner_mode",
+                "vk_auth_mode_2", "workers_per_hash_2", "store_schema_version", "show_deploy_tab",
                 "peer_5", "connection_password_local_5", "csqtt_link_5", "csqtt_link_mode_5",
             ),
             changedKeys(before, after),
@@ -106,9 +106,9 @@ class StoreMigrationsTest {
         val (before, after) = migrate(Store253Snapshots.allSlots)
         val expected = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
             .map { if (it == 0) "workers_per_hash" else "workers_per_hash_$it" }
-            .toSet() + "store_schema_version" + "ui_owner_mode"
+            .toSet() + "store_schema_version" + "show_deploy_tab"
         assertEquals(expected, changedKeys(before, after))
-        assertEquals(setOf(10), expected.minus(setOf("store_schema_version", "ui_owner_mode")).map { after[it] }.toSet())
+        assertEquals(setOf(10), expected.minus(setOf("store_schema_version", "show_deploy_tab")).map { after[it] }.toSet())
     }
 
     @Test
@@ -132,13 +132,15 @@ class StoreMigrationsTest {
     }
 
     @Test
-    fun `step 4 keeps the role the switch showed, from the active profile, once`() {
-        assertEquals(true, migrate(Store253Snapshots.owner).second["ui_owner_mode"])
-        assertEquals(false, migrate(Store253Snapshots.participant).second["ui_owner_mode"])
+    fun `steps 4 and 5 turn the role the switch showed, from the active profile, into the deploy tab switch`() {
+        assertEquals(true, migrate(Store253Snapshots.owner).second["show_deploy_tab"])
+        assertNull(migrate(Store253Snapshots.participant).second["show_deploy_tab"])
         val chosen = Store253Snapshots.participant.replace(
             "\"booleans\": {", "\"booleans\": {\"ui_owner_mode\": true, ",
         )
-        assertEquals(true, migrate(chosen).second["ui_owner_mode"])
+        val after = migrate(chosen).second
+        assertEquals(true, after["show_deploy_tab"])
+        assertNull(after["ui_owner_mode"])
     }
 
     @Test
@@ -149,6 +151,6 @@ class StoreMigrationsTest {
         )
         val after = migrate(activeSubscription).second
         assertEquals(true, after["csqtt_link_mode_5"])   // step 3 made it a link profile
-        assertEquals(true, after["ui_owner_mode"])        // the role stays the one shown
+        assertEquals(true, after["show_deploy_tab"])      // the role stays the one shown
     }
 }

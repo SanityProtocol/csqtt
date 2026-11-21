@@ -81,6 +81,9 @@ class UpgradeFrom253Test {
             assertEquals("subpw", subscriptionLink.password)
             assertEquals(7, prefs[intPreferencesKey("vps_ref_7")])
             assertNull(prefs[intPreferencesKey("vps_ref_3")])
+            // the roles batch: the owner role the switch showed became «Показывать деплой»; the role key is gone
+            assertEquals(true, prefs[booleanPreferencesKey("show_deploy_tab")])
+            assertNull(prefs[booleanPreferencesKey("ui_owner_mode")])
         } finally {
             file.delete()
         }

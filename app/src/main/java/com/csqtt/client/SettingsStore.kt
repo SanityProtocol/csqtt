@@ -265,7 +265,6 @@ class SettingsStore(context: Context) {
         private val LINK_HASHES_REMOVED = profileString("link_hashes_removed")
         // S8: the owner's hashes the server last sent for a link profile; they replace the link's at the next connect
         private val RECEIVED_HASHES = profileString("received_hashes")
-        private val PARTICIPANT_SHOW_LOGS = profileBoolean("participant_show_logs")
         private val SUBSCRIPTION_URL = profileString("subscription_url")
         private val SUBSCRIPTION_TITLE = profileString("subscription_title")
         private val SUBSCRIPTION_UUID = profileString("subscription_uuid")
@@ -302,9 +301,12 @@ class SettingsStore(context: Context) {
         private val DEPLOY_SERVER_NAME = profileString("deploy_server_name", VPS)
         private val DEPLOY_PROFILE_NAMES_CLEANED = booleanPreferencesKey("deploy_profile_names_cleaned_v2")
         private val DEFAULT_ROLE_DECIDED = booleanPreferencesKey("default_role_decided")
-        // M-75: the user's role — what the app shows (the Deploy tab, the config import) — apart from how each profile
-        // connects (CSQTT_LINK_MODE, per profile). Written once by store step 4 from the active profile's link mode.
+        // M-75's role (B5e1, written by store step 4); step 5 turns it into SHOW_DEPLOY_TAB and removes it
         private val UI_OWNER_MODE = booleanPreferencesKey("ui_owner_mode")
+        // the roles batch: what the app shows, app-wide — «Показывать логи» (on when absent) and «Показывать деплой» (off
+        // when absent: a fresh install is participant-first, D28). How each profile connects follows what it holds
+        private val SHOW_LOGS_TAB = booleanPreferencesKey("show_logs_tab")
+        private val SHOW_DEPLOY_TAB = booleanPreferencesKey("show_deploy_tab")
         // M-79: VK accounts by user id, each token encrypted (VkAccounts); a device credential, never in a backup
         private val VK_ACCOUNTS = stringPreferencesKey("vk_accounts_v1")
         private val DEPLOY_LOGIN = profileString("deploy_login", VPS)
@@ -497,7 +499,7 @@ class SettingsStore(context: Context) {
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 4
+        internal const val STORE_SCHEMA = 5
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -559,13 +561,28 @@ class SettingsStore(context: Context) {
                     if (prefs[UI_OWNER_MODE] == null) prefs[UI_OWNER_MODE] = !activeLinkModeShown
                 }
             }
+            if (from < 5) {
+                // 2.6.0, the roles batch: the role becomes «Показывать деплой», on for an owner or anyone with a server (a
+                // VPS record with an address); else nothing is written, so a fresh install shows Логи and not Деплой
+                // (D28). Logs are shown to everyone now, so the per-profile participant choice goes
+                step {
+                    val owner = prefs[UI_OWNER_MODE] ?: !activeLinkModeShown
+                    val hasServer = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
+                        .any { !prefs[getProfileKey(DEPLOY_IP, it)].isNullOrBlank() }
+                    if (prefs[SHOW_DEPLOY_TAB] == null && (owner || hasServer)) prefs[SHOW_DEPLOY_TAB] = true
+                }
+                prefs.remove(UI_OWNER_MODE)
+                for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
+                    prefs.remove(booleanPreferencesKey(slotKeyName("participant_show_logs", profile)))
+                }
+            }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
         }
 
         /**
-         * A fresh install starts as «Участник»: most people get a link or a QR code, not a server. Decided once, under its
-         * own flag, by what is stored: an install that holds a connection, a link, a subscription, hashes, a deployed
-         * server or a chosen role keeps its role (a 2.5.3 install has the flag, so its link modes stay as they are).
+         * A fresh install's profile waits for a link: most people get a link or a QR code, not a server. Decided once, under
+         * its own flag, by what is stored: an install that holds a connection, a link, a subscription, hashes, a deployed
+         * server or a chosen mode keeps it (a 2.5.3 install has the flag, so its link modes stay as they are).
          */
         private fun decideDefaultRole(prefs: MutablePreferences) {
             if (prefs[DEFAULT_ROLE_DECIDED] == true) return
@@ -644,7 +661,8 @@ class SettingsStore(context: Context) {
                 TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
                 BATTERY_SAVER_MODE to StoredKind.STRING, BATTERY_SAVER_PERCENT to StoredKind.INT,
                 THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
-                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT, UI_OWNER_MODE to StoredKind.BOOLEAN,
+                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT, SHOW_LOGS_TAB to StoredKind.BOOLEAN,
+                SHOW_DEPLOY_TAB to StoredKind.BOOLEAN,
             ).associate { (key, kind) -> key.name to kind }
         }
 
@@ -656,7 +674,7 @@ class SettingsStore(context: Context) {
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
-                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS,
+                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS, UI_OWNER_MODE,
             ).mapTo(HashSet()) { it.name }
         }
 
@@ -1029,6 +1047,27 @@ class SettingsStore(context: Context) {
             return free
         }
 
+        /** «Добавить профиль» (the roles batch): the new profile waits for a server with «Показывать деплой» on, else a link. */
+        internal fun newProfileKeys(prefs: MutablePreferences): Int? =
+            addProfileKeys(prefs, linkMode = prefs[SHOW_DEPLOY_TAB] != true)
+
+        /**
+         * The roles batch: a profile's mode follows what it holds. While it holds nothing for its mode (no link in link
+         * mode, no server address otherwise) and no subscription, its mode can still change; after that it is fixed.
+         */
+        internal fun profileModeSwitchable(prefs: Preferences, profile: Int): Boolean {
+            val content = if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) CSQTT_LINK else PEER
+            return listOf(content, SUBSCRIPTION_URL).all { prefs[getProfileKey(it, profile)].isNullOrBlank() }
+        }
+
+        /** «Ввести сервер вручную» / «Подключиться по ссылке csqtt://»: an empty [profile] waits for the other kind. */
+        internal fun switchEmptyProfileModeKeys(prefs: MutablePreferences, profile: Int, linkMode: Boolean): Boolean {
+            val key = getProfileKey(CSQTT_LINK_MODE, profile)
+            if ((prefs[key] == true) == linkMode || !profileModeSwitchable(prefs, profile)) return false
+            prefs[key] = linkMode
+            return true
+        }
+
         /** Classic's dropdown (M-97): the profiles in use and the active one, with their names. */
         internal fun profileList(prefs: Preferences): List<Pair<Int, String>> {
             val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
@@ -1044,7 +1083,9 @@ class SettingsStore(context: Context) {
         /**
          * A deploy that succeeded: the profile that started it takes the server (its address when it had none, both ports,
          * the synced [password]) and the record's drafts go, only while [profile] still links [vps]: a profile deleted or
-         * relinked during the deploy is not brought back. Ports other than 46000/46002 turn «Ручные порты» on.
+         * relinked during the deploy is not brought back. Ports other than 46000/46002 turn «Ручные порты» on. An empty
+         * link profile becomes an own-server profile on this server (an address it kept hidden from an older mode is
+         * replaced); a profile holding a link keeps it.
          */
         internal fun applyDeployedServer(
             prefs: MutablePreferences,
@@ -1056,7 +1097,8 @@ class SettingsStore(context: Context) {
             password: String?,
         ): Boolean {
             if (linkedVps(prefs, profile) != vps) return false
-            if (prefs[getProfileKey(PEER, profile)].isNullOrBlank() && host.isNotBlank()) {
+            val becameOwn = switchEmptyProfileModeKeys(prefs, profile, linkMode = false)
+            if ((becameOwn || prefs[getProfileKey(PEER, profile)].isNullOrBlank()) && host.isNotBlank()) {
                 prefs[getProfileKey(PEER, profile)] = host
             }
             prefs[getProfileKey(SERVER_PEER_PORT, profile)] = peerPort
@@ -1102,9 +1144,13 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false
     }
-    val participantShowLogs: Flow<Boolean> = dataStore.data.map { prefs ->
+    /**
+     * The roles batch: the active profile's link mode while it is empty (the Туннель tab may offer the other mode), null
+     * once it holds a link, a server or a subscription.
+     */
+    internal val emptyProfileMode: Flow<Boolean?> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(PARTICIPANT_SHOW_LOGS, profile)] ?: false
+        if (profileModeSwitchable(prefs, profile)) prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true else null
     }
 
     val peer: Flow<String> = dataStore.data.map { prefs ->
@@ -1571,14 +1617,10 @@ class SettingsStore(context: Context) {
     internal suspend fun profileHoldsOnlyLinkToVps(profile: Int): Boolean =
         dataStore.data.map { prefs -> isOnlyLinkToVps(prefs, profile) }.first()
 
-    /** «Добавить профиль»: a free slot, cleared, with the current role; null when all 32 are in use. */
+    /** «Добавить профиль»: a free slot, cleared and made active (newProfileKeys); null when all 32 are in use. */
     suspend fun addProfile(): Int? {
         var added: Int? = null
-        dataStore.edit { prefs ->
-            // a participant's new profile waits for a link, an owner's for a server (M-75: by role, not by the profile)
-            val activeLinkMode = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] ?: false
-            added = addProfileKeys(prefs, linkMode = !(prefs[UI_OWNER_MODE] ?: !activeLinkMode))
-        }
+        dataStore.edit { prefs -> added = newProfileKeys(prefs) }
         return added
     }
 
@@ -1844,10 +1886,11 @@ class SettingsStore(context: Context) {
     // Last in the class, after every property: Kotlin assigns them top to bottom, and the collectors below start on
     // other threads at once. Above the flows they read, a collector could run before its flow was assigned and call
     // collect on null, which crashed the app at launch on slower phones (Redmi).
-    /** M-75: the user's role, «Владелец» (true) or «Участник»; until step 4 has run, what the active profile shows. */
-    val uiOwnerMode: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[UI_OWNER_MODE] ?: (prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] != true)
-    }
+    /** «Показывать логи», app-wide (the roles batch): on unless turned off. */
+    val showLogsTab: Flow<Boolean> = dataStore.data.map { it[SHOW_LOGS_TAB] ?: true }
+
+    /** «Показывать деплой», app-wide: off unless turned on; store step 5 turned it on for owners and anyone with a server. */
+    val showDeployTab: Flow<Boolean> = dataStore.data.map { it[SHOW_DEPLOY_TAB] ?: false }
 
     init {
         if (uiCacheStarted.compareAndSet(false, true)) {
@@ -2091,15 +2134,22 @@ class SettingsStore(context: Context) {
         return written
     }
 
-    suspend fun saveUiOwnerMode(owner: Boolean) {
-        dataStore.edit { it[UI_OWNER_MODE] = owner }
+    suspend fun saveShowLogsTab(show: Boolean) {
+        dataStore.edit { it[SHOW_LOGS_TAB] = show }
     }
 
-    suspend fun saveParticipantShowLogs(show: Boolean) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(PARTICIPANT_SHOW_LOGS, profile)] = show
-        }
+    suspend fun saveShowDeployTab(show: Boolean) {
+        dataStore.edit { it[SHOW_DEPLOY_TAB] = show }
+    }
+
+    /**
+     * The Туннель tab's text actions: the active profile waits for a server ([linkMode] false) or a link, only while it
+     * is still empty (checked in the same edit). False when nothing changed.
+     */
+    suspend fun switchEmptyProfileMode(linkMode: Boolean): Boolean {
+        var switched = false
+        dataStore.edit { prefs -> switched = switchEmptyProfileModeKeys(prefs, prefs[ACTIVE_PROFILE] ?: 0, linkMode) }
+        return switched
     }
 
     suspend fun saveWorkersPerHash(workersPerHash: Int) {
@@ -2954,7 +3004,6 @@ class SettingsStore(context: Context) {
             settings.put("turn_subnet_ip_limit", prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] ?: "ALL")
             settings.put("logging_enabled", prefs[LOGGING_ENABLED] ?: true)
             settings.put("detailed_logs", prefs[DETAILED_LOGS] ?: false)
-            settings.put("participant_show_logs", prefs[getProfileKey(PARTICIPANT_SHOW_LOGS, p)] ?: false)
             root.put("settings", settings)
         }
 
@@ -3071,8 +3120,6 @@ class SettingsStore(context: Context) {
                     if (s.has("turn_subnet_ip_limit")) mutable[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] = s.getString("turn_subnet_ip_limit")
                     if (s.has("logging_enabled")) mutable[LOGGING_ENABLED] = s.getBoolean("logging_enabled")
                     if (s.has("detailed_logs")) mutable[DETAILED_LOGS] = s.getBoolean("detailed_logs")
-                    val currentProfile = mutable[ACTIVE_PROFILE] ?: 0
-                    if (s.has("participant_show_logs")) mutable[getProfileKey(PARTICIPANT_SHOW_LOGS, currentProfile)] = s.getBoolean("participant_show_logs")
                 }
             }
             true

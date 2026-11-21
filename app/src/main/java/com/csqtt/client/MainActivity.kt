@@ -360,16 +360,12 @@ internal fun navigationSwipeProgress(totalDrag: Float, containerWidth: Int): Flo
 
 internal fun shouldCommitNavigationSwipe(progress: Float): Boolean = progress > 0.4f
 
-internal fun resolveActiveNavIds(participantRole: Boolean, participantShowLogs: Boolean): List<Int> {
-    val allIds = listOf(0, 1, 2, 3, 4)
-    return allIds.filter { id ->
-        if (participantRole) {
-            if (id == 2) return@filter false
-            if (id == 3 && !participantShowLogs) return@filter false
-        }
-        true
-    }
-}
+/** The tabs shown: Подключение, Туннель and Исключения always; Деплой and Логи by their switches in «Настройки». */
+internal fun resolveActiveNavIds(showDeploy: Boolean, showLogs: Boolean): List<Int> =
+    listOf(0, 1, 2, 3, 4).filter { id -> (id != 2 || showDeploy) && (id != 3 || showLogs) }
+
+/** A tab that is hidden is left for «Подключение». */
+internal fun tabAfterNavChange(selectedTab: Int, activeIds: List<Int>): Int = if (selectedTab in activeIds) selectedTab else 0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -396,13 +392,13 @@ fun MainScreen(
         initialValue = TunnelAuthSnapshot()
     )
     val csqttLinkMode = tunnelAuthSettings.csqttLinkMode
-    // M-75: the tabs follow the user's role; how the active profile connects is csqttLinkMode
-    val storedOwnerMode by settingsStore.uiOwnerMode.collectAsStateWithLifecycle(initialValue = null)
-    val participantRole = storedOwnerMode?.not() ?: csqttLinkMode
-    // null until the store has emitted: the tab is corrected only from loaded values (§4.2 rule 3)
-    val storedParticipantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(initialValue = null)
-    val participantShowLogs = storedParticipantShowLogs ?: false
-    val navInputsLoaded = tunnelAuthSettings.isLoaded && storedParticipantShowLogs != null && storedOwnerMode != null
+    // the roles batch: the Деплой and Логи tabs follow two app-wide switches, null until the store has emitted, so the
+    // tab is corrected only from loaded values (§4.2 rule 3)
+    val storedShowDeploy by settingsStore.showDeployTab.collectAsStateWithLifecycle(initialValue = null)
+    val storedShowLogs by settingsStore.showLogsTab.collectAsStateWithLifecycle(initialValue = null)
+    val showDeployTab = storedShowDeploy ?: false
+    val showLogsTab = storedShowLogs ?: true
+    val navInputsLoaded = storedShowDeploy != null && storedShowLogs != null
     val autoPauseOnWifi by settingsStore.autoPauseOnWifi.collectAsStateWithLifecycle(initialValue = false)
     val excludedApps by settingsStore.excludedApps.collectAsStateWithLifecycle(
         initialValue = SettingsStore.cachedExcludedApps ?: ""
@@ -435,25 +431,14 @@ fun MainScreen(
 
     val serverRoutingActive by TunnelManager.serverRoutingActive.collectAsStateWithLifecycle()
 
-    val activeNavItems = remember(participantRole, participantShowLogs) {
-        val allowedIds = resolveActiveNavIds(participantRole, participantShowLogs)
+    val activeNavItems = remember(showDeployTab, showLogsTab) {
+        val allowedIds = resolveActiveNavIds(showDeployTab, showLogsTab)
         navItems.filter { it.id in allowedIds }
     }
     val tabStateHolder = rememberSaveableStateHolder()
     val profileEpoch by settingsStore.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
-    LaunchedEffect(navInputsLoaded, participantRole, participantShowLogs) {
-        if (!navInputsLoaded) return@LaunchedEffect
-        if (participantRole) {
-            if (selectedTab == 2 || (selectedTab == 3 && !participantShowLogs)) {
-                selectedTab = 0
-            }
-        }
-    }
     LaunchedEffect(navInputsLoaded, activeNavItems) {
-        if (!navInputsLoaded) return@LaunchedEffect
-        if (activeNavItems.none { it.id == selectedTab }) {
-            selectedTab = 0
-        }
+        if (navInputsLoaded) selectedTab = tabAfterNavChange(selectedTab, activeNavItems.map { it.id })
     }
 
     LaunchedEffect(tunnelRunning, tunnelAutoPausedForWifi) {
@@ -549,7 +534,7 @@ fun MainScreen(
                         .fillMaxSize()
                         .padding(padding)
                         .consumeWindowInsets(padding)
-                        .pointerInput(selectedTab, participantRole, participantShowLogs) {
+                        .pointerInput(selectedTab, showDeployTab, showLogsTab) {
                         var totalDrag = 0f
                         detectHorizontalDragGestures(
                             onDragStart = {
@@ -630,12 +615,12 @@ fun MainScreen(
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }
-                                2 -> if (!participantRole) {
+                                2 -> if (showDeployTab) {
                                     DeployTab(settingsStore, deploySettings)
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }
-                                3 -> if (!participantRole || participantShowLogs) {
+                                3 -> if (showLogsTab) {
                                     LogsTab(settingsStore)
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())

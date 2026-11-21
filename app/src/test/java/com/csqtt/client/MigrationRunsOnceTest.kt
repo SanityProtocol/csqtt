@@ -35,13 +35,13 @@ class MigrationRunsOnceTest {
     }
 
     @Test
-    fun `a fresh install starts as a participant, with the version and the role flags only`() {
+    fun `a fresh install's profile waits for a link, with the version and the role flag only`() {
         val prefs = mutablePreferencesOf()
         SettingsStore.migrateStore(prefs)
         assertEquals(
-            // ui_owner_mode: step 4 (B5e1, M-75) keeps the participant role as the user's
+            // no show_deploy_tab nor show_logs_tab: Логи shown, Деплой hidden (the roles batch, D28)
             mapOf(
-                "csqtt_link_mode" to true, "default_role_decided" to true, "ui_owner_mode" to false,
+                "csqtt_link_mode" to true, "default_role_decided" to true,
                 "store_schema_version" to SettingsStore.STORE_SCHEMA,
             ),
             asMap(prefs),

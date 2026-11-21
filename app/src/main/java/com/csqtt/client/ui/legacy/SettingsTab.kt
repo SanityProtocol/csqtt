@@ -131,6 +131,12 @@ internal fun SettingsTabContent(
     var showSecretsDialog by rememberSaveable { mutableStateOf(false) }
 
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
+    // the roles batch: an empty profile's mode changes by a text action, only with the tunnel idle — a starting, stopping
+    // or Wi-Fi-paused one counts as running (B5e1 review F2), since a change would land at a recovery restart
+    val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
+    val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
+    val tunnelPaused by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
+    val emptyProfileMode by settingsStore.emptyProfileMode.collectAsStateWithLifecycle(initialValue = null)
     var showHashModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showHashModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showWorkModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
@@ -471,6 +477,17 @@ internal fun SettingsTabContent(
         autoHashMode -> effectiveVkTokenActive
         else -> filledHashCount > 0
     }
+    val modeAction = profileModeAction(
+        emptyProfileLinkMode = emptyProfileMode,
+        field = if (participantMode) linkText else peerInput,
+        tunnelBusy = tunnelRunning || tunnelStarting || tunnelStopping || tunnelPaused,
+    )
+    fun switchProfileMode(linkMode: Boolean) {
+        // checked again at the click; the store checks again that the profile is still empty
+        val busy = TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value ||
+            TunnelManager.autoPausedForWifi.value
+        if (!busy) scope.launch { settingsStore.switchEmptyProfileMode(linkMode) }
+    }
     val peerRequiredError = showRequiredFieldErrors && !participantMode && !isPeerValid
     val peerPortRequiredError = showRequiredFieldErrors && !participantMode && showPeerPort && !isPeerPortValid
     val linkRequiredError = showRequiredFieldErrors && participantMode && parsedCsqttLink == null
@@ -609,6 +626,10 @@ internal fun SettingsTabContent(
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.padding(bottom = 12.dp),
                         )
+                    }
+
+                    if (modeAction == ProfileModeAction.ENTER_SERVER) {
+                        ProfileModeTextAction("Ввести сервер вручную") { switchProfileMode(linkMode = false) }
                     }
 
                     if (linkHashes.isNotEmpty()) {
@@ -778,6 +799,10 @@ internal fun SettingsTabContent(
                                 unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
                             ),
                         )
+                    }
+
+                    if (modeAction == ProfileModeAction.USE_LINK) {
+                        ProfileModeTextAction("Подключиться по ссылке csqtt://") { switchProfileMode(linkMode = true) }
                     }
 
                     VkHashModeControls(
@@ -1360,4 +1385,37 @@ private fun VkHashModeControls(
         onSelected = onSelected,
         leadingContent = null,
     )
+}
+
+/** The roles batch: the Туннель tab's one way to change an empty profile's mode. */
+internal enum class ProfileModeAction { ENTER_SERVER, USE_LINK }
+
+/**
+ * Which text action the Туннель tab offers: only while the profile is empty ([emptyProfileLinkMode], the store's
+ * emptyProfileMode: its link mode, or null once it holds a link, a server or a subscription), the field on screen is
+ * empty too and the tunnel is idle.
+ */
+internal fun profileModeAction(emptyProfileLinkMode: Boolean?, field: String, tunnelBusy: Boolean): ProfileModeAction? =
+    when {
+        emptyProfileLinkMode == null || field.isNotBlank() || tunnelBusy -> null
+        emptyProfileLinkMode -> ProfileModeAction.ENTER_SERVER
+        else -> ProfileModeAction.USE_LINK
+    }
+
+@Composable
+private fun ProfileModeTextAction(text: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+        modifier = Modifier.padding(bottom = 8.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
