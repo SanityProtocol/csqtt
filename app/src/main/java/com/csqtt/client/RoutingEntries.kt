@@ -52,6 +52,8 @@ internal object RoutingEntries {
     fun isValidIpRule(raw: String): Boolean {
         val item = raw.trim()
         if (item.isEmpty()) return false
+        // a break inside an entry would split the core's command line and lose every rule after it (review F1)
+        if (item.any { it.isWhitespace() || it.isISOControl() }) return false
         if (item.contains('/')) {
             val parts = item.split('/')
             if (parts.size != 2) return false

@@ -37,6 +37,11 @@ class ServerRuleSkipInvalidTest {
         val command = parsed.rule.toUpdate().toCommand()
         assertEquals(1, command.lines().size)
         assertEquals(8, command.substringAfter('|').split(';').size)
+        // the same for addresses: a break inside an entry is refused, not joined into the line (review F1)
+        val ips = listOf("1.2.3.4\n/8", "1.2.3.4\n-1.2.3.9", "1.2.3.4 /8", "10.0.0.0/8")
+        val parsedIps = requireNotNull(parseServerRoutingRuleChecked(rule(ips = ips)))
+        assertEquals(listOf("10.0.0.0/8"), parsedIps.rule.ips)
+        assertEquals(1, parsedIps.rule.toUpdate().toCommand().lines().size)
     }
 
     @Test fun structuralBreaksStillFailClosed() {

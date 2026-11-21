@@ -848,6 +848,10 @@ object TunnelManager {
         }
         if (newServerRule != null || activeServerRoutingRule.value != null) {
             applyServerRoutingRule(newServerRule, clientIp, dns)
+        } else {
+            // every new core process sends TUNCONF: a network swap, crash or VK-recovery restart starts the core with the
+            // routing of the tunnel's start, so the local rules in force now are sent again (review B1, M-57)
+            activeContext()?.let(::pushLocalRouting)
         }
 
         activeContext()?.let { ctx ->
