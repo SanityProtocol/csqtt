@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -1222,6 +1223,23 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] ?: ""
     }
 
+    /** M-57: the active profile's domain and IP rules in one read (the black domain list falls back to the legacy key). */
+    internal val routingSnapshot: Flow<RoutingSnapshot> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        RoutingSnapshot(
+            domainIsWhitelist = prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] ?: false,
+            directDomainsBlack = prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)]
+                ?: prefs[getProfileKey(DIRECT_DOMAINS, profile)]
+                ?: "",
+            directDomainsWhite = prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] ?: "",
+            excludeRuZonesEnabled = prefs[getProfileKey(EXCLUDE_RU_ZONES_ENABLED, profile)] ?: false,
+            templateDomainsEnabled = prefs[getProfileKey(TEMPLATE_DOMAINS_ENABLED, profile)] ?: false,
+            ipIsWhitelist = prefs[getProfileKey(IP_IS_WHITELIST, profile)] ?: false,
+            directIpsBlack = prefs[getProfileKey(DIRECT_IPS_BLACK, profile)] ?: "",
+            directIpsWhite = prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] ?: "",
+        )
+    }.distinctUntilChanged()
+
     /** See PROFILE_EPOCH: each tab's saved form state is keyed on the profile and this. */
     val profileEpoch: Flow<Int> = dataStore.data.map { it[PROFILE_EPOCH] ?: 0 }
 
@@ -2285,6 +2303,52 @@ class SettingsStore(context: Context) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(DOMAIN_ROUTING_ENABLED, profile)] = enabled
+        }
+    }
+
+    /** The domains dialog's save, in one write: the live push never sees the mode without its list (M-57). */
+    suspend fun saveDomainRules(isWhitelist: Boolean, black: String, white: String) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] = isWhitelist
+            prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)] = black
+            prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] = white
+        }
+    }
+
+    /** The IP dialog's save, in one write. */
+    suspend fun saveIpRules(isWhitelist: Boolean, black: String, white: String) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(IP_IS_WHITELIST, profile)] = isWhitelist
+            prefs[getProfileKey(IP_ROUTING_ENABLED, profile)] = true
+            prefs[getProfileKey(DIRECT_IPS_BLACK, profile)] = black
+            prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] = white
+        }
+    }
+
+    /** M-63: a validated rules import, every selected section in one write. */
+    internal suspend fun applyRoutingImport(plan: RoutingImportPlan) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            plan.apps?.let { apps ->
+                apps.black?.let { prefs[getProfileKey(EXCLUDED_APPS, profile)] = it.sorted().joinToString(",") }
+                apps.white?.let { prefs[getProfileKey(WHITELIST_APPS, profile)] = it.sorted().joinToString(",") }
+                apps.isWhitelist?.let { prefs[getProfileKey(IS_WHITELIST, profile)] = it }
+                prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+            }
+            plan.domains?.let { domains ->
+                domains.isWhitelist?.let { prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] = it }
+                domains.templateDomains?.let { prefs[getProfileKey(TEMPLATE_DOMAINS_ENABLED, profile)] = it }
+                domains.black?.let { prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)] = it.joinToString(",") }
+                domains.white?.let { prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] = it.joinToString(",") }
+            }
+            plan.ips?.let { ips ->
+                ips.isWhitelist?.let { prefs[getProfileKey(IP_IS_WHITELIST, profile)] = it }
+                prefs[getProfileKey(IP_ROUTING_ENABLED, profile)] = true
+                ips.black?.let { prefs[getProfileKey(DIRECT_IPS_BLACK, profile)] = it.joinToString(",") }
+                ips.white?.let { prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] = it.joinToString(",") }
+            }
         }
     }
 

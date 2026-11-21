@@ -26,10 +26,14 @@ class ServerRoutingRuleTest {
         assertTrue(legacy.domainsIsWhite)
     }
 
-    @Test fun invalidPackagesDoNotBecomeAnEmptyDeviceWideRule() {
+    @Test fun invalidPackagesAreSkippedButNeverBecomeAnEmptyDeviceWideRule() {
         for (entry in listOf("com.example app", "../bad", "com..example", "a".repeat(256))) {
-            val json = JSONObject().put("packages", org.json.JSONArray(listOf(entry)))
-            assertNull(parseServerRoutingRule(json.toString()))
+            val json = JSONObject().put("mode", "whitelist").put("packages", org.json.JSONArray(listOf(entry)))
+            val parsed = requireNotNull(parseServerRoutingRuleChecked(json.toString()))
+            assertTrue(parsed.rule.packages.isEmpty())
+            // the server named packages: the VPN refuses («Whitelist пуст») instead of tunnelling every app
+            assertTrue(parsed.rule.packagesListed)
+            assertEquals(listOf(entry), parsed.skipped)
         }
         assertNull(parseServerRoutingRule("""{"packages":[42]}"""))
         assertNull(parseServerRoutingRule("""{"packages":"com.example.app"}"""))

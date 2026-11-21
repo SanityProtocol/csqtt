@@ -31,6 +31,9 @@ class TunVpnService : VpnService() {
     private var activeClientIp: String? = null
     @Volatile
     private var activeDns: String? = null
+    /** The server rule the current interface was built with (M-58): reported with vpnReady so a rule that moved on is seen. */
+    @Volatile
+    private var interfaceRule: ServerRoutingRule? = null
     @Volatile
     private var recoveryAttempts = 0
     @Volatile
@@ -223,7 +226,7 @@ class TunVpnService : VpnService() {
                     "[TUN] VPN-интерфейс переиспользован без пересборки (причина вызова: $reason)",
                     24,
                 )
-                sendTunFd(pfd = existing, previousInterface = null, dns = dns, isRoutingReload = isRoutingReload)
+                sendTunFd(pfd = existing, previousInterface = null, dns = dns, isRoutingReload = isRoutingReload, builtRule = interfaceRule)
                 return
             }
 
@@ -315,7 +318,8 @@ class TunVpnService : VpnService() {
                     }
                     .toSet()
                 if (installedIncluded.isEmpty()) {
-                    if (serverRule == null || userSelected.isNotEmpty()) {
+                    // packagesListed: a server list whose every entry was skipped (M-56) still refuses, never all apps
+                    if (serverRule == null || serverRule.packagesListed) {
                         failVpn("Whitelist пуст: выберите хотя бы одно установленное приложение")
                         return
                     } else {
@@ -384,6 +388,7 @@ class TunVpnService : VpnService() {
                     tunFd = pfd.fd
                     activeClientIp = clientIp
                     activeDns = dns
+                    interfaceRule = serverRule
                     true
                 }
             }
@@ -397,7 +402,7 @@ class TunVpnService : VpnService() {
             }
             Log.d(TAG, "VPN interface established: IP=$clientIp DNS=$dns fd=$tunFd (reason: $reason)")
 
-            sendTunFd(pfd, previousInterface, dns, isRoutingReload)
+            sendTunFd(pfd, previousInterface, dns, isRoutingReload, builtRule = serverRule)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -412,6 +417,7 @@ class TunVpnService : VpnService() {
         previousInterface: ParcelFileDescriptor? = null,
         dns: String? = null,
         isRoutingReload: Boolean = false,
+        builtRule: ServerRoutingRule? = null,
     ) {
         sendJob?.cancel()
         sendJob = serviceScope.launch {
@@ -434,9 +440,9 @@ class TunVpnService : VpnService() {
                         runCatching { previousInterface?.close() }
                     }
                     if (isRoutingReload) {
-                        TunnelManager.onRoutingUpdated()
+                        TunnelManager.onRoutingUpdated(builtRule)
                     } else {
-                        TunnelManager.onVpnInterfaceReady(dns)
+                        TunnelManager.onVpnInterfaceReady(dns, builtRule)
                     }
                     break
                 } catch (e: CancellationException) {

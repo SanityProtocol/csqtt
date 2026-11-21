@@ -444,7 +444,7 @@ object TunnelManager {
         }
     }
 
-    fun onVpnInterfaceReady(dns: String? = null) {
+    fun onVpnInterfaceReady(dns: String? = null, builtRule: ServerRoutingRule? = activeServerRoutingRule.value) {
         vpnReady.value = true
         markConnectedIfReady()
         lastTunnelDiagnostic.value = ""
@@ -458,9 +458,13 @@ object TunnelManager {
                 level = LogLevel.OK,
             )
         }
+        if (activeServerRoutingRule.value == null) {
+            activeContext()?.let { ctx -> activeScope.launch { logEffectiveLocalRouting(SettingsStore(ctx)) } }
+        }
+        rebuildIfRuleMoved(builtRule)
     }
 
-    fun onRoutingUpdated() {
+    fun onRoutingUpdated(builtRule: ServerRoutingRule? = activeServerRoutingRule.value) {
         vpnReady.value = true
         lastTunnelDiagnostic.value = ""
         activeScope.launch { activeSettingsStore?.clearTunnelDiagnostic() }
@@ -470,6 +474,18 @@ object TunnelManager {
             priority = 25,
             level = LogLevel.NET,
         )
+        rebuildIfRuleMoved(builtRule)
+    }
+
+    /**
+     * M-58: `startVpn` reads the server rule when it runs, so a ROUTING event that lands between a rebuild and vpnReady
+     * left the VPN on the rule it read. On every ready the rule the interface was built with is compared with the active
+     * one; a difference rebuilds once (the rebuild reads the active rule, so it settles).
+     */
+    private fun rebuildIfRuleMoved(builtRule: ServerRoutingRule?) {
+        if (!vpnInputsDiffer(builtRule, activeServerRoutingRule.value)) return
+        updateLog("vpn_rule_moved", "[СЕТЬ] Правило маршрутизации сменилось во время сборки VPN — пересборка", 25, level = LogLevel.NET)
+        reloadVpn()
     }
 
     fun onVpnInterfaceStopped() {
@@ -2167,8 +2183,19 @@ object TunnelManager {
         return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
     }
 
-    fun parseServerRoutingRuleJson(routingJsonStr: String): ServerRoutingRule? =
-        parseServerRoutingRule(routingJsonStr)
+    /** D23: invalid entries are skipped and named in the log; null only for a rule broken as a whole (the tunnel stops). */
+    fun parseServerRoutingRuleJson(routingJsonStr: String): ServerRoutingRule? {
+        val parsed = parseServerRoutingRuleChecked(routingJsonStr) ?: return null
+        if (parsed.skipped.isNotEmpty()) {
+            updateLog(
+                "server_rule_skipped",
+                "[СЕРВЕР] В правиле маршрутизации пропущены некорректные записи: ${describeSkippedEntries(parsed.skipped)}",
+                95,
+                isError = true,
+            )
+        }
+        return parsed.rule
+    }
 
     fun applyServerRoutingRule(newServerRule: ServerRoutingRule?, clientIp: String, dns: String) {
         val previousRule = activeServerRoutingRule.value
@@ -2177,114 +2204,105 @@ object TunnelManager {
 
         activeContext()?.let { ctx ->
             if (newServerRule != null) {
-                updateDomainRouting(
-                    enabled = newServerRule.templateDomains || newServerRule.domains.isNotEmpty(),
-                    excludeRuZones = false,
-                    templateDomains = newServerRule.templateDomains,
-                    directDomains = newServerRule.domains.joinToString(","),
-                    isWhitelist = newServerRule.domainsIsWhite,
-                    ipRoutingEnabled = newServerRule.ips.isNotEmpty(),
-                    ipIsWhitelist = newServerRule.ipIsWhite,
-                    directIps = newServerRule.ips.joinToString(","),
-                )
+                pushDomainRouting(newServerRule.toUpdate())
+                logEffectiveServerRouting(newServerRule)
                 // the VPN's excludeRoutes come from ips/ipIsWhite too: a change there alone (App routing from the panel)
                 // left stale routes until a reconnect
-                val vpnInputsChanged = previousRule == null ||
-                    previousRule.isWhite != newServerRule.isWhite ||
-                    previousRule.packages.toSet() != newServerRule.packages.toSet() ||
-                    previousRule.ipIsWhite != newServerRule.ipIsWhite ||
-                    // only a blacklist's IPs become VPN routes (excludeRoute); a whitelist's list changes no route
-                    (!newServerRule.ipIsWhite && previousRule.ips.toSet() != newServerRule.ips.toSet())
-                if (vpnReady.value && vpnInputsChanged) {
-                    val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
-                        action = "RELOAD_ROUTING"
-                        stampVpnIntent(this, processIdentity?.generation ?: -1L)
-                        putExtra("client_ip", clientIp)
-                        putExtra("dns", dns)
-                        putExtra("reason", "routing_changed")
-                    }
-                    startTunVpnService(ctx, reloadIntent)
+                if (vpnReady.value && vpnInputsDiffer(previousRule, newServerRule)) {
+                    requestRoutingReload(ctx, clientIp, dns, "routing_changed")
                 }
             } else if (previousRule != null) {
                 activeScope.launch {
-                    val settingsStore = SettingsStore(ctx)
-                    val domainWhite = settingsStore.domainIsWhitelist.first()
-                    val domainEnabled = settingsStore.domainRoutingEnabled.first()
-                    val excludeRu = settingsStore.excludeRuZonesEnabled.first()
-                    val templateEnabled = settingsStore.templateDomainsEnabled.first()
-                    val domains = if (domainWhite) settingsStore.directDomainsWhite.first() else settingsStore.directDomainsBlack.first()
-                    val ipWhite = settingsStore.ipIsWhitelist.first()
-                    val ips = if (ipWhite) settingsStore.directIpsWhite.first() else settingsStore.directIpsBlack.first()
-                    val hasDomains = if (domainWhite) domains.isNotBlank() else (domains.isNotBlank() || templateEnabled || excludeRu)
-                    val effectiveDomainEnabled = domainEnabled && hasDomains
-                    val hasIps = ips.isNotBlank()
-                    val effectiveIpEnabled = hasIps   // the list is the switch (TunVpnService)
-                    updateDomainRouting(
-                        enabled = effectiveDomainEnabled,
-                        excludeRuZones = if (domainWhite) false else excludeRu,
-                        templateDomains = if (domainWhite) false else templateEnabled,
-                        directDomains = domains,
-                        isWhitelist = domainWhite,
-                        ipRoutingEnabled = effectiveIpEnabled,
-                        ipIsWhitelist = ipWhite,
-                        directIps = ips,
-                    )
-                    if (vpnReady.value) {
-                        val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
-                            action = "RELOAD_ROUTING"
-                            stampVpnIntent(this, processIdentity?.generation ?: -1L)
-                            putExtra("client_ip", clientIp)
-                            putExtra("dns", dns)
-                            putExtra("reason", "routing_cleared")
-                        }
-                        startTunVpnService(ctx, reloadIntent)
-                    }
+                    val store = SettingsStore(ctx)
+                    pushDomainRouting(store.routingSnapshot.first().toUpdate())
+                    logEffectiveLocalRouting(store)
+                    if (vpnReady.value) requestRoutingReload(ctx, clientIp, dns, "routing_cleared")
                 }
             }
         }
     }
 
-    fun updateDomainRouting(
-        enabled: Boolean,
-        excludeRuZones: Boolean,
-        templateDomains: Boolean,
-        directDomains: String,
-        isWhitelist: Boolean = false,
-        ipRoutingEnabled: Boolean = false,
-        ipIsWhitelist: Boolean = false,
-        directIps: String = "",
-    ) {
-        val identity = processIdentity ?: return
-        val command = "UPDATE_DOMAINS|enabled=${if (enabled) 1 else 0};ru=${if (excludeRuZones) 1 else 0};template=${if (templateDomains) 1 else 0};whitelist=${if (isWhitelist) 1 else 0};domains=$directDomains;ip_enabled=${if (ipRoutingEnabled) 1 else 0};ip_whitelist=${if (ipIsWhitelist) 1 else 0};ips=$directIps"
-        writeProcessCommand(identity, command, "domain_routing_err")
+    private fun requestRoutingReload(ctx: Context, clientIp: String, dns: String, reason: String) {
+        val reloadIntent = Intent(ctx, TunVpnService::class.java).apply {
+            action = "RELOAD_ROUTING"
+            stampVpnIntent(this, processIdentity?.generation ?: -1L)
+            putExtra("client_ip", clientIp)
+            putExtra("dns", dns)
+            putExtra("reason", reason)
+        }
+        startTunVpnService(ctx, reloadIntent)
     }
 
+    /** The whole domain and IP config to the core: the core replaces its config with each line (M-57). */
+    internal fun pushDomainRouting(update: DomainRoutingUpdate) {
+        val identity = processIdentity ?: return
+        writeProcessCommand(identity, update.toCommand(), "domain_routing_err")
+    }
+
+    /** The local rules, read at once, to the core (no-op while a server rule is in force). */
     fun pushLocalRouting(ctx: Context) {
         if (serverRoutingActive.value) return
         activeScope.launch {
-            val settingsStore = SettingsStore(ctx)
-            val domainWhite = settingsStore.domainIsWhitelist.first()
-            val domainEnabled = settingsStore.domainRoutingEnabled.first()
-            val excludeRu = settingsStore.excludeRuZonesEnabled.first()
-            val templateEnabled = settingsStore.templateDomainsEnabled.first()
-            val domains = if (domainWhite) settingsStore.directDomainsWhite.first() else settingsStore.directDomainsBlack.first()
-            val ipWhite = settingsStore.ipIsWhitelist.first()
-            val ips = if (ipWhite) settingsStore.directIpsWhite.first() else settingsStore.directIpsBlack.first()
-            val hasDomains = if (domainWhite) domains.isNotBlank() else (domains.isNotBlank() || templateEnabled || excludeRu)
-            val effectiveDomainEnabled = domainEnabled && hasDomains
-            val hasIps = ips.isNotBlank()
-            val effectiveIpEnabled = hasIps   // the list is the switch (TunVpnService)
-            updateDomainRouting(
-                enabled = effectiveDomainEnabled,
-                excludeRuZones = if (domainWhite) false else excludeRu,
-                templateDomains = if (domainWhite) false else templateEnabled,
-                directDomains = domains,
-                isWhitelist = domainWhite,
-                ipRoutingEnabled = effectiveIpEnabled,
-                ipIsWhitelist = ipWhite,
-                directIps = ips,
-            )
+            val store = SettingsStore(ctx)
+            pushDomainRouting(store.routingSnapshot.first().toUpdate())
+            if (!serverRoutingActive.value) logEffectiveLocalRouting(store)
         }
+    }
+
+    /**
+     * M-63: a validated import, written at once from the process-wide scope (leaving the screen never cuts it short),
+     * then one VPN reload if the apps changed; the routing observer pushes the domains and IPs.
+     */
+    internal fun importRoutingRules(ctx: Context, plan: RoutingImportPlan) {
+        val appContext = ctx.applicationContext
+        scope.launch {
+            SettingsStore(appContext).applyRoutingImport(plan)
+            if (plan.apps != null) reloadVpn()
+        }
+    }
+
+    /** M-55: one line naming the rule in force; the key keeps one entry, replaced on each change. */
+    private fun logEffectiveServerRouting(rule: ServerRoutingRule) {
+        updateLog(
+            "routing_effective",
+            describeEffectiveRouting(
+                source = "сервер",
+                appsWhite = rule.isWhite,
+                apps = rule.packages.size,
+                domainsWhite = rule.domainsIsWhite,
+                domains = rule.domains.size,
+                ruZones = false,
+                template = rule.templateDomains,
+                ipsWhite = rule.ipIsWhite,
+                ips = rule.ips.size,
+            ),
+            26,
+            level = LogLevel.NET,
+        )
+    }
+
+    private suspend fun logEffectiveLocalRouting(store: SettingsStore) {
+        val routing = store.routingSnapshot.first()
+        val appsWhite = store.isWhitelist.first()
+        val apps = (if (appsWhite) store.whitelistApps.first() else store.excludedApps.first())
+            .split(",").count { it.isNotBlank() }
+        fun count(list: String) = list.split(",").count { it.isNotBlank() }
+        updateLog(
+            "routing_effective",
+            describeEffectiveRouting(
+                source = "устройство",
+                appsWhite = appsWhite,
+                apps = apps,
+                domainsWhite = routing.domainIsWhitelist,
+                domains = count(routing.activeDomains),
+                ruZones = routing.useRuZones,
+                template = routing.useTemplate,
+                ipsWhite = routing.ipIsWhitelist,
+                ips = count(routing.activeIps),
+            ),
+            26,
+            level = LogLevel.NET,
+        )
     }
 
     private fun writeCaptchaResult(result: String, identity: ProcessIdentity) {
