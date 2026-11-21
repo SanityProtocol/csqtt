@@ -460,6 +460,9 @@ class TunnelService : Service() {
                     }
                     return@launch
                 }
+                // the profile a resume or the system's restart resolved is the run's from now on, also when none was
+                // saved (an app update while connected, the run's profile deleted while paused: run-profile verify N1)
+                if (!switching) store.saveRunProfile(store.selectedProfileIndex.first())
                 if (
                     !store.csqttLinkMode.first() &&
                     store.connectionPasswordState.first().state == StoredSecretState.Unreadable
