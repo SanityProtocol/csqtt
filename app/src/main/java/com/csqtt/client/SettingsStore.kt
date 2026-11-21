@@ -805,6 +805,9 @@ class SettingsStore(context: Context) {
                 ).forEach { prefs.remove(getProfileKey(it, profile)) }
                 if (parseCsqttLink(link)?.hashes.orEmpty().isNotEmpty()) prefs.remove(getProfileKey(VK_HASHES, profile))
             }
+            // S8: hashes received for another link never outlive it — a subscription refresh writes through here too
+            // (B5e3a review F1)
+            if (prefs[getProfileKey(CSQTT_LINK, profile)] != link) prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
             prefs[getProfileKey(CSQTT_LINK, profile)] = link
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = true
         }
@@ -877,9 +880,12 @@ class SettingsStore(context: Context) {
          * S8: [hashes] become [profile]'s received set when it is a link profile; a set equal to the link's own is
          * dropped (nothing to replace). True when the stored value changed.
          */
-        internal fun receivedHashesKeys(prefs: MutablePreferences, profile: Int, hashes: List<String>): Boolean {
+        internal fun receivedHashesKeys(prefs: MutablePreferences, profile: Int, hashes: List<String>, sourceLink: String): Boolean {
             if (profile !in profileIndices || prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) return false
-            val link = parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty()) ?: return false
+            // only while the profile still holds the link the run started with (review F2): a new link takes no old set
+            val stored = prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty()
+            if (stored != sourceLink) return false
+            val link = parseCsqttLink(stored) ?: return false
             val key = getProfileKey(RECEIVED_HASHES, profile)
             val before = prefs[key]
             if (hashes.isEmpty() || hashes == link.hashes) prefs.remove(key) else prefs[key] = hashes.joinToString(",")
@@ -1655,9 +1661,9 @@ class SettingsStore(context: Context) {
     }
 
     /** S8: true when [profile]'s stored set changed (written only for a link profile). */
-    internal suspend fun saveReceivedHashes(profile: Int, hashes: List<String>): Boolean {
+    internal suspend fun saveReceivedHashes(profile: Int, hashes: List<String>, sourceLink: String): Boolean {
         var changed = false
-        dataStore.edit { prefs -> changed = receivedHashesKeys(prefs, profile, hashes) }
+        dataStore.edit { prefs -> changed = receivedHashesKeys(prefs, profile, hashes, sourceLink) }
         return changed
     }
 

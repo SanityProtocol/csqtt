@@ -30,7 +30,7 @@ internal object ReceivedHashes {
         }
     }.getOrNull()
 
-    /** The owner's set a participant connects with: what the server last sent, else the link's own. */
+    /** The owner's set a participant connects with — and the screen shows (review F4): what the server last sent, else the link's own. */
     fun ownerSet(linkHashes: List<String>, received: List<String>): List<String> = received.ifEmpty { linkHashes }
 }
 
@@ -49,8 +49,11 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
 
     // S8: hashes the server sends during this run belong to the profile it started from, whatever is active by then
     TunnelManager.sourceProfile = store.activeProfile.first()
+    TunnelManager.sourceLink = null
     if (store.csqttLinkMode.first()) {
-        val link = parseCsqttLink(store.csqttLink.first()) ?: return null
+        val rawLink = store.csqttLink.first()
+        val link = parseCsqttLink(rawLink) ?: return null
+        TunnelManager.sourceLink = rawLink
         val received = store.receivedHashes.first()
         val ownerSet = ReceivedHashes.ownerSet(link.hashes, received)
         TunnelManager.ownerHashes = (link.hashes + received).distinct()

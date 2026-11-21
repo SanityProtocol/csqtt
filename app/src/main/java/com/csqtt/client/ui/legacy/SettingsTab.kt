@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.SettingsStore
+import com.csqtt.client.ReceivedHashes
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.VkAuthWebViewManager
 import com.csqtt.client.VkTokenPolicy
@@ -225,12 +226,14 @@ internal fun SettingsTabContent(
         VkHashValidationCodec.active(allHashes, vkHashCheckResults)
     }
     val parsedCsqttLink = remember(linkText) { parseCsqttLink(linkText) }
-    val linkHashes = parsedCsqttLink?.hashes.orEmpty()
+    // the owner's set the tunnel connects with: what the server last sent, else the link's (S8; B5e3a review F4)
+    val receivedHashes by settingsStore.receivedHashes.collectAsStateWithLifecycle(initialValue = emptyList())
+    val linkHashes = ReceivedHashes.ownerSet(parsedCsqttLink?.hashes.orEmpty(), receivedHashes)
     val linkHashesRemoved by settingsStore.linkHashesRemoved.collectAsStateWithLifecycle(initialValue = emptySet())
     val linkVkAccessToken = parsedCsqttLink?.vkAccessToken.orEmpty()
     val serverWorkers by TunnelManager.serverAssignedWorkers.collectAsState()
     val effectiveServerWorkers = serverWorkers.takeIf { tunnelRunning && it in 3..100 }
-    val linkTokenActive = participantMode && linkVkAccessToken.isNotEmpty()
+    val linkTokenActive = participantMode && linkVkAccessToken.isNotEmpty() && receivedHashes.isEmpty()
     val effectiveVkAuthMode = if (
         participantMode && linkHashes.isNotEmpty() && vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
     ) {
