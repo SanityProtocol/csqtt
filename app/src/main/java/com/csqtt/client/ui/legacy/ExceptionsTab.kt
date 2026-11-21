@@ -80,6 +80,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.VpnPlan
+import androidx.compose.ui.draw.alpha
+import androidx.compose.runtime.produceState
 import com.csqtt.client.RoutingEntries.parseDomainsFromText
 import com.csqtt.client.RoutingEntries.parseIpsFromText
 import com.csqtt.client.RoutingImportCurrent
@@ -124,6 +127,17 @@ fun ExceptionsTab(
     )
     val isServerRouting = serverRoutingActive || serverRoutingActiveLive
     val activeServerRule by TunnelManager.activeServerRoutingRule.collectAsStateWithLifecycle()
+    // M-59: «Все с VPN» overrides both lists and keeps them
+    val allApps by settingsStore.appRoutingAll.collectAsStateWithLifecycle(initialValue = false)
+    // M-62: the installed VK apps, shown locked (they always go directly)
+    val vkInstalledNames by produceState(initialValue = emptyList<String>()) {
+        value = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            VpnPlan.VK_PACKAGES.mapNotNull { pkg ->
+                runCatching { pm.getApplicationInfo(pkg, 0).loadLabel(pm).toString() }.getOrNull()
+            }
+        }
+    }
 
     @Suppress("DEPRECATION")
     val clipboardManager = LocalClipboardManager.current
@@ -271,9 +285,7 @@ fun ExceptionsTab(
                 .getInstalledApplications(PackageManager.GET_META_DATA)
                 .asSequence()
                 .filter { app ->
-                    app.packageName != context.packageName &&
-                        !app.packageName.contains("vkontakte") &&
-                        !app.packageName.contains("vk.calls")
+                    app.packageName != context.packageName && app.packageName !in VpnPlan.VK_PACKAGES
                 }
                 .map { app ->
                     AppItem(
@@ -389,7 +401,9 @@ fun ExceptionsTab(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = if (isWhitelist) {
+                        text = if (allApps) {
+                            "Все приложения через VPN"
+                        } else if (isWhitelist) {
                             "Белый список: ${whitelistSelection.size} в туннеле"
                         } else {
                             "Чёрный список: ${blacklistSelection.size} исключено"
@@ -702,8 +716,27 @@ fun ExceptionsTab(
                             }
                         }
 
+                        CsqttSettingRow(
+                            title = "Все приложения через VPN",
+                            description = if (allApps) {
+                                "Списки ниже сохранены и снова заработают, если выключить"
+                            } else {
+                                "Кроме приложений VK — они всегда напрямую"
+                            },
+                            checked = allApps,
+                            enabled = isMigrationReady,
+                            onCheckedChange = { enabled ->
+                                appPersistenceScope.launch {
+                                    settingsStore.saveAppRoutingAll(enabled)
+                                    TunnelManager.reloadVpn()
+                                }
+                            },
+                        )
+
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .alpha(if (allApps) 0.45f else 1f),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             if (!isWhitelist) {
@@ -717,7 +750,7 @@ fun ExceptionsTab(
                                         containerColor = Color(0xFF1475FD),
                                         contentColor = Color.White,
                                     ),
-                                    enabled = isMigrationReady,
+                                    enabled = isMigrationReady && !allApps,
                                 ) {
                                     Text(
                                         text = "Чёрный список",
@@ -746,7 +779,7 @@ fun ExceptionsTab(
                                         1.dp,
                                         MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                                     ),
-                                    enabled = isMigrationReady,
+                                    enabled = isMigrationReady && !allApps,
                                 ) {
                                     Text(
                                         text = "Чёрный список",
@@ -769,7 +802,7 @@ fun ExceptionsTab(
                                         containerColor = Color(0xFF1475FD),
                                         contentColor = Color.White,
                                     ),
-                                    enabled = isMigrationReady,
+                                    enabled = isMigrationReady && !allApps,
                                 ) {
                                     Text(
                                         text = "Белый список",
@@ -798,7 +831,7 @@ fun ExceptionsTab(
                                         1.dp,
                                         MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                                     ),
-                                    enabled = isMigrationReady,
+                                    enabled = isMigrationReady && !allApps,
                                 ) {
                                     Text(
                                         text = "Белый список",
@@ -883,6 +916,11 @@ fun ExceptionsTab(
                                     contentPadding = PaddingValues(bottom = 8.dp),
                                     verticalArrangement = Arrangement.spacedBy(CsqttSpacing.Xs),
                                 ) {
+                                    if (vkInstalledNames.isNotEmpty() && appSearchQuery.isBlank()) {
+                                        item(key = "vk-direct", contentType = "locked") {
+                                            VkDirectRow(names = vkInstalledNames)
+                                        }
+                                    }
                                     items(
                                         items = filteredApps,
                                         key = { it.packageName },
@@ -892,7 +930,9 @@ fun ExceptionsTab(
                                         AppRow(
                                             app = app,
                                             isSelected = isSelected,
+                                            modifier = Modifier.alpha(if (allApps) 0.45f else 1f),
                                             onClick = {
+                                                if (allApps) return@AppRow
                                                 val newSelection = if (isSelected) {
                                                     activeAppSelection - app.packageName
                                                 } else {

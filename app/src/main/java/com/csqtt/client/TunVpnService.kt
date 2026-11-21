@@ -34,6 +34,9 @@ class TunVpnService : VpnService() {
     /** The server rule the current interface was built with (M-58): reported with vpnReady so a rule that moved on is seen. */
     @Volatile
     private var interfaceRule: ServerRoutingRule? = null
+    /** The plan the current interface was built from: the same plan again reuses it. */
+    @Volatile
+    private var interfacePlan: VpnPlan? = null
     @Volatile
     private var recoveryAttempts = 0
     @Volatile
@@ -185,39 +188,30 @@ class TunVpnService : VpnService() {
         vpnMutex.withLock {
         try {
             val serverRule = TunnelManager.activeServerRoutingRule.value
-            val isWhitelist: Boolean
-            val userSelected: Set<String>
-            if (serverRule != null) {
-                isWhitelist = serverRule.isWhite
-                userSelected = serverRule.packages.filter { it.isNotEmpty() }.toSet()
-            } else {
-                val settingsStore = SettingsStore(applicationContext)
-                isWhitelist = settingsStore.isWhitelist.first()
-                val savedApps = if (isWhitelist) {
-                    settingsStore.whitelistApps.first()
-                } else {
-                    settingsStore.excludedApps.first()
-                }
-                userSelected = savedApps.split(",").filter { it.isNotEmpty() }.toSet()
-            }
-            val transportPackages = setOf(
-                applicationContext.packageName,
-                CsqttConstants.General.PACKAGE_VK,
-                CsqttConstants.General.PACKAGE_VK_CALLS
+            // B5d2: every decision about the interface in one pure plan; an equal plan reuses the interface
+            val plan = VpnPlan.of(
+                sdk = Build.VERSION.SDK_INT,
+                ownPackage = applicationContext.packageName,
+                clientIp = clientIp,
+                serverDns = dns,
+                serverRule = serverRule,
+                settings = SettingsStore(applicationContext).vpnSettings.first(),
+                installed = ::isPackageInstalled,
             )
 
             val existing = synchronized(interfaceLock) {
                 vpnInterface?.takeIf {
-                    TunRecoveryPolicy.shouldReuse(
-                        hasInterface = true,
-                        descriptorValid = it.fileDescriptor.valid(),
-                        serviceDestroyed = serviceDestroyed,
-                        forceRebuild = forceRebuild,
-                        activeClientIp = activeClientIp,
-                        activeDns = activeDns,
-                        requestedClientIp = clientIp,
-                        requestedDns = dns,
-                    )
+                    interfacePlan == plan &&
+                        TunRecoveryPolicy.shouldReuse(
+                            hasInterface = true,
+                            descriptorValid = it.fileDescriptor.valid(),
+                            serviceDestroyed = serviceDestroyed,
+                            forceRebuild = forceRebuild,
+                            activeClientIp = activeClientIp,
+                            activeDns = activeDns,
+                            requestedClientIp = clientIp,
+                            requestedDns = dns,
+                        )
                 }
             }
             if (existing != null) {
@@ -230,6 +224,19 @@ class TunVpnService : VpnService() {
                 return
             }
 
+            plan.failure?.let {
+                failVpn(it)
+                return
+            }
+            if (plan.dnsOverrideRefused) {
+                TunnelManager.updateLog(
+                    "vpn_dns_override_refused",
+                    "[TUN] DNS устройства не принят (нужны 1–2 адреса IPv4; частный — только с обходом LAN): работает DNS сервера",
+                    40,
+                    isError = true,
+                )
+            }
+
             if (VpnService.prepare(this) != null) {
                 failVpn("разрешение Android VPN не выдано")
                 return
@@ -239,47 +246,15 @@ class TunVpnService : VpnService() {
                 .setSession("CSQTT")
                 .setMtu(mtu)
                 .addAddress(clientIp, 32)
-                .addRoute("0.0.0.0", 0)
-
+            // IPv4 only, never allowFamily(AF_INET6): Android blocks IPv6 for the tunnelled apps (M-66 / D25)
+            plan.routes.forEach { builder.addRoute(it.address, it.length) }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                try {
-                    val ipWhite: Boolean
-                    val ipListStr: String
-                    if (serverRule != null) {
-                        ipWhite = serverRule.ipIsWhite
-                        ipListStr = serverRule.ips.joinToString(",")
-                    } else {
-                        val settingsStore = SettingsStore(applicationContext)
-                        ipWhite = settingsStore.ipIsWhitelist.first()
-                        // IP routing is on exactly when the list is non-empty: the UI has no off switch (saving IPs sets
-                        // ipRoutingEnabled, nothing clears it; configs from before it have none), so the list is the intent
-                        // — the same rule as the client's command line (TunnelManager) and every TunnelParams builder
-                        ipListStr = if (ipWhite) settingsStore.directIpsWhite.first() else settingsStore.directIpsBlack.first()
+                plan.excludedRoutes.forEach { prefix ->
+                    try {
+                        builder.excludeRoute(android.net.IpPrefix(java.net.InetAddress.getByName(prefix.address), prefix.length))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to exclude route $prefix", e)
                     }
-
-                    if (!ipWhite && ipListStr.isNotBlank()) {
-                        ipListStr.split(",", " ", "\n", "\t")
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() }
-                            .forEach { rawIp ->
-                                try {
-                                    val (ipPart, prefixPart) = if (rawIp.contains("/")) {
-                                        val split = rawIp.split("/", limit = 2)
-                                        split[0] to split[1].toInt()
-                                    } else {
-                                        rawIp to 32
-                                    }
-                                    val addr = java.net.InetAddress.getByName(ipPart)
-                                    if (addr is java.net.Inet4Address) {
-                                        builder.excludeRoute(android.net.IpPrefix(addr, prefixPart))
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Failed to exclude route for IP: $rawIp", e)
-                                }
-                            }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "excludeRoute processing failed: ${e.message}", e)
                 }
             }
 
@@ -288,85 +263,44 @@ class TunVpnService : VpnService() {
             }
 
             var validDnsServers = 0
-            dns.split(",")
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.contains(":") }
-                .forEach { dnsServer ->
-                    try {
-                        builder.addDnsServer(dnsServer)
-                        builder.addRoute(dnsServer, 32)
-                        validDnsServers++
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Invalid DNS server: $dnsServer", e)
-                    }
-                }
-            if (validDnsServers == 0) {
+            plan.dnsServers.forEach { dnsServer ->
                 try {
-                    builder.addDnsServer("77.88.8.8")
-                    builder.addRoute("77.88.8.8", 32)
+                    builder.addDnsServer(dnsServer)
+                    if (dnsServer in plan.tunnelledDns) builder.addRoute(dnsServer, 32)
                     validDnsServers++
-                } catch (_: Exception) {
-                    failVpn("сервер передал некорректный DNS: $dns")
-                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "Invalid DNS server: $dnsServer", e)
                 }
             }
+            if (validDnsServers == 0) {
+                failVpn("сервер передал некорректный DNS: $dns")
+                return
+            }
 
-            if (isWhitelist) {
-                val installedIncluded = userSelected
-                    .filter { pkg -> 
-                        pkg !in transportPackages && isPackageInstalled(pkg) 
-                    }
-                    .toSet()
-                if (installedIncluded.isEmpty()) {
-                    // packagesListed: a server list whose every entry was skipped (M-56) still refuses, never all apps
-                    if (serverRule == null || serverRule.packagesListed) {
-                        failVpn("Whitelist пуст: выберите хотя бы одно установленное приложение")
-                        return
-                    } else {
-                        // An empty server package list means a device-wide domain/IP rule.
-                        // A nonempty list with no installed matches must never broaden to all apps.
-                        Log.i(TAG, "Server rule applies to all applications (no package filter)")
-                        try {
-                            builder.addDisallowedApplication(applicationContext.packageName)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Unable to exclude CSQTT UID from its VPN", e)
-                            failVpn("Android не разрешил исключить CSQTT из собственного VPN")
-                            return
-                        }
-                        transportPackages
-                            .filter { it != applicationContext.packageName && isPackageInstalled(it) }
-                            .forEach { pkg ->
-                                try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
-                            }
-                    }
-                } else {
-                    var includedCount = 0
-                    installedIncluded.forEach { pkg ->
-                        try {
-                            builder.addAllowedApplication(pkg)
-                            includedCount++
-                        } catch (error: Exception) {
-                            Log.w(TAG, "Unable to include $pkg in VPN", error)
-                        }
-                    }
-                    if (includedCount == 0) {
-                        failVpn("Android не разрешил добавить выбранные приложения в whitelist")
-                        return
+            if (plan.allowedApps.isNotEmpty()) {
+                var includedCount = 0
+                plan.allowedApps.forEach { pkg ->
+                    try {
+                        builder.addAllowedApplication(pkg)
+                        includedCount++
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Unable to include $pkg in VPN", error)
                     }
                 }
+                if (includedCount == 0) {
+                    failVpn("Android не разрешил добавить выбранные приложения в whitelist")
+                    return
+                }
             } else {
+                // CSQTT itself comes first: its own traffic carries the tunnel, so failing to exclude it fails the VPN
                 try {
-                    builder.addDisallowedApplication(applicationContext.packageName)
+                    builder.addDisallowedApplication(plan.disallowedApps.first())
                 } catch (e: Exception) {
                     Log.e(TAG, "Unable to exclude CSQTT UID from its VPN", e)
                     failVpn("Android не разрешил исключить CSQTT из собственного VPN")
                     return
                 }
-                val excluded = transportPackages.toMutableSet()
-                excluded.addAll(userSelected)
-                excluded
-                    .filter { it != applicationContext.packageName && isPackageInstalled(it) }
-                    .forEach { pkg ->
+                plan.disallowedApps.drop(1).forEach { pkg ->
                     try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
                 }
             }
@@ -389,6 +323,7 @@ class TunVpnService : VpnService() {
                     activeClientIp = clientIp
                     activeDns = dns
                     interfaceRule = serverRule
+                    interfacePlan = plan
                     true
                 }
             }
@@ -401,6 +336,12 @@ class TunVpnService : VpnService() {
                 runCatching { setUnderlyingNetworks(null) }
             }
             Log.d(TAG, "VPN interface established: IP=$clientIp DNS=$dns fd=$tunFd (reason: $reason)")
+            if (plan.dnsOverridden) {
+                TunnelManager.updateLog("vpn_dns_override", "[TUN] DNS устройства вместо DNS сервера: ${plan.dnsServers.joinToString()}", 32, level = LogLevel.OK)
+            }
+            if (plan.lanBypass) {
+                TunnelManager.updateLog("vpn_lan_bypass", "[TUN] Локальная сеть — напрямую, мимо туннеля (обход LAN)", 32, level = LogLevel.NET)
+            }
 
             sendTunFd(pfd, previousInterface, dns, isRoutingReload, builtRule = serverRule)
         } catch (e: CancellationException) {

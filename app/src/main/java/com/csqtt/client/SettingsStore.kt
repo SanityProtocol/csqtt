@@ -366,6 +366,11 @@ class SettingsStore(context: Context) {
         private val IP_IS_WHITELIST = profileBoolean("ip_is_whitelist")
         private val DIRECT_IPS_BLACK = profileString("direct_ips_black")
         private val DIRECT_IPS_WHITE = profileString("direct_ips_white")
+        // B5d2: «Все с VPN» (M-59), LAN bypass (M-64) and the device's DNS (M-67); their controls beyond the apps
+        // dialog are P3, the backup carries them
+        private val APP_ROUTING_ALL = profileBoolean("app_routing_all")
+        private val LAN_BYPASS = profileBoolean("lan_bypass")
+        private val DNS_OVERRIDE = profileString("dns_override")
 
         private val THEME_MODE = stringPreferencesKey("theme_mode")
         private val IS_DYNAMIC_COLOR = booleanPreferencesKey("is_dynamic_color")
@@ -1221,6 +1226,35 @@ class SettingsStore(context: Context) {
     val directIpsWhite: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] ?: ""
+    }
+
+    /** What the active profile asks of the VPN interface (B5d2), in one read. */
+    internal val vpnSettings: Flow<VpnSettings> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        fun apps(key: Preferences.Key<String>) = prefs[getProfileKey(key, profile)].orEmpty().split(',').filter(String::isNotBlank).toSet()
+        val ipsWhite = prefs[getProfileKey(IP_IS_WHITELIST, profile)] ?: false
+        VpnSettings(
+            appsWhitelist = prefs[getProfileKey(IS_WHITELIST, profile)] ?: false,
+            whitelistApps = apps(WHITELIST_APPS),
+            excludedApps = apps(EXCLUDED_APPS),
+            allApps = prefs[getProfileKey(APP_ROUTING_ALL, profile)] ?: false,
+            lanBypass = prefs[getProfileKey(LAN_BYPASS, profile)] ?: false,
+            dnsOverride = prefs[getProfileKey(DNS_OVERRIDE, profile)].orEmpty(),
+            ipsWhitelist = ipsWhite,
+            ips = prefs[getProfileKey(if (ipsWhite) DIRECT_IPS_WHITE else DIRECT_IPS_BLACK, profile)].orEmpty(),
+        )
+    }.distinctUntilChanged()
+
+    val appRoutingAll: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[getProfileKey(APP_ROUTING_ALL, prefs[ACTIVE_PROFILE] ?: 0)] ?: false
+    }
+
+    /** M-59: «Все с VPN» for the active profile; the black and white lists are left as they are. */
+    suspend fun saveAppRoutingAll(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(APP_ROUTING_ALL, profile)] = enabled
+        }
     }
 
     /** M-57: the active profile's domain and IP rules in one read (the black domain list falls back to the legacy key). */
@@ -2690,6 +2724,9 @@ class SettingsStore(context: Context) {
             exc.put("ip_is_whitelist", prefs[getProfileKey(IP_IS_WHITELIST, p)] ?: false)
             exc.put("direct_ips_black", prefs[getProfileKey(DIRECT_IPS_BLACK, p)] ?: "")
             exc.put("direct_ips_white", prefs[getProfileKey(DIRECT_IPS_WHITE, p)] ?: "")
+            exc.put("app_routing_all", prefs[getProfileKey(APP_ROUTING_ALL, p)] ?: false)
+            exc.put("lan_bypass", prefs[getProfileKey(LAN_BYPASS, p)] ?: false)
+            exc.put("dns_override", prefs[getProfileKey(DNS_OVERRIDE, p)] ?: "")
             root.put("exceptions", exc)
         }
 
@@ -2804,6 +2841,9 @@ class SettingsStore(context: Context) {
                     if (exc.has("ip_is_whitelist")) mutable[getProfileKey(IP_IS_WHITELIST, p)] = exc.getBoolean("ip_is_whitelist")
                     if (exc.has("direct_ips_black")) mutable[getProfileKey(DIRECT_IPS_BLACK, p)] = exc.getString("direct_ips_black")
                     if (exc.has("direct_ips_white")) mutable[getProfileKey(DIRECT_IPS_WHITE, p)] = exc.getString("direct_ips_white")
+                    if (exc.has("app_routing_all")) mutable[getProfileKey(APP_ROUTING_ALL, p)] = exc.getBoolean("app_routing_all")
+                    if (exc.has("lan_bypass")) mutable[getProfileKey(LAN_BYPASS, p)] = exc.getBoolean("lan_bypass")
+                    if (exc.has("dns_override")) mutable[getProfileKey(DNS_OVERRIDE, p)] = exc.getString("dns_override")
                 }
                 if (includeSettings && root.has("settings")) {
                     val s = root.getJSONObject("settings")

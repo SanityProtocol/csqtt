@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -24,6 +27,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.csqtt.client.ui.legacy.design.CsqttShapes
@@ -114,6 +119,52 @@ internal fun AppRow(
                 onCheckedChange = null,
                 modifier = Modifier.clearAndSetSemantics { },
             )
+        }
+    }
+}
+
+/**
+ * M-62 / D24: the installed VK apps, locked out of every list — the tunnel itself runs through VK, so they always go
+ * directly. One row, not selectable, with the reason.
+ */
+@Composable
+internal fun VkDirectRow(names: List<String>, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val isDark = colors.background.luminance() < 0.22f
+    val title = "Приложения VK всегда напрямую"
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 68.dp)
+            .semantics(mergeDescendants = true) { contentDescription = "$title: ${names.joinToString()}" },
+        shape = CsqttShapes.Card,
+        color = colors.surfaceVariant.copy(alpha = if (isDark) 0.35f else 0.55f),
+        contentColor = colors.onSurfaceVariant,
+        border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = if (isDark) 0.28f else 0.35f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = CsqttSpacing.Md, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(CsqttSpacing.Md),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.size(42.dp).background(colors.surfaceVariant, CsqttShapes.Small),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.Lock, contentDescription = null, modifier = Modifier.size(22.dp))
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = colors.onSurface,
+                )
+                Text(
+                    text = names.joinToString(", ") + ". Туннель идёт через VK, поэтому они работают мимо него.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant.copy(alpha = 0.8f),
+                )
+            }
         }
     }
 }
