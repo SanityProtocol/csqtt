@@ -24,6 +24,12 @@ object VkAutoCallsManager {
             get() = createdCalls < requestedCalls
     }
 
+    /**
+     * B5h1 (B3): [result] is null when no call was made; [tokenInvalid] then says VK refused the token or there is none,
+     * so no retry can make one until the user signs in again.
+     */
+    data class StartAttempt(val result: StartResult?, val tokenInvalid: Boolean = false)
+
     private data class ActiveCall(val callId: String, val hashKey: String)
     private data class PendingLog(val key: String, val message: String, val priority: Int, val isError: Boolean)
 
@@ -54,8 +60,8 @@ object VkAutoCallsManager {
         token: String,
         workers: Int,
         clearStoredTokenOnInvalid: Boolean = true,
-    ): StartResult? {
-        if (token.isBlank()) return null
+    ): StartAttempt {
+        if (token.isBlank()) return StartAttempt(null, tokenInvalid = true)
 
         synchronized(pendingLogsLock) { pendingLogs.clear() }
         activeCalls.clear()
@@ -113,7 +119,7 @@ object VkAutoCallsManager {
                         )
                         finishCalls(ArrayList(activeCalls).also { activeCalls.clear() }, token, logResults = false)
                         activeToken = null
-                        return null
+                        return StartAttempt(null, tokenInvalid = true)
                     }
                 }
 
@@ -137,15 +143,17 @@ object VkAutoCallsManager {
             )
         }
 
-        return if (hashes.isEmpty()) {
-            null
-        } else {
-            StartResult(
-                hashes = hashes.joinToString(","),
-                requestedCalls = count,
-                createdCalls = hashes.size,
-            )
-        }
+        return StartAttempt(
+            if (hashes.isEmpty()) {
+                null
+            } else {
+                StartResult(
+                    hashes = hashes.joinToString(","),
+                    requestedCalls = count,
+                    createdCalls = hashes.size,
+                )
+            },
+        )
     }
 
     /**

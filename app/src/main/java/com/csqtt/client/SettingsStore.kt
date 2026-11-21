@@ -423,6 +423,8 @@ class SettingsStore(context: Context) {
         private val TUNNEL_LAST_DIAGNOSTIC = stringPreferencesKey("tunnel_last_diagnostic")
         private val TUNNEL_LAST_DIAGNOSTIC_AT = longPreferencesKey("tunnel_last_diagnostic_at")
         private val TUNNEL_WAS_RUNNING = booleanPreferencesKey("tunnel_was_running")
+        // B5h1: the cause of the last stop the user did not ask for, until the next start (this device's state)
+        private val LAST_STOP_CAUSE = stringPreferencesKey("last_stop_cause")
 
         @Volatile
         internal var cachedVkHashMode: String? = null
@@ -682,7 +684,7 @@ class SettingsStore(context: Context) {
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
-                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS, UI_OWNER_MODE,
+                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS, UI_OWNER_MODE, LAST_STOP_CAUSE,
             ).mapTo(HashSet()) { it.name }
         }
 
@@ -1140,6 +1142,8 @@ class SettingsStore(context: Context) {
     val tunnelLastDiagnostic: Flow<String> = dataStore.data.map {
         it[TUNNEL_LAST_DIAGNOSTIC] ?: ""
     }
+    /** B5h1: the cause of the last stop the user did not ask for, kept until the next start; "" when none. */
+    val lastStopCause: Flow<String> = dataStore.data.map { it[LAST_STOP_CAUSE] ?: "" }
     val showSystemApps: Flow<Boolean> = dataStore.data.map { it[SHOW_SYSTEM_APPS] ?: false }
     val loggingEnabled: Flow<Boolean> = dataStore.data.map { it[LOGGING_ENABLED] ?: true }
     val infoActionsExpanded: Flow<Boolean> = dataStore.data.map { it[INFO_ACTIONS_EXPANDED] ?: false }
@@ -2045,6 +2049,15 @@ class SettingsStore(context: Context) {
             prefs.remove(TUNNEL_LAST_DIAGNOSTIC)
             prefs.remove(TUNNEL_LAST_DIAGNOSTIC_AT)
         }
+    }
+
+    /** B5h1: [cause] stays until the next start, so «Подключение» shows it after process death too. */
+    suspend fun saveLastStopCause(cause: String) {
+        dataStore.edit { it[LAST_STOP_CAUSE] = cause }
+    }
+
+    suspend fun clearLastStopCause() {
+        dataStore.edit { it.remove(LAST_STOP_CAUSE) }
     }
 
     suspend fun saveUpdateState(lastCheckAt: Long, latestVersion: String, error: String) {

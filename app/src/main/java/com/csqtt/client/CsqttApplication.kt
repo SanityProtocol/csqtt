@@ -6,6 +6,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 class CsqttApplication : Application() {
     override fun onCreate() {
@@ -17,6 +18,10 @@ class CsqttApplication : Application() {
         TunnelManager.initObservers(this)
 
         val settingsStore = SettingsStore(this)
+        // B5h1: the cause of a stop an earlier process recorded is the state again, unless a run began meanwhile
+        CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
+            TunnelManager.restoreStoppedCause(runCatching { settingsStore.lastStopCause.first() }.getOrNull())
+        }
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
             try {
                 settingsStore.loggingEnabled.collect { enabled ->

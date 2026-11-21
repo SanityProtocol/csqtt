@@ -353,10 +353,24 @@ object TunnelManager {
      * The service accepted a START (or restores one): the last run's failure is no longer the state, whatever ends this
      * attempt (review F3).
      */
-    internal fun beginStartRequest() {
+    internal fun beginStartRequest(context: Context) {
         runFatal.set(FirstFatal())
         failure.value = null
         starting.value = true
+        // B5h1: the last stop's cause and its notification belong to the run that ended
+        val appContext = context.applicationContext
+        StopNotice.cancel(appContext)
+        scope.launch(stopCauseWriter) { runCatching { SettingsStore(appContext).clearLastStopCause() } }
+    }
+
+    // B5h1: the stop cause's clear and its save, in the order they were asked for (a start refused at once records its
+    // cause right after the start cleared the last one)
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val stopCauseWriter = Dispatchers.IO.limitedParallelism(1)
+
+    /** B5h1: at the app's start, the cause an earlier process stored, unless a run began meanwhile (StopCause.restored). */
+    internal fun restoreStoppedCause(stored: String?) {
+        StopCause.restored(stored, running.value, starting.value, failure.value)?.let { failure.value = it }
     }
 
     /** The process is gone: its last speed is not the tunnel's (review F4); the totals stay. */
@@ -377,10 +391,18 @@ object TunnelManager {
         }
     }
 
-    /** The first fatal cause of the run is the one shown (M-47); a later one only goes to the log. */
-    private fun recordRunFailure(cause: String) {
+    /**
+     * The first fatal cause of the run is the one shown (M-47); a later one only goes to the log. B5h1: it is kept until
+     * the next start, across process death too, and announced by its own notification while the app is not in front.
+     */
+    internal fun recordRunFailure(cause: String, context: Context? = activeContext()) {
         val fatal = runFatal.get()
-        if (fatal.record(withoutLogStickers(cause))) failure.value = fatal.cause
+        if (!fatal.record(withoutLogStickers(cause))) return
+        val recorded = fatal.cause ?: return
+        failure.value = recorded
+        val appContext = context?.applicationContext ?: return
+        scope.launch(stopCauseWriter) { runCatching { SettingsStore(appContext).saveLastStopCause(recorded) } }
+        if (StopCause.announces(MainActivity.isForeground)) StopNotice.post(appContext, recorded)
     }
 
     val cooldownActive = MutableStateFlow(false)
@@ -538,7 +560,8 @@ object TunnelManager {
         val diagnostic = VpnRecoveryPolicy.message(kind, message)
         recordTunnelDiagnostic(kind.code, diagnostic)
         updateLog("${kind.code}_terminal", "✗ VPN TUN: $diagnostic", 99, true)
-        recordRunFailure("VPN: $diagnostic")
+        // B5h1: a revoke is another VPN app or the user in Android's settings, not a fault to read about
+        recordRunFailure(if (kind == VpnFailureKind.PermissionRevoked) StopCause.VPN_REVOKED else "VPN: $diagnostic")
         scope.launch {
             startStopMutex.withLock {
                 stopLocked(processIdentity)
@@ -829,6 +852,7 @@ object TunnelManager {
                     }
                 }
             if (remaining == 0 && isCurrent(identity)) {
+                recordRunFailure(StopCause.ALL_HASHES_DEAD)
                 stop()
             }
         }

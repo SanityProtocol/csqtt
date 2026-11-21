@@ -117,6 +117,10 @@ object CsqttConstants {
 
         const val CAPTCHA_CHANNEL_ID = "captcha_channel"
         const val CAPTCHA_NOTIFICATION_ID = 9001
+
+        // B5h1: a stop the user did not ask for, announced while the app is not in front
+        const val STOP_CHANNEL_ID = "csqtt_stops_v1"
+        const val STOP_NOTIFICATION_ID = 2
     }
 
     object Widget {

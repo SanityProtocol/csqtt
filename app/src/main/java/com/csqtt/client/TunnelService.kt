@@ -74,6 +74,12 @@ private data class ResolvedVkHashes(
     val accessToken: String = "",
 )
 
+/** B5h1: hashes, or none and whether VK refused the token (or there is none), so no retry can help. */
+private sealed class HashResolution {
+    data class Ok(val hashes: ResolvedVkHashes) : HashResolution()
+    data class Failed(val tokenInvalid: Boolean) : HashResolution()
+}
+
 class TunnelService : Service() {
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Default)
@@ -156,10 +162,11 @@ class TunnelService : Service() {
                 startJob?.cancel()
                 val requestGeneration = ++startGeneration
                 autoPauseRequested = true
-                TunnelManager.beginStartRequest()
+                TunnelManager.beginStartRequest(applicationContext)
                 val notification = createNotification("Запуск...")
                 if (!tryStartPersistentForeground(notification, "запуск VPN")) {
                     TunnelManager.starting.value = false
+                    TunnelManager.recordRunFailure(StopCause.FOREGROUND_REFUSED, applicationContext)
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -218,8 +225,8 @@ class TunnelService : Service() {
                         }
                         awaitVkNetwork()
                         if (!isCurrentStart(requestGeneration)) return@launch
-                        val resolvedHashes = if (hashesFromLink && linkAccessToken == null && !accountAutoJs) {
-                            ResolvedVkHashes(intentHashes, false)
+                        val resolution = if (hashesFromLink && linkAccessToken == null && !accountAutoJs) {
+                            HashResolution.Ok(ResolvedVkHashes(intentHashes, false))
                         } else {
                             resolveAutoHashes(
                                 store,
@@ -234,7 +241,7 @@ class TunnelService : Service() {
                                 tokenFromLink = linkAccessToken != null,
                             )
                         }
-                        if (resolvedHashes == null) {
+                        if (resolution is HashResolution.Failed) {
                             TunnelManager.starting.value = false
                             TunnelManager.updateLog(
                                 "vk_auto_calls_error",
@@ -242,9 +249,16 @@ class TunnelService : Service() {
                                 99,
                                 true,
                             )
+                            if (isCurrentStart(requestGeneration)) {
+                                TunnelManager.recordRunFailure(
+                                    StopCause.vkCallsNotCreated(resolution.tokenInvalid, tokenFromLink = linkAccessToken != null),
+                                    applicationContext,
+                                )
+                            }
                             launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true) }
                             return@launch
                         }
+                        val resolvedHashes = (resolution as HashResolution.Ok).hashes
 
                         val routing = store.routingSnapshot.first()   // M-57: one read, the same rule as every push
 
@@ -299,6 +313,9 @@ class TunnelService : Service() {
                             true,
                         )
                         TunnelManager.starting.value = false
+                        if (isCurrentStart(requestGeneration)) {
+                            TunnelManager.recordRunFailure(StopCause.startError(e.message ?: e.javaClass.simpleName), applicationContext)
+                        }
                         launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true) }
                     }
                 }
@@ -370,10 +387,11 @@ class TunnelService : Service() {
         val requestGeneration = ++startGeneration
         isStopping = false
         resourcesReleased = false
-        TunnelManager.beginStartRequest()
+        TunnelManager.beginStartRequest(applicationContext)
         val notification = createNotification("Восстановление соединения...")
         if (!tryStartPersistentForeground(notification, "восстановление VPN")) {
             TunnelManager.starting.value = false
+            TunnelManager.recordRunFailure(StopCause.FOREGROUND_REFUSED, applicationContext)
             stopSelf()
             return false
         }
@@ -402,6 +420,9 @@ class TunnelService : Service() {
                         99,
                         true,
                     )
+                    if (isCurrentStart(requestGeneration)) {
+                        TunnelManager.recordRunFailure(StopCause.NO_CONNECTION_SOURCE, applicationContext)
+                    }
                     launch(Dispatchers.Main) {
                         if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
                     }
@@ -417,6 +438,9 @@ class TunnelService : Service() {
                         99,
                         true,
                     )
+                    if (isCurrentStart(requestGeneration)) {
+                        TunnelManager.recordRunFailure(StopCause.PASSWORD_UNREADABLE, applicationContext)
+                    }
                     launch(Dispatchers.Main) {
                         if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
                     }
@@ -447,8 +471,9 @@ class TunnelService : Service() {
                 )
                 awaitVkNetwork()
                 if (!isCurrentStart(requestGeneration)) return@launch
-                val restoredHashes = when {
-                    source.hashesFromLink && !source.tokenFromLink && !accountAutoJs -> ResolvedVkHashes(source.hashes, false)
+                val resolution = when {
+                    source.hashesFromLink && !source.tokenFromLink && !accountAutoJs ->
+                        HashResolution.Ok(ResolvedVkHashes(source.hashes, false))
                     else -> resolveAutoHashes(
                         store,
                         source.hashes,
@@ -462,6 +487,7 @@ class TunnelService : Service() {
                         tokenFromLink = source.tokenFromLink,
                     )
                 }
+                val restoredHashes = (resolution as? HashResolution.Ok)?.hashes
                 val routing = store.routingSnapshot.first()   // M-57: one read, the same rule as every push
 
                 val params = TunnelParams(
@@ -513,6 +539,16 @@ class TunnelService : Service() {
                         99,
                         true,
                     )
+                    if (isCurrentStart(requestGeneration)) {
+                        TunnelManager.recordRunFailure(
+                            if (resolution is HashResolution.Failed) {
+                                StopCause.vkCallsNotCreated(resolution.tokenInvalid, source.tokenFromLink)
+                            } else {
+                                StopCause.NO_HASHES_OR_TOKEN
+                            },
+                            applicationContext,
+                        )
+                    }
                     launch(Dispatchers.Main) {
                         if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
                     }
@@ -527,6 +563,9 @@ class TunnelService : Service() {
                     99,
                     true,
                 )
+                if (isCurrentStart(requestGeneration)) {
+                    TunnelManager.recordRunFailure(StopCause.startError(e.message ?: e.javaClass.simpleName), applicationContext)
+                }
                 launch(Dispatchers.Main) {
                     if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
                 }
@@ -543,7 +582,7 @@ class TunnelService : Service() {
         accessTokenOverride: String? = null,
         tokenFromLink: Boolean = false,
         deadHash: String? = null,
-    ): ResolvedVkHashes? {
+    ): HashResolution {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
                 val token = accessTokenOverride ?: store.vkAccessToken.first()
@@ -555,45 +594,39 @@ class TunnelService : Service() {
                         VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash)
                             .also { if (it.hashes != pool) store.saveVkPool(panel.vps, it.hashes) }
                     }
-                    if (fill.hashes.isEmpty()) return null
+                    // a pool with live hashes serves on without a token (B5e3b); an empty one needs a sign-in to refill
+                    if (fill.hashes.isEmpty()) return HashResolution.Failed(fill.tokenInvalid || token.isBlank())
                     // the server's default follows the pool: once, in the background; a failure waits for the next run
                     serviceScope.launch {
                         VkPoolHandOver.handOver(store, panel)?.let { (ok, line) ->
                             TunnelManager.updateLog("vk_pool_handover", line, if (ok) 30 else 70, !ok)
                         }
                     }
-                    return ResolvedVkHashes(
-                        fill.hashes.joinToString(","),
-                        fill.hashes.size < VkAutoCallsManager.callCountForWorkers(workersPerHash),
-                        mode,
+                    return HashResolution.Ok(
+                        ResolvedVkHashes(
+                            fill.hashes.joinToString(","),
+                            fill.hashes.size < VkAutoCallsManager.callCountForWorkers(workersPerHash),
+                            mode,
+                        ),
                     )
                 }
-                val result = VkAutoCallsManager.startAutoCalls(
+                val attempt = VkAutoCallsManager.startAutoCalls(
                     applicationContext,
                     token,
                     workersPerHash,
                     clearStoredTokenOnInvalid = !tokenFromLink,
                 )
-                    ?: return null
-                ResolvedVkHashes(
-                    result.hashes,
-                    result.needsWorkerRedistribution,
-                    mode,
-                )
+                val result = attempt.result ?: return HashResolution.Failed(attempt.tokenInvalid)
+                HashResolution.Ok(ResolvedVkHashes(result.hashes, result.needsWorkerRedistribution, mode))
             }
 
             CsqttConstants.VkAutoHash.MODE_AUTO_JS -> {
                 val token = accessTokenOverride ?: store.vkAccessToken.first()
-                if (token.isBlank()) return null
-                ResolvedVkHashes(
-                    "",
-                    true,
-                    mode,
-                    token,
-                )
+                if (token.isBlank()) return HashResolution.Failed(tokenInvalid = true)
+                HashResolution.Ok(ResolvedVkHashes("", true, mode, token))
             }
 
-            else -> ResolvedVkHashes(fallbackHashes, false)
+            else -> HashResolution.Ok(ResolvedVkHashes(fallbackHashes, false))
         }
     }
 
@@ -620,7 +653,7 @@ class TunnelService : Service() {
                         extraWorkers = !accountAutoJs && store.extraWorkers.first(),
                     ),
                 )
-                val resolved = when {
+                val resolution = when {
                     accountAutoJs -> resolveAutoHashes(
                         store,
                         fallbackHashes = "",
@@ -638,12 +671,23 @@ class TunnelService : Service() {
                         tokenFromLink = source.tokenFromLink,
                         deadHash = hash,
                     )
-                    else -> ResolvedVkHashes(source.hashes, false)
-                } ?: return@launch
-                if (resolved.value.isBlank() && resolved.mode != CsqttConstants.VkAutoHash.MODE_AUTO_JS) {
+                    else -> HashResolution.Ok(ResolvedVkHashes(source.hashes, false))
+                }
+                val got = (resolution as? HashResolution.Ok)?.hashes
+                // B5h1 (B3): a token VK refused can never mint again, so the run stops with what to do instead of staying
+                // on a dead call; a transient failure leaves the run on, and the next dead call tries again
+                val outcome = recoveryOutcome(
+                    hashes = got?.value,
+                    autoJs = got?.mode == CsqttConstants.VkAutoHash.MODE_AUTO_JS,
+                    tokenInvalid = (resolution as? HashResolution.Failed)?.tokenInvalid == true,
+                    tokenFromLink = source.tokenFromLink,
+                )
+                if (outcome is RecoveryOutcome.Stop) {
+                    TunnelManager.recordRunFailure(outcome.cause, applicationContext)
                     launch(Dispatchers.Main) { TunnelManager.stop() }
                     return@launch
                 }
+                val resolved = got ?: return@launch
                 val nextGeneration = store.reserveConnectionGeneration(
                     proposed = if (previous.generationId == Long.MAX_VALUE) {
                         Long.MAX_VALUE
