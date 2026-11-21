@@ -637,10 +637,14 @@ class TunnelService : Service() {
         }
         serviceScope.launch {
             var restartScheduled = false
+            // the run's own identity: resolveConnectionSource below sets it to the active profile's. Unless the run
+            // restarts onto that profile it is put back, for the next recovery's guard (review F2, verify V1), S8's
+            // hashes and the log's masking
+            val runProfile = TunnelManager.sourceProfile
+            val runLink = TunnelManager.sourceLink
+            val runOwnerHashes = TunnelManager.ownerHashes
             try {
                 val previous = TunnelManager.getCurrentParams() ?: return@launch
-                // read before resolveConnectionSource sets it to the active profile (review F2)
-                val runProfile = TunnelManager.sourceProfile
                 val store = SettingsStore(applicationContext)
                 val vkHashMode = store.vkHashMode.first()
                 val source = resolveConnectionSource(store) ?: return@launch
@@ -716,7 +720,12 @@ class TunnelService : Service() {
                 }
                 restartScheduled = true
             } finally {
-                if (!restartScheduled) TunnelManager.completeVkCallRecovery()
+                if (!restartScheduled) {
+                    TunnelManager.sourceProfile = runProfile
+                    TunnelManager.sourceLink = runLink
+                    TunnelManager.ownerHashes = runOwnerHashes
+                    TunnelManager.completeVkCallRecovery()
+                }
             }
         }
     }
