@@ -48,7 +48,7 @@ suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
     }
 
     // S8: hashes the server sends during this run belong to the profile it started from, whatever is active by then
-    TunnelManager.sourceProfile = store.activeProfile.first()
+    TunnelManager.sourceProfile = store.selectedProfileIndex.first()
     TunnelManager.sourceLink = null
     if (store.csqttLinkMode.first()) {
         val rawLink = store.csqttLink.first()

@@ -105,7 +105,7 @@ object VkAutoCallsManager {
                     )
                     if (VkApi.isTokenInvalid(result)) {
                         if (clearStoredTokenOnInvalid) {
-                            runCatching { SettingsStore(context).clearVkAccessToken() }
+                            runCatching { SettingsStore(context, ProfileScope.Run).clearVkAccessToken() }
                         }
                         log(
                             "vk_token_invalidated",
@@ -186,7 +186,7 @@ object VkAutoCallsManager {
         }
         fill.errors.forEach { log("vk_auto_call_error", "[ERR] Звонок VK не создан · $it", 90, true) }
         if (fill.tokenInvalid) {
-            runCatching { SettingsStore(context).clearVkAccessToken() }
+            runCatching { SettingsStore(context, ProfileScope.Run).clearVkAccessToken() }
             log("vk_token_invalidated", "[ERR] Токен VK недействителен · войдите снова", 95, true)
         }
         if (fill.hashes.isNotEmpty()) {

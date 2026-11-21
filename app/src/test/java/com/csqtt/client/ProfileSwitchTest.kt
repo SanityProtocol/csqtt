@@ -1,15 +1,12 @@
 package com.csqtt.client
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * The operator (2026-11-21): a run stays on its profile until the user picks another one. A pick of another profile
- * reconnects a run that is on; picking the run's own profile back just selects it; adding a profile is not a pick; a run
- * paused on Wi-Fi resumes on its own profile, even while another one is open.
+ * reconnects a run that is on; picking the run's own profile back just selects it; adding a profile is not a pick.
  */
 class ProfileSwitchTest {
     @Test
@@ -26,16 +23,5 @@ class ProfileSwitchTest {
         assertTrue(ProfileSwitch.pickReconnects(runOn = true, picked = 2, runProfile = 0))
         assertFalse("the run's own profile picked back", ProfileSwitch.pickReconnects(runOn = true, picked = 0, runProfile = 0))
         assertFalse(ProfileSwitch.pickReconnects(runOn = false, picked = 2, runProfile = 0))
-    }
-
-    @Test
-    fun `a resume brings the run's own profile back while another one is open, unless it was deleted`() {
-        assertEquals(0, ProfileSwitch.resumeProfile(runProfile = 0, active = 3, runProfileInUse = true))
-        assertNull(ProfileSwitch.resumeProfile(runProfile = 3, active = 3, runProfileInUse = true))
-        assertNull("deleted while paused", ProfileSwitch.resumeProfile(runProfile = 0, active = 3, runProfileInUse = false))
-        assertNull(
-            "a process that died knows no run profile",
-            ProfileSwitch.resumeProfile(runProfile = -1, active = 3, runProfileInUse = false),
-        )
     }
 }

@@ -535,7 +535,9 @@ fun MainScreen(
                                     )
                                 }
                             } else if (TunnelManager.autoPausedForWifi.value) {
+                                // a run paused on Wi-Fi resumes on the pick (its run_profile)
                                 TunnelManager.sourceProfile = profile
+                                settingsStore.saveRunProfile(profile)
                             }
                         }
                     },

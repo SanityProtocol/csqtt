@@ -32,6 +32,7 @@ internal suspend fun buildTunnelStartIntent(
         putExtra("connection_password", source.password)
         putTunnelSettings(store.tunnelStartSettings())
         putExtra("port", 0)
+        putExtra(CsqttConstants.General.EXTRA_RUN_PROFILE, store.selectedProfileIndex.first())
         if (generationId > 0L) putExtra("generation_id", generationId)
         if (sessionSalt.isNotEmpty()) putExtra("session_salt", sessionSalt)
     }

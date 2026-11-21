@@ -522,7 +522,7 @@ object TunnelManager {
             )
         }
         if (activeServerRoutingRule.value == null) {
-            activeContext()?.let { ctx -> activeScope.launch { logEffectiveLocalRouting(SettingsStore(ctx)) } }
+            activeContext()?.let { ctx -> activeScope.launch { logEffectiveLocalRouting(SettingsStore(ctx, ProfileScope.Run)) } }
         }
         rebuildIfRuleMoved(builtRule)
     }
@@ -560,7 +560,7 @@ object TunnelManager {
         lastTunnelDiagnostic.value = diagnostic
         val context = activeContext() ?: return
         scope.launch {
-            val store = activeSettingsStore ?: SettingsStore(context).also {
+            val store = activeSettingsStore ?: SettingsStore(context, ProfileScope.Run).also {
                 activeSettingsStore = it
             }
             store.saveTunnelDiagnostic(code, message)
@@ -1352,7 +1352,7 @@ object TunnelManager {
                     currentParams = params
                     strongAppContext = appContext.applicationContext
                     lastContext = WeakReference(appContext)
-                    activeSettingsStore = SettingsStore(appContext)
+                    activeSettingsStore = SettingsStore(appContext, ProfileScope.Run)
                     lastTunnelDiagnostic.value = ""
                     activeScope.launch { activeSettingsStore?.clearTunnelDiagnostic() }
                     currentCaptchaSolveMethod = params.captchaSolveMethod
@@ -1396,7 +1396,8 @@ object TunnelManager {
                 restartJob = null
                 if (replacing) terminateProcessLocked(processIdentity, finishVkCalls = true)
                 applyRunIdentity(identity)
-                switchTarget = null
+                // a newer pick made during this switch keeps its own target (switch verify 2)
+                if (switchTarget == identity.profile) switchTarget = null
                 config.value = null
                 wrapAuthTimeoutCount = 0
                 crashRestartStreak = 0
@@ -1404,7 +1405,7 @@ object TunnelManager {
                 currentParams = params
                 strongAppContext = appContext
                 lastContext = WeakReference(appContext)
-                activeSettingsStore = SettingsStore(appContext)
+                activeSettingsStore = SettingsStore(appContext, ProfileScope.Run)
                 lastTunnelDiagnostic.value = ""
                 currentCaptchaSolveMethod = params.captchaSolveMethod
                 runFatal.set(FirstFatal())
@@ -2045,7 +2046,7 @@ object TunnelManager {
     }
 
     private suspend fun TunnelParams.withNewSession(context: Context): TunnelParams {
-        val store = activeSettingsStore ?: SettingsStore(context).also {
+        val store = activeSettingsStore ?: SettingsStore(context, ProfileScope.Run).also {
             activeSettingsStore = it
         }
         val proposed = if (generationId == Long.MAX_VALUE) Long.MAX_VALUE else generationId + 1
@@ -2376,7 +2377,7 @@ object TunnelManager {
                 }
             } else if (previousRule != null) {
                 activeScope.launch {
-                    val store = SettingsStore(ctx)
+                    val store = SettingsStore(ctx, ProfileScope.Run)
                     // a rule that arrived again meanwhile has pushed and rebuilt for itself
                     if (!pushLocalUnlessServerRule(store.routingSnapshot.first().toUpdate())) return@launch
                     logEffectiveLocalRouting(store)
@@ -2407,7 +2408,7 @@ object TunnelManager {
     fun pushLocalRouting(ctx: Context) {
         if (serverRoutingActive.value) return
         activeScope.launch {
-            val store = SettingsStore(ctx)
+            val store = SettingsStore(ctx, ProfileScope.Run)
             if (pushLocalUnlessServerRule(store.routingSnapshot.first().toUpdate())) logEffectiveLocalRouting(store)
         }
     }
@@ -2426,7 +2427,7 @@ object TunnelManager {
     internal fun importRoutingRules(ctx: Context, plan: RoutingImportPlan) {
         val appContext = ctx.applicationContext
         scope.launch {
-            SettingsStore(appContext).applyRoutingImport(plan)
+            SettingsStore(appContext, ProfileScope.Run).applyRoutingImport(plan)
             if (plan.apps != null) reloadVpn()
         }
     }

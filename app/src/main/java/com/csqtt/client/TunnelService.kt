@@ -177,7 +177,11 @@ class TunnelService : Service() {
 
                 startJob = serviceScope.launch {
                     try {
-                        val store = SettingsStore(applicationContext)
+                        // the run's own profile from now on (the run reads its own profile, the operator 2026-11-21):
+                        // the one the START was built for; editing another profile never reaches the run
+                        intent.getIntExtra(CsqttConstants.General.EXTRA_RUN_PROFILE, -1).takeIf { it >= 0 }
+                            ?.let { SettingsStore(applicationContext).saveRunProfile(it) }
+                        val store = SettingsStore(applicationContext, ProfileScope.Run)
                         // the run is wanted from now on, however long it waits for a network: a kill and the system's
                         // restart (restoreTunnel) bring it back; every way a start ends saves false (stopTunnel)
                         store.saveTunnelWasRunning(true)
@@ -417,20 +421,15 @@ class TunnelService : Service() {
         val appContext = applicationContext
         startJob = serviceScope.launch {
             try {
-                val store = SettingsStore(appContext)
+                // a resume and the system's restart come back on the run's own profile (run_profile); a switch resolves
+                // the pick, which is the active profile
+                val store = SettingsStore(appContext, if (switching) ProfileScope.Active else ProfileScope.Run)
 
                 val wasRunning = store.tunnelWasRunning.first()
                 if (!wasRunning) {
                     Log.d("TunnelService", "restoreTunnel: tunnelWasRunning=false, автостарт отменён — чужой VPN не нужно убивать")
                     launch(Dispatchers.Main) { stopTunnel() }
                     return@launch
-                }
-                // the operator (2026-11-21): a run resumes on its own profile, even while another one is open for editing
-                // (added while connected); a switch is the pick itself
-                if (!switching) {
-                    val runProfile = TunnelManager.sourceProfile
-                    ProfileSwitch.resumeProfile(runProfile, store.activeProfile.first(), store.isProfileInUse(runProfile))
-                        ?.let { store.saveActiveProfile(it) }
                 }
                 autoPauseRequested = true
                 autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
@@ -677,10 +676,10 @@ class TunnelService : Service() {
                 // recovery can outlive its run, B5h1 verify 2); the active one is applied only where the run restarts onto
                 // it — for S8's hashes and the log's masking
                 val runIdentity = TunnelManager.runIdentity()
-                val store = SettingsStore(applicationContext)
-                // a run stays on its profile (the operator, 2026-11-21): while another one is open (added while
-                // connected), the recovery would resolve that one, so it waits for the run's own (B5h1 F2 / V1)
-                if (runIdentity.profile != store.activeProfile.first()) return@launch
+                // the run's own profile, whatever is open in the screens (the run reads its own profile)
+                val store = SettingsStore(applicationContext, ProfileScope.Run)
+                // a switch under way replaces this run: its own mint is the one that counts (switch verify 2)
+                if (TunnelManager.switchTarget != null) return@launch
                 val vkHashMode = store.vkHashMode.first()
                 val resolvedSource = resolveConnectionSource(store)
                 val activeIdentity = TunnelManager.runIdentity()
@@ -806,7 +805,12 @@ class TunnelService : Service() {
             runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(true) }
         }
 
-        if (switchTo != null) TunnelManager.switchProfile(this, params, switchTo) else TunnelManager.start(this, params)
+        if (switchTo != null) {
+            serviceScope.launch { runCatching { SettingsStore(applicationContext).saveRunProfile(switchTo.profile) } }
+            TunnelManager.switchProfile(this, params, switchTo)
+        } else {
+            TunnelManager.start(this, params)
+        }
         if (!physicalNetworks.hasUsableNetwork()) {
             TunnelManager.suspendForNoNetwork(physicalNetworkPauseReason(isAirplaneModeOn()))
         }
@@ -1138,7 +1142,11 @@ class TunnelService : Service() {
             autoPauseMutex.withLock {
                 autoPausedForWifi = false
                 TunnelManager.leaveWifiAutoPause()
-                runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(false) }
+                runCatching {
+                    val store = SettingsStore(applicationContext)
+                    store.saveTunnelWasRunning(false)
+                    store.clearRunProfile()
+                }
                 releaseTunnelResources(finishVkCalls)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 foregroundStarted = false
@@ -1179,7 +1187,13 @@ class TunnelService : Service() {
             VkAutoCallsManager.finishActiveCalls()
             TunnelManager.stop(finishVkCalls = true, notifyController = false)
         }
-        serviceScope.launch { runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(false) } }
+        serviceScope.launch {
+            runCatching {
+                val store = SettingsStore(applicationContext)
+                store.saveTunnelWasRunning(false)
+                store.clearRunProfile()
+            }
+        }
         releaseWifiLock()
     }
 
@@ -1291,7 +1305,7 @@ class TunnelService : Service() {
     private fun observeDomainRoutingSettings() {
         domainRoutingSettingsJob?.cancel()
         domainRoutingSettingsJob = serviceScope.launch {
-            SettingsStore(applicationContext).routingSnapshot.drop(1).collect {
+            SettingsStore(applicationContext, ProfileScope.Run).routingSnapshot.drop(1).collect {
                 if (TunnelManager.running.value) TunnelManager.pushLocalRouting(applicationContext)
             }
         }

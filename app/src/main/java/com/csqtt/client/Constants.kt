@@ -11,6 +11,8 @@ object CsqttConstants {
         const val ACTION_RECOVER_VK_CALL = "com.csqtt.client.RECOVER_VK_CALL"
         // a profile picked while the tunnel is on: the run reconnects onto it (the operator, 2026-11-21)
         const val ACTION_SWITCH_PROFILE = "com.csqtt.client.SWITCH_PROFILE"
+        // the profile a START was built for: the run's own from then on (run_profile)
+        const val EXTRA_RUN_PROFILE = "run_profile"
         const val EXTRA_UNAVAILABLE_VK_HASH = "unavailable_vk_hash"
     }
 

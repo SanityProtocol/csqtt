@@ -225,7 +225,20 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
     return json.toString()
 }
 
-class SettingsStore(context: Context) {
+/**
+ * Which profile a store's per-profile reads and writes use (the run reads its own profile, the operator 2026-11-21):
+ * [Active], the profile open in the screens; [Run], the profile the tunnel runs on (run_profile, else the active one) —
+ * for the run-time code, so editing another profile never touches the live run; [Fixed], one profile (a switch's target).
+ */
+internal sealed interface ProfileScope {
+    data object Active : ProfileScope
+    data object Run : ProfileScope
+    data class Fixed(val profile: Int) : ProfileScope
+}
+
+class SettingsStore internal constructor(context: Context, private val scope: ProfileScope) {
+    constructor(context: Context) : this(context, ProfileScope.Active)
+
     private val appContext = context.applicationContext
     companion object {
         // Every per-profile key, declared once with its type and its group (M-37, M-40). It is filled by the
@@ -425,6 +438,15 @@ class SettingsStore(context: Context) {
         private val TUNNEL_WAS_RUNNING = booleanPreferencesKey("tunnel_was_running")
         // B5h1: the cause of the last stop the user did not ask for, until the next start (this device's state)
         private val LAST_STOP_CAUSE = stringPreferencesKey("last_stop_cause")
+        // the profile the tunnel runs on, from its start (or the switch onto it) to its stop (this device's state)
+        private val RUN_PROFILE = intPreferencesKey("run_profile")
+
+        /** The profile [scope] reads and writes in [prefs] (a Run scope with no run is the active profile). */
+        internal fun selectedProfileOf(prefs: Preferences, scope: ProfileScope): Int = when (scope) {
+            ProfileScope.Active -> prefs[ACTIVE_PROFILE] ?: 0
+            ProfileScope.Run -> prefs[RUN_PROFILE] ?: prefs[ACTIVE_PROFILE] ?: 0
+            is ProfileScope.Fixed -> scope.profile
+        }
 
         @Volatile
         internal var cachedVkHashMode: String? = null
@@ -684,7 +706,7 @@ class SettingsStore(context: Context) {
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
-                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS, UI_OWNER_MODE, LAST_STOP_CAUSE,
+                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS, UI_OWNER_MODE, LAST_STOP_CAUSE, RUN_PROFILE,
             ).mapTo(HashSet()) { it.name }
         }
 
@@ -1131,6 +1153,11 @@ class SettingsStore(context: Context) {
     }
 
     private val dataStore = appContext.dataStore
+
+    private fun selectedProfile(prefs: Preferences): Int = selectedProfileOf(prefs, scope)
+
+    /** The profile this store reads and writes (see [ProfileScope]). */
+    internal val selectedProfileIndex: Flow<Int> = dataStore.data.map { selectedProfile(it) }
     private val secureStore = SecureStringStore(appContext)
 
     val activeProfile: Flow<Int> = dataStore.data.map {
@@ -1149,11 +1176,11 @@ class SettingsStore(context: Context) {
     val infoActionsExpanded: Flow<Boolean> = dataStore.data.map { it[INFO_ACTIONS_EXPANDED] ?: false }
     val infoProjectExpanded: Flow<Boolean> = dataStore.data.map { it[INFO_PROJECT_EXPANDED] ?: false }
     val csqttLink: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(CSQTT_LINK, profile)] ?: ""
     }
     val csqttLinkMode: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false
     }
     /**
@@ -1161,25 +1188,25 @@ class SettingsStore(context: Context) {
      * once it holds a link, a server or a subscription.
      */
     internal val emptyProfileMode: Flow<Boolean?> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         if (profileModeSwitchable(prefs, profile)) prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true else null
     }
 
     val peer: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(PEER, profile)] ?: ""
     }
     val vkHashes: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(VK_HASHES, profile)] ?: ""
     }
     val secondaryVkHash: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(SECONDARY_VK_HASH, profile)] ?: ""
     }
     /** The most workers the active profile may use: «Экстра потоки» lifts 70 to 100, a subscription can lower it. */
     private fun workersMaximum(prefs: Preferences): Int {
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val isExtra = prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false
         val defaultMax = WorkerCountPolicy.defaultMaximum(isExtra)
         return prefs[getProfileKey(SUBSCRIPTION_POWER, profile)]
@@ -1189,34 +1216,34 @@ class SettingsStore(context: Context) {
     }
     val workersMaximum: Flow<Int> = dataStore.data.map { prefs -> workersMaximum(prefs) }
     val workersPerHash: Flow<Int> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS
         WorkerCountPolicy.normalize(current, maximum = workersMaximum(prefs))
     }
     val protocol: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(PROTOCOL, profile)] ?: "udp"
     }
     val listenPort: Flow<Int> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(LISTEN_PORT, profile)] ?: 0
     }
     /** The deploy form's «Ручные порты», on the active profile's VPS record. */
     val manualPortsEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        linkedVps(prefs, prefs[ACTIVE_PROFILE] ?: 0)?.let { prefs[getProfileKey(MANUAL_PORTS_ENABLED, it)] } ?: false
+        linkedVps(prefs, selectedProfile(prefs))?.let { prefs[getProfileKey(MANUAL_PORTS_ENABLED, it)] } ?: false
     }
     val serverPeerPort: Flow<Int> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(SERVER_PEER_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT
     }
     val sni: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(SNI, profile)] ?: ""
     }
 
     /** The deploy tab's form: the active profile's VPS record (B5b2), its ports, and the defaults when it has none. */
     internal val deploySettingsSnapshot: Flow<DeploySettingsSnapshot> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val vps = linkedVps(prefs, profile)
         fun <T> record(key: Preferences.Key<T>): T? = vps?.let { prefs[getProfileKey(key, it)] }
         fun secret(encrypted: Preferences.Key<String>, legacy: Preferences.Key<String>) =
@@ -1259,7 +1286,7 @@ class SettingsStore(context: Context) {
         )
     }.onIo()
     internal val tunnelAuthSnapshot: Flow<TunnelAuthSnapshot> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val connectionPassword = readConnectionPasswordState(prefs, profile)
         TunnelAuthSnapshot(
             profile = profile,
@@ -1270,22 +1297,22 @@ class SettingsStore(context: Context) {
         )
     }.onIo()
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(EXCLUDED_APPS, profile)] ?: ""
     }
     val whitelistApps: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(WHITELIST_APPS, profile)] ?: ""
     }
 
     internal val connectionPasswordState: Flow<StoredSecret> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         readConnectionPasswordState(prefs, profile)
     }.onIo()
     val connectionPassword: Flow<String> = connectionPasswordState.map { it.value }
 
     val vkAuthMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         when (prefs[getProfileKey(VK_AUTH_MODE, profile)]) {
             CsqttConstants.VkAuth.MODE_CAPTCHA -> CsqttConstants.VkAuth.MODE_CAPTCHA
             CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_AUTO_JS
@@ -1293,7 +1320,7 @@ class SettingsStore(context: Context) {
         }
     }
     val obfsMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val mode = prefs[getProfileKey(OBFS_MODE, profile)]
         if (mode == "unified") {
             mode
@@ -1303,7 +1330,7 @@ class SettingsStore(context: Context) {
     }
 
     val turnTransport: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         when (prefs[getProfileKey(TURN_TRANSPORT, profile)]) {
             CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS -> CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS
             else -> CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT
@@ -1312,12 +1339,12 @@ class SettingsStore(context: Context) {
 
     /** Per profile; the core uses it only with the TCP transport. */
     val dpiSplit: Flow<DpiSplitMode> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         DpiSplitMode.fromStored(prefs[getProfileKey(DPI_SPLIT, profile)])
     }
 
     val srtpMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         when (prefs[getProfileKey(SRTP_MODE, profile)]) {
             CsqttConstants.SrtpMode.WRAP -> CsqttConstants.SrtpMode.WRAP
             CsqttConstants.SrtpMode.DTLS -> CsqttConstants.SrtpMode.DTLS
@@ -1326,7 +1353,7 @@ class SettingsStore(context: Context) {
     }
 
     val customTurnIps: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val subnetId = prefs[getProfileKey(SELECTED_TURN_SUBNET, profile)] ?: ""
         if (subnetId.isNotBlank()) {
             val stored = prefs[getProfileKey(CUSTOM_TURN_IPS, profile)]
@@ -1341,30 +1368,30 @@ class SettingsStore(context: Context) {
     }
 
     val selectedTurnSubnet: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(SELECTED_TURN_SUBNET, profile)] ?: ""
     }
 
     val turnSubnetIpLimit: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] ?: "ALL"
     }
 
     val captchaMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(CAPTCHA_MODE, profile)] ?: "auto"
     }
     val captchaSolveMethod: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(CAPTCHA_SOLVE_METHOD, profile)] ?: "auto"
     }
     val captchaWbvSolveMethod: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(CAPTCHA_WBV_SOLVE_METHOD, profile)] ?: "auto"
     }
 
     val vkHashMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         val mode = prefs[getProfileKey(VK_HASH_MODE, profile)]
         when (mode) {
             "auto", CsqttConstants.VkAutoHash.MODE_AUTO_API ->
@@ -1375,79 +1402,79 @@ class SettingsStore(context: Context) {
         }
     }
     val vkAccessToken: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         readSecret(prefs, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, profile)
     }.onIo()
     val vkAccessTokenUserId: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] ?: ""
     }
 
     val isWhitelist: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(IS_WHITELIST, profile)] ?: false
     }
 
     val domainRoutingEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DOMAIN_ROUTING_ENABLED, profile)] ?: false
     }
 
     val excludeRuZonesEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(EXCLUDE_RU_ZONES_ENABLED, profile)] ?: false
     }
 
     val templateDomainsEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(TEMPLATE_DOMAINS_ENABLED, profile)] ?: false
     }
 
     val domainIsWhitelist: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] ?: false
     }
 
     val directDomains: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DIRECT_DOMAINS, profile)] ?: ""
     }
 
     val directDomainsBlack: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)]
             ?: prefs[getProfileKey(DIRECT_DOMAINS, profile)]
             ?: ""
     }
 
     val directDomainsWhite: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] ?: ""
     }
 
     val ipRoutingEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(IP_ROUTING_ENABLED, profile)] ?: false
     }
 
     val ipIsWhitelist: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(IP_IS_WHITELIST, profile)] ?: false
     }
 
     val directIpsBlack: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DIRECT_IPS_BLACK, profile)] ?: ""
     }
 
     val directIpsWhite: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] ?: ""
     }
 
     /** What the active profile asks of the VPN interface (B5d2), in one read. */
     internal val vpnSettings: Flow<VpnSettings> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         fun apps(key: Preferences.Key<String>) = prefs[getProfileKey(key, profile)].orEmpty().split(',').filter(String::isNotBlank).toSet()
         val ipsWhite = prefs[getProfileKey(IP_IS_WHITELIST, profile)] ?: false
         VpnSettings(
@@ -1463,20 +1490,20 @@ class SettingsStore(context: Context) {
     }.distinctUntilChanged()
 
     val appRoutingAll: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[getProfileKey(APP_ROUTING_ALL, prefs[ACTIVE_PROFILE] ?: 0)] ?: false
+        prefs[getProfileKey(APP_ROUTING_ALL, selectedProfile(prefs))] ?: false
     }
 
     /** M-59: «Все с VPN» for the active profile; the black and white lists are left as they are. */
     suspend fun saveAppRoutingAll(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(APP_ROUTING_ALL, profile)] = enabled
         }
     }
 
     /** M-57: the active profile's domain and IP rules in one read (the black domain list falls back to the legacy key). */
     internal val routingSnapshot: Flow<RoutingSnapshot> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         RoutingSnapshot(
             domainIsWhitelist = prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] ?: false,
             directDomainsBlack = prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)]
@@ -1626,11 +1653,6 @@ class SettingsStore(context: Context) {
     }
 
     /** Whether [profile] is the only one linking its VPS record (the delete dialog says the SSH data go too). */
-    /** Whether [profile] is a profile the user has (profileInUse); false for any index outside the slots. */
-    internal suspend fun isProfileInUse(profile: Int): Boolean =
-        profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX &&
-            dataStore.data.map { prefs -> profileInUse(prefs, profile) }.first()
-
     internal suspend fun profileHoldsOnlyLinkToVps(profile: Int): Boolean =
         dataStore.data.map { prefs -> isOnlyLinkToVps(prefs, profile) }.first()
 
@@ -1799,13 +1821,13 @@ class SettingsStore(context: Context) {
     }
 
     val receivedHashes: Flow<List<String>> = dataStore.data.map { prefs ->
-        prefs[getProfileKey(RECEIVED_HASHES, prefs[ACTIVE_PROFILE] ?: 0)].orEmpty().split(",").filter(String::isNotBlank)
+        prefs[getProfileKey(RECEIVED_HASHES, selectedProfile(prefs))].orEmpty().split(",").filter(String::isNotBlank)
     }
 
     /** D6: the pool record of [profile] (the active one by default), when its owner run uses one (B5e3b). */
     internal suspend fun activePoolPanel(profile: Int? = null): PoolPanel? = withContext(Dispatchers.IO) {
         val prefs = dataStore.data.first()
-        poolPanelOf(prefs, profile ?: prefs[ACTIVE_PROFILE] ?: 0) { vps ->
+        poolPanelOf(prefs, profile ?: selectedProfile(prefs)) { vps ->
             readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, vps)
         }
     }
@@ -1834,13 +1856,13 @@ class SettingsStore(context: Context) {
     }
 
     val linkHashesRemoved: Flow<Set<String>> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         (prefs[getProfileKey(LINK_HASHES_REMOVED, profile)] ?: "").split(",").filter(String::isNotBlank).toSet()
     }
 
     suspend fun saveLinkHashesRemoved(removed: Set<String>) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             if (removed.isEmpty()) {
                 prefs.remove(getProfileKey(LINK_HASHES_REMOVED, profile))
             } else {
@@ -1850,7 +1872,7 @@ class SettingsStore(context: Context) {
     }
 
     val extraWorkers: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false
     }
     val autoJsRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
@@ -1872,18 +1894,18 @@ class SettingsStore(context: Context) {
     val themePalette: Flow<String> = dataStore.data.map { it[THEME_PALETTE] ?: "indigo" }
 
     val selectedFingerprint: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(SELECTED_FINGERPRINT, profile)] ?: "firefox"
     }
     val activeClientIds: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] ?: CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS
     }
     val clientIdCheckResults: Flow<String> = dataStore.data.map { prefs ->
         prefs[CLIENT_ID_CHECK_RESULTS] ?: "{}"
     }
     val vkHashCheckResults: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profile = selectedProfile(prefs)
         prefs[getProfileKey(VK_HASH_CHECK_RESULTS, profile)] ?: "{}"
     }
     val connectionGeneration: Flow<Long> = dataStore.data.map { prefs ->
@@ -1914,7 +1936,8 @@ class SettingsStore(context: Context) {
     }
 
     init {
-        if (uiCacheStarted.compareAndSet(false, true)) {
+        // the cached values are the screens' (the active profile): only an Active store starts them
+        if (scope == ProfileScope.Active && uiCacheStarted.compareAndSet(false, true)) {
             // the numbered steps ran already (StoreMigrations); these need the keystore or the package list
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                 migrateConnectionPasswordsToLocalStorage()
@@ -1978,14 +2001,14 @@ class SettingsStore(context: Context) {
 
     suspend fun saveFingerprint(fingerprint: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(SELECTED_FINGERPRINT, profile)] = fingerprint
         }
     }
 
     suspend fun saveActiveClientIds(clientIds: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] = clientIds
         }
     }
@@ -1998,7 +2021,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveVkHashCheckResults(resultsJson: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(VK_HASH_CHECK_RESULTS, profile)] = resultsJson
         }
     }
@@ -2007,7 +2030,7 @@ class SettingsStore(context: Context) {
         val normalized = hash.trim()
         if (normalized.isEmpty()) return
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             val key = getProfileKey(VK_HASH_CHECK_RESULTS, profile)
             val results = VkHashValidationCodec.decode(prefs[key] ?: "{}") +
                 (normalized to VkHashValidationStatus.Invalid)
@@ -2063,6 +2086,15 @@ class SettingsStore(context: Context) {
 
     suspend fun clearLastStopCause() {
         dataStore.edit { it.remove(LAST_STOP_CAUSE) }
+    }
+
+    /** The run is on [profile] from now: a start, the switch onto it, a pick while paused on Wi-Fi. */
+    internal suspend fun saveRunProfile(profile: Int) {
+        dataStore.edit { it[RUN_PROFILE] = profile }
+    }
+
+    internal suspend fun clearRunProfile() {
+        dataStore.edit { it.remove(RUN_PROFILE) }
     }
 
     suspend fun saveUpdateState(lastCheckAt: Long, latestVersion: String, error: String) {
@@ -2136,14 +2168,14 @@ class SettingsStore(context: Context) {
 
     suspend fun saveCsqttLink(link: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             writeLinkKeys(prefs, profile, link)
         }
     }
 
     suspend fun saveCsqttLinkMode(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = enabled
         }
     }
@@ -2184,14 +2216,14 @@ class SettingsStore(context: Context) {
 
     suspend fun saveWorkersPerHash(workersPerHash: Int) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(workersPerHash, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
         }
     }
 
     suspend fun saveParticipantTunnelSettings(vkHashes: String, workersPerHash: Int) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(VK_HASHES, profile)] = vkHashes
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] =
                 WorkerCountPolicy.normalize(workersPerHash, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
@@ -2209,7 +2241,7 @@ class SettingsStore(context: Context) {
         noDns: Boolean = false
     ) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(PEER, profile)] = peer
             prefs[getProfileKey(VK_HASHES, profile)] = vkHashes
             prefs[getProfileKey(SECONDARY_VK_HASH, profile)] = secondaryVkHash
@@ -2236,7 +2268,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveVkHashesOnly(vkHashes: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(VK_HASHES, profile)] = vkHashes
         }
     }
@@ -2299,7 +2331,7 @@ class SettingsStore(context: Context) {
     suspend fun saveServerPeerPort(peer: Int) {
         if (peer !in 1..65535) return
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(SERVER_PEER_PORT, profile)] = peer
         }
     }
@@ -2319,7 +2351,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveExcludedApps(packages: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(EXCLUDED_APPS, profile)] = packages
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
@@ -2327,7 +2359,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveWhitelistApps(packages: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(WHITELIST_APPS, profile)] = packages
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
@@ -2335,7 +2367,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveAppRoutingLists(blacklist: String, whitelist: String, isWhitelist: Boolean? = null) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(EXCLUDED_APPS, profile)] = blacklist
             prefs[getProfileKey(WHITELIST_APPS, profile)] = whitelist
             if (isWhitelist != null) prefs[getProfileKey(IS_WHITELIST, profile)] = isWhitelist
@@ -2366,7 +2398,7 @@ class SettingsStore(context: Context) {
     suspend fun resetUnreadableConnectionPassword(): Boolean {
         var reset = false
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             val localKey = getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)
             val legacyKey = getProfileKey(CONNECTION_PASSWORD, profile)
             val encryptedKey = getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile)
@@ -2398,7 +2430,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveVkAuthMode(mode: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             val normalized = when (mode) {
                 CsqttConstants.VkAuth.MODE_CAPTCHA -> CsqttConstants.VkAuth.MODE_CAPTCHA
                 CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_AUTO_JS
@@ -2415,21 +2447,21 @@ class SettingsStore(context: Context) {
 
     suspend fun saveObfsMode(mode: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(OBFS_MODE, profile)] = mode
         }
     }
 
     suspend fun saveDpiSplit(mode: DpiSplitMode) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DPI_SPLIT, profile)] = mode.storedValue
         }
     }
 
     suspend fun saveTurnTransport(transport: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(TURN_TRANSPORT, profile)] = when (transport) {
                 CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS -> CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS
                 else -> CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT
@@ -2439,7 +2471,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveSrtpMode(mode: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(SRTP_MODE, profile)] = when (mode) {
                 CsqttConstants.SrtpMode.WRAP -> CsqttConstants.SrtpMode.WRAP
                 CsqttConstants.SrtpMode.DTLS -> CsqttConstants.SrtpMode.DTLS
@@ -2450,7 +2482,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveSelectedTurnSubnet(subnetId: String, ipLimit: String? = null) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             val limit = ipLimit ?: prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] ?: "ALL"
             val allIps = if (subnetId.isNotBlank()) TurnSubnetRegistry.getIpsForSubnet(subnetId) else emptyList()
             val limitCount = limit.toIntOrNull()
@@ -2471,7 +2503,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveTurnSubnetIpLimit(limit: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             val subnetId = prefs[getProfileKey(SELECTED_TURN_SUBNET, profile)] ?: ""
             val allIps = if (subnetId.isNotBlank()) TurnSubnetRegistry.getIpsForSubnet(subnetId) else emptyList()
             val limitCount = limit.toIntOrNull()
@@ -2489,7 +2521,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveExtraWorkers(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(EXTRA_WORKERS, profile)] = enabled
             if (!enabled) {
                 val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS
@@ -2542,21 +2574,21 @@ class SettingsStore(context: Context) {
 
     suspend fun saveCaptchaMode(mode: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(CAPTCHA_MODE, profile)] = mode
         }
     }
 
     suspend fun saveCaptchaSolveMethod(method: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(CAPTCHA_SOLVE_METHOD, profile)] = method
         }
     }
 
     suspend fun saveWbvCaptchaSolveMethod(method: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(CAPTCHA_WBV_SOLVE_METHOD, profile)] = method
             if (prefs[getProfileKey(CAPTCHA_MODE, profile)] == "wv") {
                 prefs[getProfileKey(CAPTCHA_SOLVE_METHOD, profile)] = method
@@ -2566,7 +2598,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveVkHashMode(mode: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             val currentAuthMode = prefs[getProfileKey(VK_AUTH_MODE, profile)]
             val nextAuthMode = vkAuthModeForHashMode(mode, currentAuthMode)
             val selection = normalizeVkModeSelection(
@@ -2582,7 +2614,7 @@ class SettingsStore(context: Context) {
     /** A sign-in's token for the active profile; archived by its user id (M-79) with its expiry (0 = permanent). */
     suspend fun saveVkAccessToken(token: String, userId: String, expiresInSeconds: Long = 0L) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs.putSecret(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, token, profile)
             prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] = userId
             val expiresAt = if (expiresInSeconds > 0) System.currentTimeMillis() + expiresInSeconds * 1000 else 0L
@@ -2593,7 +2625,7 @@ class SettingsStore(context: Context) {
     /** «Удалить токен», or a token VK refused: the active profile's token goes, and its account leaves the archive. */
     suspend fun clearVkAccessToken() {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)]?.let { userId ->
                 prefs[VK_ACCOUNTS] = VkAccounts.remove(prefs[VK_ACCOUNTS].orEmpty(), userId)
             }
@@ -2605,7 +2637,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveIsWhitelist(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(IS_WHITELIST, profile)] = enabled
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
@@ -2613,7 +2645,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             if (isWhitelist) {
                 prefs[getProfileKey(WHITELIST_APPS, profile)] = packages
             } else {
@@ -2626,7 +2658,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveDomainRoutingEnabled(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DOMAIN_ROUTING_ENABLED, profile)] = enabled
         }
     }
@@ -2634,7 +2666,7 @@ class SettingsStore(context: Context) {
     /** The domains dialog's save, in one write: the live push never sees the mode without its list (M-57). */
     suspend fun saveDomainRules(isWhitelist: Boolean, black: String, white: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] = isWhitelist
             prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)] = black
             prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] = white
@@ -2644,7 +2676,7 @@ class SettingsStore(context: Context) {
     /** The IP dialog's save, in one write. */
     suspend fun saveIpRules(isWhitelist: Boolean, black: String, white: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(IP_IS_WHITELIST, profile)] = isWhitelist
             prefs[getProfileKey(IP_ROUTING_ENABLED, profile)] = true
             prefs[getProfileKey(DIRECT_IPS_BLACK, profile)] = black
@@ -2655,7 +2687,7 @@ class SettingsStore(context: Context) {
     /** M-63: a validated rules import, every selected section in one write. */
     internal suspend fun applyRoutingImport(plan: RoutingImportPlan) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             plan.apps?.let { apps ->
                 apps.black?.let { prefs[getProfileKey(EXCLUDED_APPS, profile)] = it.sorted().joinToString(",") }
                 apps.white?.let { prefs[getProfileKey(WHITELIST_APPS, profile)] = it.sorted().joinToString(",") }
@@ -2679,28 +2711,28 @@ class SettingsStore(context: Context) {
 
     suspend fun saveExcludeRuZonesEnabled(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(EXCLUDE_RU_ZONES_ENABLED, profile)] = enabled
         }
     }
 
     suspend fun saveTemplateDomainsEnabled(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(TEMPLATE_DOMAINS_ENABLED, profile)] = enabled
         }
     }
 
     suspend fun saveDomainIsWhitelist(isWhitelist: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DOMAIN_IS_WHITELIST, profile)] = isWhitelist
         }
     }
 
     suspend fun saveDirectDomains(domains: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DIRECT_DOMAINS, profile)] = domains
             prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)] = domains
         }
@@ -2708,7 +2740,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveDirectDomainsBlack(domains: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DIRECT_DOMAINS_BLACK, profile)] = domains
             prefs[getProfileKey(DIRECT_DOMAINS, profile)] = domains
         }
@@ -2716,35 +2748,35 @@ class SettingsStore(context: Context) {
 
     suspend fun saveDirectDomainsWhite(domains: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DIRECT_DOMAINS_WHITE, profile)] = domains
         }
     }
 
     suspend fun saveIpRoutingEnabled(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(IP_ROUTING_ENABLED, profile)] = enabled
         }
     }
 
     suspend fun saveIpIsWhitelist(isWhitelist: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(IP_IS_WHITELIST, profile)] = isWhitelist
         }
     }
 
     suspend fun saveDirectIpsBlack(ips: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DIRECT_IPS_BLACK, profile)] = ips
         }
     }
 
     suspend fun saveDirectIpsWhite(ips: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profile = selectedProfile(prefs)
             prefs[getProfileKey(DIRECT_IPS_WHITE, profile)] = ips
         }
     }

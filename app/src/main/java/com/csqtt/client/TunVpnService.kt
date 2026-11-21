@@ -195,7 +195,7 @@ class TunVpnService : VpnService() {
                 clientIp = clientIp,
                 serverDns = dns,
                 serverRule = serverRule,
-                settings = SettingsStore(applicationContext).vpnSettings.first(),
+                settings = SettingsStore(applicationContext, ProfileScope.Run).vpnSettings.first(),
                 installed = ::isPackageInstalled,
             )
 

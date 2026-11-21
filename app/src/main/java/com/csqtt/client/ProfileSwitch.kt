@@ -12,11 +12,4 @@ internal object ProfileSwitch {
 
     /** A pick reconnects only onto a profile the run is not on: picking the run's own profile back just selects it. */
     fun pickReconnects(runOn: Boolean, picked: Int, runProfile: Int): Boolean = runOn && picked != runProfile
-
-    /**
-     * At a Wi-Fi resume, the run's own profile when another one is open (added while connected) and the run's still
-     * exists ([runProfileInUse]: one deleted while paused is not brought back, verify N4); null to keep the active.
-     */
-    fun resumeProfile(runProfile: Int, active: Int, runProfileInUse: Boolean): Int? =
-        runProfile.takeIf { it >= 0 && it != active && runProfileInUse }
 }
