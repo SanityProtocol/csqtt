@@ -74,7 +74,7 @@ internal fun VkTokenRevokeDialog(
                 }
 
                 Text(
-                    text = "При удалении токена сессия VK сохраняется настолько, насколько это возможно: токен можно будет быстро получить заново, либо вы сможете сменить аккаунт самостоятельно.",
+                    text = "Токен и вход в VK в приложении удаляются. Чтобы снова подключиться, войдите в VK — в тот же или в другой аккаунт.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 15.sp,

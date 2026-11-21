@@ -187,7 +187,16 @@ class MainActivity : ComponentActivity() {
                         onFingerprintChange = { fp ->
                             scope.launch { settingsStore.saveFingerprint(fp) }
                         },
-                        onVkAuthRequested = { showVkAuthDialog = true },
+                        onVkAuthRequested = {
+                            // M-79: no account change while the tunnel runs, starts or stops; the old session's VK
+                            // cookies go first, so a sign-in can pick another account
+                            if (vkAccountChangeBlocked()) {
+                                authContext.showRaisedToast(VkTokenPolicy.CHANGE_WHILE_RUNNING, Toast.LENGTH_SHORT)
+                            } else {
+                                VkAuthWebViewManager.clearVkSessionCookies()
+                                showVkAuthDialog = true
+                            }
+                        },
                     )
                     if (showPermissionIntro) {
                         // one word before the system prompts, shown once (L-29)
@@ -226,16 +235,23 @@ class MainActivity : ComponentActivity() {
                 val onToken: (VkAuthPayload) -> Unit = { payload ->
                     showVkAuthDialog = false
                     authScope.launch {
-                        appSettingsStore.saveVkAccessToken(payload.token, payload.userId)
-                        // VK can hand over an expiring token now and then (accepted after one retry): say which it is
-                        val kind = if (payload.expiresIn > 0) "VK access token сохранён (временный)" else "Вечный VK access token сохранён"
-                        authContext.showRaisedToast(kind, Toast.LENGTH_SHORT)
+                        // a tunnel started while the sign-in was open keeps its account (M-79)
+                        if (vkAccountChangeBlocked()) {
+                            authContext.showRaisedToast(VkTokenPolicy.CHANGE_WHILE_RUNNING, Toast.LENGTH_SHORT)
+                            return@launch
+                        }
+                        // only a permanent token reaches here (M-82 / D30: an expiring one is refused at sign-in)
+                        appSettingsStore.saveVkAccessToken(payload.token, payload.userId, payload.expiresIn)
+                        authContext.showRaisedToast("Аккаунт VK подключён", Toast.LENGTH_SHORT)
                     }
                 }
                 VkAuthDialog(onToken = onToken, onDismiss = { showVkAuthDialog = false })
             }
         }
     }
+
+    private fun vkAccountChangeBlocked(): Boolean =
+        TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)

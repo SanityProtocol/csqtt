@@ -39,6 +39,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.VkAuthWebViewManager
+import com.csqtt.client.VkTokenPolicy
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DpiSplitMode
@@ -542,7 +544,14 @@ internal fun SettingsTabContent(
             },
             onRevokeToken = {
                 showVkRevokeDialog = false
-                scope.launch { settingsStore.clearVkAccessToken() }
+                // M-79: not while the tunnel runs, starts or stops; the VK session's cookies go with the token, so the
+                // next sign-in does not quietly return the same account
+                if (TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value) {
+                    context.showRaisedToast(VkTokenPolicy.CHANGE_WHILE_RUNNING, Toast.LENGTH_SHORT)
+                } else {
+                    VkAuthWebViewManager.clearVkSessionCookies()
+                    scope.launch { settingsStore.clearVkAccessToken() }
+                }
             }
         )
     }

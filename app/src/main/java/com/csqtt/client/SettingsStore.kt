@@ -291,6 +291,8 @@ class SettingsStore(context: Context) {
         // M-75: the user's role — what the app shows (the Deploy tab, the config import) — apart from how each profile
         // connects (CSQTT_LINK_MODE, per profile). Written once by store step 4 from the active profile's link mode.
         private val UI_OWNER_MODE = booleanPreferencesKey("ui_owner_mode")
+        // M-79: VK accounts by user id, each token encrypted (VkAccounts); a device credential, never in a backup
+        private val VK_ACCOUNTS = stringPreferencesKey("vk_accounts_v1")
         private val DEPLOY_LOGIN = profileString("deploy_login", VPS)
         private val DEPLOY_PASSWORD = profileString("deploy_password", VPS)
         private val DEPLOY_PASSWORD_ENCRYPTED = profileString("deploy_password_encrypted", VPS)
@@ -634,7 +636,7 @@ class SettingsStore(context: Context) {
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
-                TUNNEL_WAS_RUNNING, PROFILE_EPOCH,
+                TUNNEL_WAS_RUNNING, PROFILE_EPOCH, VK_ACCOUNTS,
             ).mapTo(HashSet()) { it.name }
         }
 
@@ -2357,17 +2359,24 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveVkAccessToken(token: String, userId: String) {
+    /** A sign-in's token for the active profile; archived by its user id (M-79) with its expiry (0 = permanent). */
+    suspend fun saveVkAccessToken(token: String, userId: String, expiresInSeconds: Long = 0L) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs.putSecret(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, token, profile)
             prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] = userId
+            val expiresAt = if (expiresInSeconds > 0) System.currentTimeMillis() + expiresInSeconds * 1000 else 0L
+            prefs[VK_ACCOUNTS] = VkAccounts.put(prefs[VK_ACCOUNTS].orEmpty(), userId, secureStore.encrypt(token), expiresAt)
         }
     }
 
+    /** «Удалить токен», or a token VK refused: the active profile's token goes, and its account leaves the archive. */
     suspend fun clearVkAccessToken() {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)]?.let { userId ->
+                prefs[VK_ACCOUNTS] = VkAccounts.remove(prefs[VK_ACCOUNTS].orEmpty(), userId)
+            }
             prefs.remove(getProfileKey(VK_ACCESS_TOKEN_ENCRYPTED, profile))
             prefs.remove(getProfileKey(VK_ACCESS_TOKEN, profile))
             prefs.remove(getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile))

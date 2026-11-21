@@ -272,12 +272,8 @@ internal class VkAuthSession(
                 if (finished) return@post
                 
                 result.fold(
-                    onSuccess = { payload ->
-                        finished = true
-                        mainHandler.removeCallbacksAndMessages(null)
-                        runCatching { CookieManager.getInstance().flush() }
-                        onToken(payload)
-                    },
+                    // the scraped token had no permanence check: an expiring one was taken as is (M-82)
+                    onSuccess = { payload -> acceptOrRetry(payload) },
                     onFailure = {
                         repeatAuthorization()
                     }
@@ -375,19 +371,23 @@ internal class VkAuthSession(
         if (token == handledToken) return
         handledToken = token
         val expiresIn = params["expires_in"]?.toLongOrNull() ?: 0L
-        if (expiresIn == 0L) {
-            finished = true
-            mainHandler.removeCallbacksAndMessages(null)
-            runCatching { CookieManager.getInstance().flush() }
-            onToken(VkAuthPayload(token = token, userId = params["user_id"].orEmpty(), expiresIn = 0L))
-        } else if (!nonPermanentRetried) {
-            nonPermanentRetried = true
-            repeatAuthorization()
-        } else {
-            finished = true
-            mainHandler.removeCallbacksAndMessages(null)
-            runCatching { CookieManager.getInstance().flush() }
-            onToken(VkAuthPayload(token = token, userId = params["user_id"].orEmpty(), expiresIn = expiresIn))
+        acceptOrRetry(VkAuthPayload(token = token, userId = params["user_id"].orEmpty(), expiresIn = expiresIn))
+    }
+
+    /** M-82 / D30, one rule for both sign-in paths: permanent taken, expiring asked again once, then refused. */
+    private fun acceptOrRetry(payload: VkAuthPayload) {
+        when (VkTokenPolicy.decide(payload.expiresIn, nonPermanentRetried)) {
+            VkTokenDecision.Accept -> {
+                finished = true
+                mainHandler.removeCallbacksAndMessages(null)
+                runCatching { CookieManager.getInstance().flush() }
+                onToken(payload)
+            }
+            VkTokenDecision.Retry -> {
+                nonPermanentRetried = true
+                repeatAuthorization()
+            }
+            VkTokenDecision.RefuseExpiring -> finishWithError(VkTokenPolicy.EXPIRING_REFUSED)
         }
     }
 
