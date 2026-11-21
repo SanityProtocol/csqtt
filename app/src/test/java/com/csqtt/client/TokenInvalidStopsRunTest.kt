@@ -6,8 +6,8 @@ import org.junit.Test
 /**
  * B5h1 (B3): a VK-call recovery that meets a token VK refused (or none at all) stops the run with what to do once no
  * call of the run is left, instead of leaving the core on a dead call that it reconnects to forever. While some calls
- * live they carry the run (review F1); a transient failure keeps it; a pool with live hashes serves on (B5e3b); and a
- * recovery that read another profile than the run's decides no stop (review F2).
+ * live they carry the run (review F1); a transient failure keeps it; a pool with live hashes serves on (B5e3b). (A
+ * recovery runs only while the run's own profile is the active one.)
  */
 class TokenInvalidStopsRunTest {
     private val hash = "H".repeat(20)
@@ -18,8 +18,7 @@ class TokenInvalidStopsRunTest {
         autoJs: Boolean = false,
         tokenFromLink: Boolean = false,
         runHasLiveHashes: Boolean = false,
-        runProfileActive: Boolean = true,
-    ) = recoveryOutcome(hashes, autoJs, tokenInvalid, tokenFromLink, runHasLiveHashes, runProfileActive)
+    ) = recoveryOutcome(hashes, autoJs, tokenInvalid, tokenFromLink, runHasLiveHashes)
 
     @Test
     fun `an invalid token with no live call left stops the run with a sign-in`() {
@@ -54,11 +53,5 @@ class TokenInvalidStopsRunTest {
     @Test
     fun `an empty set stops the run with its cause`() {
         assertEquals(RecoveryOutcome.Stop("Не осталось рабочих VK-хешей"), outcome(hashes = " ", tokenInvalid = false))
-    }
-
-    @Test
-    fun `a recovery that read another profile than the run's never stops the run`() {
-        assertEquals(RecoveryOutcome.KeepRunning, outcome(hashes = null, tokenInvalid = true, runProfileActive = false))
-        assertEquals(RecoveryOutcome.KeepRunning, outcome(hashes = " ", tokenInvalid = false, runProfileActive = false))
     }
 }

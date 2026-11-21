@@ -517,22 +517,23 @@ fun MainScreen(
                     csqttLinkMode = csqttLinkMode,
                     activeProfile = activeProfile,
                     onActiveProfileChange = { profile ->
-                        if (profile != activeProfile) {
-                            scope.launch {
-                                settingsStore.saveActiveProfile(profile)
-                                // the operator (2026-11-21): a profile picked while the tunnel is on reconnects onto it
-                                if (ProfileSwitch.reconnects(
-                                        TunnelManager.running.value, TunnelManager.starting.value,
-                                        TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
+                        scope.launch {
+                            if (profile != activeProfile) settingsStore.saveActiveProfile(profile)
+                            // the operator (2026-11-21): a pick of a profile the run is not on reconnects onto it; a run
+                            // paused on Wi-Fi takes it at its resume
+                            val runOn = ProfileSwitch.runIsOn(
+                                TunnelManager.running.value, TunnelManager.starting.value,
+                                TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
+                            )
+                            if (ProfileSwitch.pickReconnects(runOn, profile, TunnelManager.sourceProfile)) {
+                                runCatching {
+                                    context.startService(
+                                        Intent(context, TunnelService::class.java)
+                                            .setAction(CsqttConstants.General.ACTION_SWITCH_PROFILE),
                                     )
-                                ) {
-                                    runCatching {
-                                        context.startService(
-                                            Intent(context, TunnelService::class.java)
-                                                .setAction(CsqttConstants.General.ACTION_SWITCH_PROFILE),
-                                        )
-                                    }
                                 }
+                            } else if (TunnelManager.autoPausedForWifi.value) {
+                                TunnelManager.sourceProfile = profile
                             }
                         }
                     },

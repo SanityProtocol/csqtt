@@ -1,30 +1,37 @@
 package com.csqtt.client
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The operator (2026-11-21): a profile picked while the tunnel is on reconnects onto it; a run paused on Wi-Fi resumes
- * from the active profile anyway and a stopping one ends; «Добавить профиль» (an empty profile, made active) is refused
- * while the tunnel is on in any way.
+ * The operator (2026-11-21): a run stays on its profile until the user picks another one. A pick of another profile
+ * reconnects a run that is on; picking the run's own profile back just selects it; adding a profile is not a pick; a run
+ * paused on Wi-Fi resumes on its own profile, even while another one is open.
  */
 class ProfileSwitchTest {
     @Test
-    fun `a pick reconnects a run that is on or starting, never a stopping, paused or idle one`() {
-        assertTrue(ProfileSwitch.reconnects(running = true, starting = false, stopping = false, pausedOnWifi = false))
-        assertTrue(ProfileSwitch.reconnects(running = false, starting = true, stopping = false, pausedOnWifi = false))
-        assertFalse(ProfileSwitch.reconnects(running = true, starting = false, stopping = true, pausedOnWifi = false))
-        assertFalse(ProfileSwitch.reconnects(running = false, starting = false, stopping = false, pausedOnWifi = true))
-        assertFalse(ProfileSwitch.reconnects(running = false, starting = false, stopping = false, pausedOnWifi = false))
+    fun `a run that is running or starting is on, never a stopping, paused or idle one`() {
+        assertTrue(ProfileSwitch.runIsOn(running = true, starting = false, stopping = false, pausedOnWifi = false))
+        assertTrue(ProfileSwitch.runIsOn(running = false, starting = true, stopping = false, pausedOnWifi = false))
+        assertFalse(ProfileSwitch.runIsOn(running = true, starting = false, stopping = true, pausedOnWifi = false))
+        assertFalse(ProfileSwitch.runIsOn(running = false, starting = false, stopping = false, pausedOnWifi = true))
+        assertFalse(ProfileSwitch.runIsOn(running = false, starting = false, stopping = false, pausedOnWifi = false))
     }
 
     @Test
-    fun `adding a profile is refused while the tunnel is on in any way`() {
-        assertTrue(ProfileSwitch.addRefused(running = true, starting = false, stopping = false, pausedOnWifi = false))
-        assertTrue(ProfileSwitch.addRefused(running = false, starting = true, stopping = false, pausedOnWifi = false))
-        assertTrue(ProfileSwitch.addRefused(running = false, starting = false, stopping = true, pausedOnWifi = false))
-        assertTrue(ProfileSwitch.addRefused(running = false, starting = false, stopping = false, pausedOnWifi = true))
-        assertFalse(ProfileSwitch.addRefused(running = false, starting = false, stopping = false, pausedOnWifi = false))
+    fun `a pick reconnects only onto a profile the run is not on`() {
+        assertTrue(ProfileSwitch.pickReconnects(runOn = true, picked = 2, runProfile = 0))
+        assertFalse("the run's own profile picked back", ProfileSwitch.pickReconnects(runOn = true, picked = 0, runProfile = 0))
+        assertFalse(ProfileSwitch.pickReconnects(runOn = false, picked = 2, runProfile = 0))
+    }
+
+    @Test
+    fun `a resume brings the run's own profile back while another one is open`() {
+        assertEquals(0, ProfileSwitch.resumeProfile(runProfile = 0, active = 3))
+        assertNull(ProfileSwitch.resumeProfile(runProfile = 3, active = 3))
+        assertNull("a process that died knows no run profile", ProfileSwitch.resumeProfile(runProfile = -1, active = 3))
     }
 }

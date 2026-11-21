@@ -1,14 +1,18 @@
 package com.csqtt.client
 
 /**
- * The operator (2026-11-21): a profile picked while the tunnel is on reconnects onto it, so the run's profile is always
- * the active one (B5h1's F2 / V1 class). A run paused on Wi-Fi resumes from the active profile anyway; a stopping one ends.
+ * The operator (2026-11-21): a run stays on its profile until the user picks another one. A pick of another profile
+ * while the tunnel is on reconnects onto it; «Добавить профиль» opens the new profile for editing and leaves the run where
+ * it is; a run paused on Wi-Fi resumes on its own profile. The run's profile is TunnelManager.sourceProfile.
  */
 internal object ProfileSwitch {
-    fun reconnects(running: Boolean, starting: Boolean, stopping: Boolean, pausedOnWifi: Boolean): Boolean =
+    /** Running or starting: a pick reconnects it. A Wi-Fi-paused run takes the pick at its resume; a stopping one ends. */
+    fun runIsOn(running: Boolean, starting: Boolean, stopping: Boolean, pausedOnWifi: Boolean): Boolean =
         (running || starting) && !stopping && !pausedOnWifi
 
-    /** «Добавить профиль» makes an empty profile active: while the tunnel is on that could only stop the run. */
-    fun addRefused(running: Boolean, starting: Boolean, stopping: Boolean, pausedOnWifi: Boolean): Boolean =
-        running || starting || stopping || pausedOnWifi
+    /** A pick reconnects only onto a profile the run is not on: picking the run's own profile back just selects it. */
+    fun pickReconnects(runOn: Boolean, picked: Int, runProfile: Int): Boolean = runOn && picked != runProfile
+
+    /** At a Wi-Fi resume, the run's own profile when another one is open (added while connected); null to keep the active. */
+    fun resumeProfile(runProfile: Int, active: Int): Int? = runProfile.takeIf { it >= 0 && it != active }
 }

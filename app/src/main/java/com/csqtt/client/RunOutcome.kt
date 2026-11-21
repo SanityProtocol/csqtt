@@ -64,7 +64,7 @@ internal sealed class RecoveryOutcome {
  * [hashes] are the recovery's new hashes, null when none could be got. A token VK refused can never mint again, so once
  * every hash of the run is dead ([runHasLiveHashes] false) it stops the run instead of leaving the core on a dead call
  * forever; while some still live, they carry it (review F1). An empty set stops it too (an «Авто ВК» run needs none).
- * The recovery reads the active profile: a Stop is decided only while that is still the run's (review F2).
+ * The recovery runs only while the run's own profile is the active one (it resolves the active profile).
  */
 internal fun recoveryOutcome(
     hashes: String?,
@@ -72,18 +72,14 @@ internal fun recoveryOutcome(
     tokenInvalid: Boolean,
     tokenFromLink: Boolean,
     runHasLiveHashes: Boolean,
-    runProfileActive: Boolean,
-): RecoveryOutcome {
-    val outcome = when {
-        hashes == null -> if (tokenInvalid && !runHasLiveHashes) {
-            RecoveryOutcome.Stop(StopCause.vkCallsNotCreated(tokenInvalid = true, tokenFromLink = tokenFromLink))
-        } else {
-            RecoveryOutcome.KeepRunning
-        }
-        hashes.isBlank() && !autoJs -> RecoveryOutcome.Stop(StopCause.NO_HASHES_LEFT)
-        else -> RecoveryOutcome.Restart
+): RecoveryOutcome = when {
+    hashes == null -> if (tokenInvalid && !runHasLiveHashes) {
+        RecoveryOutcome.Stop(StopCause.vkCallsNotCreated(tokenInvalid = true, tokenFromLink = tokenFromLink))
+    } else {
+        RecoveryOutcome.KeepRunning
     }
-    return if (outcome is RecoveryOutcome.Stop && !runProfileActive) RecoveryOutcome.KeepRunning else outcome
+    hashes.isBlank() && !autoJs -> RecoveryOutcome.Stop(StopCause.NO_HASHES_LEFT)
+    else -> RecoveryOutcome.Restart
 }
 
 /** The stop's own notification: «CSQTT отключён» and the cause; a tap opens the app, the next start withdraws it. */

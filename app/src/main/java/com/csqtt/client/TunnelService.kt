@@ -421,6 +421,12 @@ class TunnelService : Service() {
                     launch(Dispatchers.Main) { stopTunnel() }
                     return@launch
                 }
+                // the operator (2026-11-21): a run resumes on its own profile, even while another one is open for editing
+                // (added while connected); a switch is the pick itself
+                if (!switching) {
+                    ProfileSwitch.resumeProfile(TunnelManager.sourceProfile, store.activeProfile.first())
+                        ?.let { store.saveActiveProfile(it) }
+                }
                 autoPauseRequested = true
                 autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
                 TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
@@ -655,11 +661,14 @@ class TunnelService : Service() {
                 val previous = TunnelManager.getCurrentParams() ?: return@launch
                 // the run's own identity: resolveConnectionSource sets it to the active profile's. It is put back at once
                 // (a recovery can outlive its run, B5h1 verify 2) and the active one is assigned only where the run
-                // restarts onto it — for the next recovery's guard (review F2, V1), S8's hashes and the log's masking
+                // restarts onto it — for S8's hashes and the log's masking
                 val runProfile = TunnelManager.sourceProfile
                 val runLink = TunnelManager.sourceLink
                 val runOwnerHashes = TunnelManager.ownerHashes
                 val store = SettingsStore(applicationContext)
+                // a run stays on its profile (the operator, 2026-11-21): while another one is open (added while
+                // connected), the recovery would resolve that one, so it waits for the run's own (B5h1 F2 / V1)
+                if (runProfile != store.activeProfile.first()) return@launch
                 val vkHashMode = store.vkHashMode.first()
                 val resolvedSource = resolveConnectionSource(store)
                 val activeProfileOf = TunnelManager.sourceProfile
@@ -709,7 +718,6 @@ class TunnelService : Service() {
                     tokenInvalid = (resolution as? HashResolution.Failed)?.tokenInvalid == true,
                     tokenFromLink = source.tokenFromLink,
                     runHasLiveHashes = TunnelManager.runHasLiveHashes(),
-                    runProfileActive = runProfile == store.activeProfile.first(),
                 )
                 // B5h1 H1: a recovery that outlived its run (a stop, a Wi-Fi pause, a switch) acts on nothing
                 if (TunnelManager.getCurrentParams() !== previous) return@launch

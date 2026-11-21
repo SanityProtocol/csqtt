@@ -27,7 +27,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.verticalScroll
 import com.csqtt.client.CsqttConstants
-import com.csqtt.client.ProfileSwitch
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.ui.legacy.components.CsqttSettingRow
 import com.csqtt.client.ui.legacy.design.CsqttShapes
@@ -276,19 +275,16 @@ fun FloatingToolbar(
                         enabled = true,
                         onSelected = { key ->
                             if (key == ADD_PROFILE_KEY) {
-                                // the new profile is empty and becomes active: with the tunnel on, the reconnect onto it
-                                // could only stop the run
-                                if (ProfileSwitch.addRefused(
-                                        TunnelManager.running.value, TunnelManager.starting.value,
-                                        TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
-                                    )
-                                ) {
-                                    Toast.makeText(context, "Отключите туннель, чтобы добавить профиль", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    scope.launch {
-                                        if (settingsStore.addProfile() == null) {
+                                // the operator (2026-11-21): the new profile opens for editing and the tunnel stays on the
+                                // profile it runs on (adding is not a pick: nothing reconnects)
+                                val runName = profileList.firstOrNull { it.first == TunnelManager.sourceProfile }?.second
+                                    ?.takeIf { TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.autoPausedForWifi.value }
+                                scope.launch {
+                                    when {
+                                        settingsStore.addProfile() == null ->
                                             Toast.makeText(context, "Все 32 профиля заняты", Toast.LENGTH_SHORT).show()
-                                        }
+                                        runName != null ->
+                                            Toast.makeText(context, "Туннель остаётся на «$runName»", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             } else {
