@@ -2201,14 +2201,23 @@ object TunnelManager {
         return parsed.rule
     }
 
+    /**
+     * Setting the server rule with its push, and a local push's last check with its write, hold this lock: a local push
+     * read before a server rule arrived can then never land after it (B5d1 verify; callers run on several threads).
+     */
+    private val routingPushLock = Any()
+
     fun applyServerRoutingRule(newServerRule: ServerRoutingRule?, clientIp: String, dns: String) {
-        val previousRule = activeServerRoutingRule.value
-        activeServerRoutingRule.value = newServerRule
-        serverRoutingActive.value = (newServerRule != null)
+        val previousRule: ServerRoutingRule?
+        synchronized(routingPushLock) {
+            previousRule = activeServerRoutingRule.value
+            activeServerRoutingRule.value = newServerRule
+            serverRoutingActive.value = (newServerRule != null)
+            if (newServerRule != null) pushDomainRouting(newServerRule.toUpdate())
+        }
 
         activeContext()?.let { ctx ->
             if (newServerRule != null) {
-                pushDomainRouting(newServerRule.toUpdate())
                 logEffectiveServerRouting(newServerRule)
                 // the VPN's excludeRoutes come from ips/ipIsWhite too: a change there alone (App routing from the panel)
                 // left stale routes until a reconnect
@@ -2218,7 +2227,8 @@ object TunnelManager {
             } else if (previousRule != null) {
                 activeScope.launch {
                     val store = SettingsStore(ctx)
-                    pushDomainRouting(store.routingSnapshot.first().toUpdate())
+                    // a rule that arrived again meanwhile has pushed and rebuilt for itself
+                    if (!pushLocalUnlessServerRule(store.routingSnapshot.first().toUpdate())) return@launch
                     logEffectiveLocalRouting(store)
                     if (vpnReady.value) requestRoutingReload(ctx, clientIp, dns, "routing_cleared")
                 }
@@ -2248,9 +2258,15 @@ object TunnelManager {
         if (serverRoutingActive.value) return
         activeScope.launch {
             val store = SettingsStore(ctx)
-            pushDomainRouting(store.routingSnapshot.first().toUpdate())
-            if (!serverRoutingActive.value) logEffectiveLocalRouting(store)
+            if (pushLocalUnlessServerRule(store.routingSnapshot.first().toUpdate())) logEffectiveLocalRouting(store)
         }
+    }
+
+    /** The local rules to the core unless a server rule is in force by now; true if they were sent. */
+    private fun pushLocalUnlessServerRule(update: DomainRoutingUpdate): Boolean = synchronized(routingPushLock) {
+        if (serverRoutingActive.value) return false
+        pushDomainRouting(update)
+        true
     }
 
     /**
