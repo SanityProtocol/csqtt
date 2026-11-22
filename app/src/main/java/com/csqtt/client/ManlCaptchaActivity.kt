@@ -322,7 +322,7 @@ private fun WaitingForNextCaptcha(onClose: () -> Unit) {
                 CircularProgressIndicator(modifier = Modifier.size(28.dp), color = Color.White, strokeWidth = 2.5.dp)
                 Spacer(Modifier.height(20.dp))
                 Text(
-                    text = "Эта капча больше не действует. ВК пришлёт новую в течение пары минут — экран обновится сам.",
+                    text = "Эта капча больше не действует. ВК пришлёт новую в течение пары минут\u00A0— экран обновится сам.",
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center,
                 )
