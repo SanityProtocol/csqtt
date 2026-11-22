@@ -2,6 +2,7 @@ package com.csqtt.client
 
 import android.content.Context
 import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -31,10 +32,10 @@ object VkAutoCallsManager {
      */
     data class StartAttempt(val result: StartResult?, val tokenInvalid: Boolean = false, val error: String? = null)
 
-    internal data class ActiveCall(val callId: String, val hashKey: String)
+    data class ActiveCall(val callId: String, val hashKey: String)
 
     /** B5e4: calls this app made for one run, with the token they were made with: what ends them. */
-    internal data class CallSet(val calls: List<ActiveCall>, val token: String)
+    data class CallSet(val calls: List<ActiveCall>, val token: String)
     private data class PendingLog(val key: String, val message: String, val priority: Int, val isError: Boolean)
 
     private val pendingLogs = ArrayList<PendingLog>()
@@ -101,63 +102,69 @@ object VkAutoCallsManager {
             { waitMs -> delay(waitMs) },
         )
         var completedSlots = 0
-        while (completedSlots < count) {
-            val result = runVkCallAttempts {
-                requestPacer.awaitRequestSlot()
-                withContext(Dispatchers.IO) { VkApi.startCall(token) }
-            }
-            completedSlots++
-            when (result) {
-                is VkApiResult.Ok<*> -> {
-                    val call = result.value as VkApi.StartedCall
-                    minted.add(ActiveCall(callId = call.callId, hashKey = sha256Hex(call.hash)))
-                    hashes.add(call.hash)
-                    log(
-                        "vk_call_created_progress",
-                        "[OK] Звонок VK создан ✓",
-                        16,
-                        false,
-                    )
+        try {
+            while (completedSlots < count) {
+                val result = runVkCallAttempts {
+                    requestPacer.awaitRequestSlot()
+                    withContext(Dispatchers.IO) { VkApi.startCall(token) }
                 }
-
-                is VkApiResult.ApiError -> {
-                    lastError = "код ${result.code} ${result.message}".trim()
-                    log(
-                        "vk_auto_call_error",
-                        "[ERR] Звонок VK не создан · код=${result.code} ${result.message}",
-                        90,
-                        true,
-                    )
-                    if (VkApi.isTokenInvalid(result)) {
-                        if (clearStoredTokenOnInvalid) {
-                            runCatching { tokenStore.clearVkAccessToken() }
-                        }
+                completedSlots++
+                when (result) {
+                    is VkApiResult.Ok<*> -> {
+                        val call = result.value as VkApi.StartedCall
+                        minted.add(ActiveCall(callId = call.callId, hashKey = sha256Hex(call.hash)))
+                        hashes.add(call.hash)
                         log(
-                            "vk_token_invalidated",
-                            if (clearStoredTokenOnInvalid) {
-                                "[ERR] Токен VK недействителен · войдите снова"
-                            } else {
-                                "[ERR] Токен VK из ссылки недействителен"
-                            },
-                            95,
+                            "vk_call_created_progress",
+                            "[OK] Звонок VK создан ✓",
+                            16,
+                            false,
+                        )
+                    }
+
+                    is VkApiResult.ApiError -> {
+                        lastError = "код ${result.code} ${result.message}".trim()
+                        log(
+                            "vk_auto_call_error",
+                            "[ERR] Звонок VK не создан · код=${result.code} ${result.message}",
+                            90,
                             true,
                         )
-                        // only what this attempt made: the run's own set is the run's to end
-                        finishCalls(minted, token, logResults = false)
-                        return StartAttempt(null, tokenInvalid = true)
+                        if (VkApi.isTokenInvalid(result)) {
+                            if (clearStoredTokenOnInvalid) {
+                                runCatching { tokenStore.clearVkAccessToken() }
+                            }
+                            log(
+                                "vk_token_invalidated",
+                                if (clearStoredTokenOnInvalid) {
+                                    "[ERR] Токен VK недействителен · войдите снова"
+                                } else {
+                                    "[ERR] Токен VK из ссылки недействителен"
+                                },
+                                95,
+                                true,
+                            )
+                            // only what this attempt made: the run's own set is the run's to end
+                            finishCalls(minted, token, logResults = false)
+                            return StartAttempt(null, tokenInvalid = true)
+                        }
+                    }
+
+                    is VkApiResult.Failed -> {
+                        lastError = result.reason
+                        log(
+                            "vk_auto_call_error",
+                            "[ERR] Звонок VK не создан · ${result.reason}",
+                            90,
+                            true,
+                        )
                     }
                 }
-
-                is VkApiResult.Failed -> {
-                    lastError = result.reason
-                    log(
-                        "vk_auto_call_error",
-                        "[ERR] Звонок VK не создан · ${result.reason}",
-                        90,
-                        true,
-                    )
-                }
             }
+        } catch (e: CancellationException) {
+            // a stop or a switch during the mint: what it made is no run's, so it is ended (review)
+            if (minted.isNotEmpty()) ender(CallSet(ArrayList(minted), token))
+            throw e
         }
 
         if (hashes.isNotEmpty() && hashes.size < count) {

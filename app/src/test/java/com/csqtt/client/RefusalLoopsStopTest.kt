@@ -16,6 +16,34 @@ class RefusalLoopsStopTest {
     }
 
     @Test
+    fun aRecoveryThatGotNothingRetriesOnlyWhenNoCallIsLeft() {
+        assertEquals(RefusalStep.None, refusalStep(keepRunning = false, runHasLiveHashes = false, retry = 0))
+        // a live call carries the run, and its death will ask again: no timer
+        assertEquals(RefusalStep.None, refusalStep(keepRunning = true, runHasLiveHashes = true, retry = 0))
+        assertEquals(RefusalStep.Retry(30_000L), refusalStep(keepRunning = true, runHasLiveHashes = false, retry = 0))
+        assertEquals(RefusalStep.Retry(480_000L), refusalStep(keepRunning = true, runHasLiveHashes = false, retry = 4))
+        assertEquals(RefusalStep.Stop, refusalStep(keepRunning = true, runHasLiveHashes = false, retry = 5))
+    }
+
+    @Test
+    fun theExitPlanKeepsTheCallsOfARestartAndEndsThemWithTheRun() {
+        val stable = 30_000L
+        fun plan(wants: Boolean = true, fatal: Boolean = false, can: Boolean = true, up: Long = 60_000L, streak: Int = 0, offline: Boolean = false) =
+            exitPlan(wants, fatal, can, up, streak, offline, stable)
+        // a crash restart reuses the calls
+        assertEquals(ExitPlan(nextStreak = 0, crashLoop = false, restarts = true, endCalls = false), plan())
+        // a fatal cause, or nothing to restart with, ends the run and its calls
+        assertEquals(ExitPlan(0, false, false, true), plan(fatal = true))
+        assertEquals(ExitPlan(0, false, false, true), plan(can = false))
+        // a run nobody wants any more: its stop ends the calls, not the exit
+        assertEquals(ExitPlan(0, false, false, false), plan(wants = false))
+        // the eighth early exit in a row stops the run, and its calls end
+        assertEquals(ExitPlan(CRASH_LOOP_STOP_STREAK, true, false, true), plan(up = 2_000L, streak = CRASH_LOOP_STOP_STREAK - 1))
+        // offline, an early exit says nothing about the core and does not count (review F4)
+        assertEquals(ExitPlan(CRASH_LOOP_STOP_STREAK - 1, false, true, false), plan(up = 2_000L, streak = CRASH_LOOP_STOP_STREAK - 1, offline = true))
+    }
+
+    @Test
     fun aCrashLoopCountsOnlyExitsBeforeTheProcessWasUp() {
         val stable = 30_000L
         var streak = 0

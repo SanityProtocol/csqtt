@@ -214,6 +214,7 @@ object TunnelManager {
     private val callRecoveryPending = AtomicBoolean(false)
     private val workerRecoveryPolicy = WorkerRecoveryPolicy()
     @Volatile
+    @Volatile
     private var crashRestartStreak = 0
     private const val WORKER_ZERO_CONFIRMATION_MS = 4_000L
     private const val PANEL_SERVER_RESTART_DELAY_MS = 4_000L
@@ -411,6 +412,8 @@ object TunnelManager {
     private fun markConnectedIfReady() {
         if (running.value && tunconfThisProcess.value && vpnReady.value && activeWorkers.value > 0) {
             everConnected.value = true
+            // a process that got the run up is healthy, however it ends later (B5e4 review F2)
+            crashRestartStreak = 0
             // a captcha need with no ask live is over once the run works (B5h2)
             ManlCaptchaWebViewManager.onRunProgress()
         }
@@ -1957,10 +1960,6 @@ object TunnelManager {
                             .takeIf { it > 0 }
                             ?.let { SystemClock.elapsedRealtime() - it }
                             ?: Long.MAX_VALUE
-                        val nextStreak = nextCrashStreak(uptimeMs, crashRestartStreak, CRASH_RESTART_STABLE_MS)
-                        // B5e4: a core that exits before it is up, start after start (VK refusing an auto-JS account's
-                        // calls, for one), ends the run with its last line instead of restarting forever
-                        val crashLoop = shouldRestart && nextStreak >= CRASH_LOOP_STOP_STREAK
                         val restartContext = activeContext()
                         val restartParams = if (restartContext == null) {
                             null
@@ -1979,10 +1978,21 @@ object TunnelManager {
                                 currentParams
                             }
                         }
-                        // B5e4: a restart reuses the run's calls (withNewSession keeps the hashes); only the run's end
-                        // ends them
-                        val restarts = shouldRestart && !crashLoop && restartParams != null && restartContext != null
-                        if (lifecycleWantsRestart && !restarts) VkAutoCallsManager.finishActiveCalls()
+                        // B5e4: a core that exits before it is up, start after start (VK refusing an auto-JS account's
+                        // calls, for one), ends the run with its last line instead of restarting forever; a restart
+                        // reuses the run's calls (withNewSession keeps the hashes), so only the run's end ends them
+                        val plan = exitPlan(
+                            wantsRestart = lifecycleWantsRestart,
+                            fatal = identity.fatal.cause != null,
+                            canRestart = restartParams != null && restartContext != null,
+                            uptimeMs = uptimeMs,
+                            streak = crashRestartStreak,
+                            offline = pausedForNoNetwork.isPaused(),
+                            stableMs = CRASH_RESTART_STABLE_MS,
+                        )
+                        val nextStreak = plan.nextStreak
+                        val crashLoop = plan.crashLoop
+                        if (plan.endCalls) VkAutoCallsManager.finishActiveCalls()
                         if (fatalCause != null && lifecycleWantsRestart) {
                             updateLog(
                                 "process_exit",

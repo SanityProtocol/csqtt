@@ -114,6 +114,43 @@ internal const val CRASH_LOOP_STOP_STREAK = 8
 /** The count of exits in a row that came before the process was up ([stableMs]): a stable one starts it again. */
 internal fun nextCrashStreak(uptimeMs: Long, streak: Int, stableMs: Long): Int = if (uptimeMs >= stableMs) 0 else streak + 1
 
+/** B5e4: what the exit handler does: the next streak, a crash loop's stop, a restart, and whether the run's calls end. */
+internal data class ExitPlan(val nextStreak: Int, val crashLoop: Boolean, val restarts: Boolean, val endCalls: Boolean)
+
+/**
+ * [wantsRestart]: the run is still wanted; [fatal]: a fatal cause ended it; [canRestart]: there are params and a context to
+ * restart with; [offline]: paused for no network — an exit then says nothing about the core, so it does not count
+ * (review F4). A restart keeps the run's calls (it reuses their hashes); only the run's end ends them.
+ */
+internal fun exitPlan(
+    wantsRestart: Boolean,
+    fatal: Boolean,
+    canRestart: Boolean,
+    uptimeMs: Long,
+    streak: Int,
+    offline: Boolean,
+    stableMs: Long,
+): ExitPlan {
+    val shouldRestart = wantsRestart && !fatal
+    val nextStreak = if (offline) streak else nextCrashStreak(uptimeMs, streak, stableMs)
+    val crashLoop = shouldRestart && nextStreak >= CRASH_LOOP_STOP_STREAK
+    val restarts = shouldRestart && !crashLoop && canRestart
+    return ExitPlan(nextStreak, crashLoop, restarts, endCalls = wantsRestart && !restarts)
+}
+
+/** B5e4: what a recovery that got no new calls does next. */
+internal sealed class RefusalStep {
+    /** The run goes on: it has live calls, or the recovery restarts or stops it anyway. */
+    data object None : RefusalStep()
+    data class Retry(val delayMs: Long) : RefusalStep()
+    data object Stop : RefusalStep()
+}
+
+internal fun refusalStep(keepRunning: Boolean, runHasLiveHashes: Boolean, retry: Int): RefusalStep = when {
+    !keepRunning || runHasLiveHashes -> RefusalStep.None
+    else -> RefusalBackoff.delayFor(retry)?.let { RefusalStep.Retry(it) } ?: RefusalStep.Stop
+}
+
 /** The stop's own notification: «CSQTT отключён» and the cause; a tap opens the app, the next start withdraws it. */
 internal object StopNotice {
     private const val CHANNEL_ID = CsqttConstants.Notifications.STOP_CHANNEL_ID

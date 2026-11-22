@@ -51,11 +51,12 @@ class CallSetBookkeepingTest {
     }
 
     @Test
-    fun aRecoveryThatGotNothingLeavesTheRunOnItsSet() {
+    fun aMintThatGaveNothingChangesNothing() {
         val start = set("a1", "a2")
         VkAutoCallsManager.take(start)
-        // a failed mint returns no result: nothing is taken, nothing ended
+        // a recovery that got no calls hands nothing over (and take/discard of nothing do nothing)
         VkAutoCallsManager.take(null)
+        VkAutoCallsManager.discard(null)
         assertTrue(ended.isEmpty())
         VkAutoCallsManager.finishActiveCalls()
         assertEquals("the stop still ends the run's set", listOf(start.set), ended)

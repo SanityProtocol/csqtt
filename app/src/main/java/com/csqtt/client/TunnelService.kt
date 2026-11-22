@@ -635,7 +635,9 @@ class TunnelService : Service() {
                             .also { if (it.hashes != pool) store.saveVkPool(panel.vps, it.hashes) }
                     }
                     // a pool with live hashes serves on without a token (B5e3b); an empty one needs a sign-in to refill
-                    if (fill.hashes.isEmpty()) return HashResolution.Failed(fill.tokenInvalid || token.isBlank())
+                    if (fill.hashes.isEmpty()) {
+                        return HashResolution.Failed(fill.tokenInvalid || token.isBlank(), fill.errors.lastOrNull())
+                    }
                     // the server's default follows the pool: once, in the background; a failure waits for the next run
                     serviceScope.launch {
                         VkPoolHandOver.handOver(store, panel)?.let { (ok, line) ->
@@ -679,12 +681,19 @@ class TunnelService : Service() {
         }
     }
 
+    /** B5e4: the start generation whose refusal retry is waiting, or -1; one chain per run (review F3). */
+    @Volatile
+    private var refusalRetryGeneration = -1L
+
     /** [retry]: B5e4's refusal backoff, counted from 0 for a dead-call event. */
     private fun recoverUnavailableVkCall(hash: String, retry: Int = 0) {
         if (hash.isBlank()) {
             TunnelManager.completeVkCallRecovery()
             return
         }
+        // a dead-call event while this run's refusal retry waits (a transport restart reports the same dead call again)
+        // is that retry's: a second chain would mint beside it and end what the first one recovered (review F3)
+        if (retry == 0 && refusalRetryGeneration == startGeneration) return
         serviceScope.launch {
             var restartScheduled = false
             // B5e4: a retry waiting on the refusal backoff keeps the recovery pending
@@ -765,22 +774,26 @@ class TunnelService : Service() {
                 }
                 // B5e4: VK refuses new calls for a reason other than the token and the run has no live call left. The
                 // core reports a dead call once per process, so nothing would ask again: retry on a backoff, then stop
-                if (outcome is RecoveryOutcome.KeepRunning && !TunnelManager.runHasLiveHashes()) {
-                    val wait = RefusalBackoff.delayFor(retry)
-                    if (wait == null) {
+                when (val step = refusalStep(outcome is RecoveryOutcome.KeepRunning, TunnelManager.runHasLiveHashes(), retry)) {
+                    RefusalStep.None -> Unit
+                    RefusalStep.Stop -> {
                         launch(Dispatchers.Main) {
                             if (startGeneration != generation) return@launch
                             val reason = (resolution as? HashResolution.Failed)?.reason
                             TunnelManager.recordRunFailure(StopCause.vkRefusesCalls(reason), applicationContext)
                             TunnelManager.stop()
                         }
-                    } else {
+                        return@launch
+                    }
+                    is RefusalStep.Retry -> {
                         retryScheduled = true
+                        refusalRetryGeneration = generation
                         launch {
-                            delay(wait)
+                            delay(step.delayMs)
                             withContext(Dispatchers.Main) {
                                 // a stop, a switch or a pause bumped the generation: the new run's flag is its own
                                 if (startGeneration != generation) return@withContext
+                                refusalRetryGeneration = -1L
                                 if (TunnelManager.running.value) {
                                     recoverUnavailableVkCall(hash, retry + 1)
                                 } else {
@@ -788,8 +801,8 @@ class TunnelService : Service() {
                                 }
                             }
                         }
+                        return@launch
                     }
-                    return@launch
                 }
                 val resolved = got ?: return@launch
                 val nextGeneration = store.reserveConnectionGeneration(
