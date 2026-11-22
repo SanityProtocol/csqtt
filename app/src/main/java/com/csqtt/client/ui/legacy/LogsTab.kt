@@ -173,7 +173,11 @@ private fun LogsTerminal() {
             }
 
             IconButton(
-                onClick = TunnelManager::clearLogs,
+                // nothing is left above to read: the next records are followed again (review F1)
+                onClick = {
+                    TunnelManager.clearLogs()
+                    follow = true
+                },
                 modifier = Modifier.size(40.dp)
             ) {
                 Icon(
