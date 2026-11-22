@@ -214,7 +214,6 @@ object TunnelManager {
     private val callRecoveryPending = AtomicBoolean(false)
     private val workerRecoveryPolicy = WorkerRecoveryPolicy()
     @Volatile
-    @Volatile
     private var crashRestartStreak = 0
     private const val WORKER_ZERO_CONFIRMATION_MS = 4_000L
     private const val PANEL_SERVER_RESTART_DELAY_MS = 4_000L
@@ -412,8 +411,10 @@ object TunnelManager {
     private fun markConnectedIfReady() {
         if (running.value && tunconfThisProcess.value && vpnReady.value && activeWorkers.value > 0) {
             everConnected.value = true
-            // a process that got the run up is healthy, however it ends later (B5e4 review F2)
-            crashRestartStreak = 0
+            // a process that has kept the run up for a while is healthy, however it ends later (B5e4 review F2); one
+            // that dies within that time still counts, so a crash right after connecting keeps its backoff (verify)
+            val start = processStartedAtMs
+            if (start > 0L && SystemClock.elapsedRealtime() - start >= CRASH_RESTART_STABLE_MS) crashRestartStreak = 0
             // a captcha need with no ask live is over once the run works (B5h2)
             ManlCaptchaWebViewManager.onRunProgress()
         }
@@ -1981,13 +1982,15 @@ object TunnelManager {
                         // B5e4: a core that exits before it is up, start after start (VK refusing an auto-JS account's
                         // calls, for one), ends the run with its last line instead of restarting forever; a restart
                         // reuses the run's calls (withNewSession keeps the hashes), so only the run's end ends them
+                        val offline = pausedForNoNetwork.isPaused()
                         val plan = exitPlan(
                             wantsRestart = lifecycleWantsRestart,
-                            fatal = identity.fatal.cause != null,
+                            // the cause the branches below read, before the suspending withNewSession (verify)
+                            fatal = fatalCause != null,
                             canRestart = restartParams != null && restartContext != null,
                             uptimeMs = uptimeMs,
                             streak = crashRestartStreak,
-                            offline = pausedForNoNetwork.isPaused(),
+                            offline = offline,
                             stableMs = CRASH_RESTART_STABLE_MS,
                         )
                         val nextStreak = plan.nextStreak
@@ -2025,8 +2028,13 @@ object TunnelManager {
                             )
                             crashRestartStreak = nextStreak
                             val backoffShift = crashRestartStreak.coerceIn(1, 6) - 1
-                            val restartDelayMs = (2_000L shl backoffShift)
-                                .coerceAtMost(CRASH_RESTART_MAX_DELAY_MS)
+                            // offline the exit does not count, and the restart waits the longest: no restart every
+                            // few seconds through an outage (verify N2); back online, it comes within a minute
+                            val restartDelayMs = if (offline) {
+                                CRASH_RESTART_MAX_DELAY_MS
+                            } else {
+                                (2_000L shl backoffShift).coerceAtMost(CRASH_RESTART_MAX_DELAY_MS)
+                            }
                             scheduleRestartLocked(restartContext, restartParams, identity.ticket.epoch, restartDelayMs)
                         } else if (!lifecycleState.isDesiredRunning()) {
                             running.value = false
