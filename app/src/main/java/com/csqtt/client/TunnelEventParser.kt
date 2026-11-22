@@ -47,6 +47,8 @@ object TunnelEventParser {
         data class Hashes(val hashes: List<String>) : Event()
         data class Workers(val workers: Int) : Event()
         data object TunLost : Event()
+        /** M-86: the answer to a PROBE command; [ms] only for `synack` and `rst`. */
+        data class Probe(val target: String, val port: Int, val ms: Long?, val result: String) : Event()
     }
 
     fun parse(line: String): Event? {
@@ -94,6 +96,12 @@ object TunnelEventParser {
             "ROUTING" -> Event.Routing(payload.optString("routing", ""))
             "HASHES" -> ReceivedHashes.parse(payload.optString("hashes", ""))?.let { Event.Hashes(it) }
             "TUN_LOST" -> Event.TunLost
+            "PROBE" -> Event.Probe(
+                target = payload.optString("target", ""),
+                port = payload.optInt("port", 0),
+                ms = payload.optLong("ms", -1L).takeIf { it >= 0L && !payload.isNull("ms") },
+                result = payload.optString("result", "").ifEmpty { "invalid" },
+            )
             "WORKERS" -> payload.optInt("workers", -1)
                 .takeIf { it == 0 || it in MIN_SERVER_WORKERS..CsqttConstants.Tunnel.MAX_WORKERS }
                 ?.let { Event.Workers(it) }

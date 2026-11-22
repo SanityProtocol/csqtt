@@ -58,6 +58,8 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import com.csqtt.client.ConnectionState
+import com.csqtt.client.TunnelProbe
+import com.csqtt.client.probeLine
 import com.csqtt.client.buildTunnelStartIntent
 import com.csqtt.client.formatTraffic
 import com.csqtt.client.showsTraffic
@@ -374,6 +376,7 @@ private fun TunnelConnectionPanel(
             TunnelUptimeText(tunnelRunning = activeVisual)
 
             if (showsTraffic(state)) TunnelLiveFigures()
+            if (state is ConnectionState.Connected) TunnelProbeLine()
 
             NotificationsOffWarning()
 
@@ -443,6 +446,34 @@ private fun TunnelUptimeText(tunnelRunning: Boolean) {
             MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
         },
     )
+}
+
+/** M-86 (B5g): the tunnel's own ping, on demand (TunnelManager.probe); its answer stays until the run ends. */
+@Composable
+private fun TunnelProbeLine() {
+    val probe by TunnelManager.probeState.collectAsStateWithLifecycle()
+    val running = probe is TunnelProbe.Running
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        (probe as? TunnelProbe.Done)?.let { done ->
+            Text(
+                text = probeLine(done),
+                style = MaterialTheme.typography.labelMedium,
+                color = if (done.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+        TextButton(
+            onClick = TunnelManager::probe,
+            enabled = !running,
+            contentPadding = PaddingValues(horizontal = 8.dp),
+            modifier = Modifier.height(CsqttSizes.CompactControlHeight),
+        ) {
+            Text(if (running) "Пинг…" else "Пинг", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+        }
+    }
 }
 
 /** Live traffic (M-89) and workers: active / target · the server's limit (L-27), read only while shown. */

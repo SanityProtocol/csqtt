@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
 import android.util.Base64
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
@@ -228,6 +230,9 @@ object TunnelManager {
     private const val CRASH_RESTART_STABLE_MS = 30_000L
     private const val CRASH_RESTART_MAX_DELAY_MS = 60_000L
     private const val VPN_START_RETRY_MS = 10_000L
+    // M-86: the server's DNS answers on 53 (or its kernel resets: the path works either way); the core gives up after 5 s
+    private const val PROBE_PORT = 53
+    private const val PROBE_WAIT_MS = 7_000L
     private const val TUN_LOSS_REBUILD_WINDOW_MS = 60_000L
     // a stream is ready but GETCONF got no answer for this long: the server hangs (M-2, amurcanov #42)
     private const val SERVER_SILENT_MS = 20_000L
@@ -359,6 +364,7 @@ object TunnelManager {
     internal fun beginStartRequest(context: Context) {
         // B5g: the log keeps the last connection; this one starts under its own heading, before its VK calls are made
         LogBook.app.beginConnection()
+        probeState.value = null
         runFatal.set(FirstFatal())
         failure.value = null
         // a new run needs no captcha yet: a need left by the last one ends here (review H1)
@@ -643,6 +649,43 @@ object TunnelManager {
         LogBook.app.markErrorsRead()
     }
 
+    /** M-86 (B5g): «Пинг» on «Подключение»: asked, then its answer, until the run ends (TunnelProbe). */
+    internal val probeState = MutableStateFlow<TunnelProbe?>(null)
+    private val pendingProbe = AtomicReference<CompletableDeferred<TunnelEventParser.Event.Probe>?>(null)
+
+    /**
+     * M-86 (B5g): the core times a TCP SYN from the tunnel address through its workers to the server's DNS on port 53
+     * (B4b's PROBE): the path through the server, whatever the routing sends past the tunnel. One at a time.
+     */
+    fun probe() {
+        val identity = processIdentity ?: return
+        val conf = config.value?.takeIf { it.startsWith("TUNCONF:") }?.removePrefix("TUNCONF:")?.split(":", limit = 3)
+            ?: return
+        val tunnelIp = conf.getOrNull(0)?.trim().orEmpty()
+        val target = conf.getOrNull(1)?.split(',')?.firstOrNull()?.trim().orEmpty()
+        if (tunnelIp.isEmpty() || target.isEmpty()) return
+        val answer = CompletableDeferred<TunnelEventParser.Event.Probe>()
+        if (!pendingProbe.compareAndSet(null, answer)) return
+        probeState.value = TunnelProbe.Running
+        activeScope.launch {
+            try {
+                val sent = writeProcessCommand(identity, "PROBE|$tunnelIp|$target|$PROBE_PORT", "probe_write_err")
+                val reply = if (sent) withTimeoutOrNull(PROBE_WAIT_MS) { answer.await() } else null
+                if (!isCurrent(identity)) {
+                    // the core was replaced meanwhile: no answer will come, and the button is free again
+                    probeState.compareAndSet(TunnelProbe.Running, null)
+                    return@launch
+                }
+                val done = TunnelProbe.Done(reply?.result ?: "timeout", reply?.ms, target)
+                probeState.value = done
+                updateProcessLog(identity, "probe", "[ПИНГ] ${probeLine(done)} · $target:$PROBE_PORT", 30, done.failed,
+                    if (done.failed) LogLevel.ERR else LogLevel.PING)
+            } finally {
+                pendingProbe.compareAndSet(answer, null)
+            }
+        }
+    }
+
     private fun handleTunnelEvent(
         event: TunnelEventParser.Event,
         identity: ProcessIdentity,
@@ -805,6 +848,7 @@ object TunnelManager {
                     ManlCaptchaWebViewManager.onRunProgress()
                 }
             }
+            is TunnelEventParser.Event.Probe -> pendingProbe.get()?.complete(event)
             is TunnelEventParser.Event.TunLost -> {
                 if (isCurrent(identity)) {
                     val now = SystemClock.elapsedRealtime()
@@ -2186,6 +2230,7 @@ object TunnelManager {
         currentParams = null
         activeSettingsStore = null
         lastAppliedDns = null
+        probeState.value = null
         ManlCaptchaWebViewManager.cancelCaptcha()
         // B5g: a stop's lines are kept across the process's death once its own last ones are in
         LogTail.requestSave(LogTail.STOP_SETTLE_MS)
