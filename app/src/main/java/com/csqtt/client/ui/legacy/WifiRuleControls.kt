@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -232,6 +233,8 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
     var askedAt by rememberSaveable { mutableLongStateOf(0L) }
     var rationaleBefore by rememberSaveable { mutableStateOf(false) }
     var askedByButton by rememberSaveable { mutableStateOf(false) }
+    // refusals in a row from the button with no rationale before or after (review N4)
+    var silentRefusals by rememberSaveable { mutableIntStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -256,7 +259,10 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         fine = hasFineLocation(context)
-        if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true) return@rememberLauncherForActivityResult
+        if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
+            silentRefusals = 0
+            return@rememberLauncherForActivityResult
+        }
         val activity = context.findActivity() ?: return@rememberLauncherForActivityResult
         val rationaleAfter = ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION)
         // Android stops asking after a second refusal: its rationale shown before the request and not after. Refused for
@@ -264,9 +270,13 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
         // a dead tap. With the rationale shown before, Android always shows its dialog, so a fast answer there is a
         // person's. A dialog dismissed with Back changes nothing: Android asks again next time (review F5, N2)
         val noDialog = !rationaleBefore && SystemClock.elapsedRealtime() - askedAt < NO_DIALOG_ANSWER_MS
-        if (!rationaleAfter && (rationaleBefore || noDialog)) {
+        // a slow phone answers a refusal with no dialog later than the timer: two such answers in a row from the button
+        // mean the same (two dialogs dismissed with Back do too, and the settings are a way to grant as well) (review N4)
+        if (askedByButton) silentRefusals = if (!rationaleBefore && !rationaleAfter) silentRefusals + 1 else 0
+        val silentTwice = askedByButton && silentRefusals >= 2
+        if (!rationaleAfter && (rationaleBefore || noDialog || silentTwice)) {
             deniedForGood = true
-            if (noDialog && askedByButton) openAppSettings(context)
+            if ((noDialog || silentTwice) && askedByButton) openAppSettings(context)
         }
     }
     val ask = { byButton: Boolean ->
