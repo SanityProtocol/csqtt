@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
 import android.util.Base64
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,7 +22,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
@@ -651,7 +649,7 @@ object TunnelManager {
 
     /** M-86 (B5g): «Пинг» on «Подключение»: asked, then its answer, until the run ends (TunnelProbe). */
     internal val probeState = MutableStateFlow<TunnelProbe?>(null)
-    private val pendingProbe = AtomicReference<CompletableDeferred<TunnelEventParser.Event.Probe>?>(null)
+    private val probeSlot = ProbeSlot()
 
     /**
      * M-86 (B5g): the core times a TCP SYN from the tunnel address through its workers to the server's DNS on port 53
@@ -664,26 +662,23 @@ object TunnelManager {
         val tunnelIp = conf.getOrNull(0)?.trim().orEmpty()
         val target = conf.getOrNull(1)?.split(',')?.firstOrNull()?.trim().orEmpty()
         if (tunnelIp.isEmpty() || target.isEmpty()) return
-        val answer = CompletableDeferred<TunnelEventParser.Event.Probe>()
-        if (!pendingProbe.compareAndSet(null, answer)) return
+        val slot = probeSlot.open() ?: return
         probeState.value = TunnelProbe.Running
         activeScope.launch {
-            try {
-                val sent = writeProcessCommand(identity, "PROBE|$tunnelIp|$target|$PROBE_PORT", "probe_write_err")
-                val reply = if (sent) withTimeoutOrNull(PROBE_WAIT_MS) { answer.await() } else null
-                if (!isCurrent(identity)) {
-                    // the core was replaced meanwhile: no answer will come, and the button is free again
-                    probeState.compareAndSet(TunnelProbe.Running, null)
-                    return@launch
-                }
-                val done = TunnelProbe.Done(reply?.result ?: "timeout", reply?.ms, target)
-                probeState.value = done
+            val sent = writeProcessCommand(identity, "PROBE|$tunnelIp|$target|$PROBE_PORT", "probe_write_err")
+            val reply = if (sent) probeSlot.await(slot, PROBE_WAIT_MS) else null.also { probeSlot.free(slot) }
+            if (!isCurrent(identity)) {
+                // the core was replaced meanwhile: no answer will come, and the button is free again
+                probeState.compareAndSet(TunnelProbe.Running, null)
+                return@launch
+            }
+            val done = TunnelProbe.Done(reply?.result ?: "timeout", reply?.ms, target)
+            // only onto the probe it answers: a new connection (a switch, a restore) or a new core cleared it (review F1)
+            if (probeState.compareAndSet(TunnelProbe.Running, done)) {
                 updateProcessLog(identity, "probe", "[ПИНГ] ${probeLine(done)} · $target:$PROBE_PORT", 30, done.failed,
                     if (done.failed) LogLevel.ERR else LogLevel.PING)
-            } finally {
-                pendingProbe.compareAndSet(answer, null)
             }
-        }
+        }.invokeOnCompletion { probeSlot.free(slot) }
     }
 
     private fun handleTunnelEvent(
@@ -848,7 +843,7 @@ object TunnelManager {
                     ManlCaptchaWebViewManager.onRunProgress()
                 }
             }
-            is TunnelEventParser.Event.Probe -> pendingProbe.get()?.complete(event)
+            is TunnelEventParser.Event.Probe -> probeSlot.answer(event)
             is TunnelEventParser.Event.TunLost -> {
                 if (isCurrent(identity)) {
                     val now = SystemClock.elapsedRealtime()
@@ -1419,6 +1414,8 @@ object TunnelManager {
     }
 
     private fun startProcessLocked(context: Context, params: TunnelParams, epoch: Long) {
+        // M-86 (review F1): a ping timed the core being replaced (a switch's old server, the network before a swap)
+        probeState.value = null
         if (!lifecycleState.canStart(epoch)) {
             starting.value = false
             return

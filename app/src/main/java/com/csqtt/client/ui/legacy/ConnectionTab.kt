@@ -463,6 +463,8 @@ private fun TunnelProbeLine() {
                 style = MaterialTheme.typography.labelMedium,
                 color = if (done.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
+                // a long answer wraps instead of pushing «Пинг» off the card (review F2)
+                modifier = Modifier.weight(1f, fill = false),
             )
         }
         TextButton(
