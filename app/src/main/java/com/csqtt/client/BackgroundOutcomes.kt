@@ -59,7 +59,7 @@ internal fun subscriptionNoticeLine(meta: SubscriptionMeta, time: (Long) -> Stri
     val title = meta.title.ifBlank { "Подписка" }
     val at = meta.lastAttemptAt.takeIf { it > 0L }?.let { " · ${time(it)}" }.orEmpty()
     return when {
-        meta.lastError.isNotEmpty() -> "Подписка «$title» не обновилась: ${meta.lastError}$at"
+        meta.lastError.isNotEmpty() -> "Подписка «$title» не обновилась. ${meta.lastError}$at"
         meta.lastSkipped.isNotEmpty() -> "Подписка «$title»: ${meta.lastSkipped}$at"
         else -> null
     }

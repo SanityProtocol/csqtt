@@ -95,7 +95,7 @@ class SubscriptionOutcomeTest {
         assertNull("nothing to say before a refresh", SettingsStore.subscriptionNoticeOf(prefs, 3))
         SettingsStore.writeSubscriptionOutcome(prefs, url, "Ошибка сети: timeout", "")
         assertEquals(
-            "Подписка «Мой VPN» не обновилась: Ошибка сети: timeout · 14:05",
+            "Подписка «Мой VPN» не обновилась. Ошибка сети: timeout · 14:05",
             subscriptionNoticeLine(SettingsStore.subscriptionNoticeOf(prefs, 3)!!) { "14:05" },
         )
         assertNull(subscriptionNoticeLine(SubscriptionMeta(url = url, title = "Мой VPN")))
