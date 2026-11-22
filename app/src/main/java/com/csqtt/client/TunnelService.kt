@@ -98,7 +98,6 @@ class TunnelService : Service() {
     // the tunnel status notification: built and posted only while the screen is on, ≥ 5 s apart (M-48)
     private val notificationThrottle = NotificationThrottle(NOTIFICATION_MIN_REBUILD_INTERVAL_MS)
     @Volatile
-    @Volatile
     private var isStopping = false
     @Volatile
     private var resourcesReleased = false

@@ -354,7 +354,7 @@ private fun TunnelConnectionPanel(
                     textAlign = TextAlign.Center,
                 )
                 // B5f: the cause asks for a setting, so it carries the way there (review: «the battery prompt beside it»)
-                if (state.reason == StopCause.SYSTEM_KILLED) BackgroundWorkButton()
+                if (state.reason == StopCause.SYSTEM_KILLED || state.reason == StopCause.STOPPED_OUTSIDE) BackgroundWorkButton()
             }
 
             // «Нужна капча» (B5h2): the captcha screen, which follows the core's ask; the logo still stops

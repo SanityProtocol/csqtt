@@ -34,8 +34,10 @@ class SystemStopCauseTest {
         assertEquals(StopCause.UPDATED, cause(updateNow = 2_000L))
         // the flag set by a build before this one: the update that brought this build stopped it (review F1)
         assertEquals(StopCause.UPDATED, cause(savedUpdate = null))
-        // Android's «Остановить»: the user's act, no battery advice (review F2)
+        // a force-stop: Android's «Остановить», or a maker's battery cleaner recorded the same way (review F2, verify N2)
         assertEquals(StopCause.STOPPED_OUTSIDE, cause(userStopped = true))
+        // before Android 14 an update's kill is recorded as «user requested» too: the update is read first (verify)
+        assertEquals(StopCause.UPDATED, cause(updateNow = 2_000L, userStopped = true))
     }
 
     @Test
