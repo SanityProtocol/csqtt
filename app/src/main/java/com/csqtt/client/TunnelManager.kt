@@ -2446,8 +2446,10 @@ object TunnelManager {
         val appContext = ctx.applicationContext
         scope.launch {
             // the screen's import edits the profile open in it (run-profile review F1)
-            SettingsStore(appContext).applyRoutingImport(plan)
-            if (plan.apps != null) reloadVpn()
+            val store = SettingsStore(appContext)
+            store.applyRoutingImport(plan)
+            // B5g (review F3): the run reads its own profile, so an import into another one leaves the running VPN alone
+            if (plan.apps != null && store.selectedProfileIndex.first() == runTargetProfile()) reloadVpn()
         }
     }
 

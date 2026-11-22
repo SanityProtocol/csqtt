@@ -127,11 +127,13 @@ fun ExceptionsTab(
         initialValue = serverRoutingActive
     )
     // B5g: the server's rule is the run's, so it replaces the controls only on the profile the run is on; another profile
-    // opened during the run (an added one) keeps its own. Until the store says which profile is open, as before
+    // opened during the run (an added one) keeps its own. Until the store says which profile is open nothing is decided:
+    // neither is drawn, and a dialog restored after a recreate is not closed (review F2)
     val openProfile by remember(settingsStore) { settingsStore.selectedProfileIndex.map<Int, Int?> { it } }
         .collectAsStateWithLifecycle(initialValue = null)
-    val isRunProfile = openProfile.let { it == null || it == TunnelManager.runTargetProfile() }
-    val isServerRouting = (serverRoutingActive || serverRoutingActiveLive) && isRunProfile
+    val runHasServerRule = serverRoutingActive || serverRoutingActiveLive
+    val openProfileUnknown = runHasServerRule && openProfile == null
+    val isServerRouting = runHasServerRule && openProfile == TunnelManager.runTargetProfile()
 
     /** B5g: an edit reaches the running VPN only when it is the run's own profile's (the run reads its own). */
     fun reloadIfRunsHere() {
@@ -378,7 +380,9 @@ fun ExceptionsTab(
     }
 
     CsqttScreen {
-        if (isServerRouting) {
+        if (openProfileUnknown) {
+            Spacer(modifier = Modifier.fillMaxSize())
+        } else if (isServerRouting) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

@@ -59,9 +59,13 @@ internal class CaptchaEpisode {
     @Synchronized
     fun settled(): Boolean = !live && end()
 
-    /** The notice [ask] asked for stays quiet when this run already alerted once; it marks the run as alerted. */
+    /**
+     * The notice [ask] asked for stays quiet when this run already alerted once and the tunnel carries traffic (an ask for
+     * more workers); a captcha that blocks the run — a reconnect after a network swap or a recovery, no stream up — always
+     * alerts (review F1). It marks the run as alerted.
+     */
     @Synchronized
-    fun takeQuiet(): Boolean = alertedThisRun.also { alertedThisRun = true }
+    fun takeQuiet(carryingTraffic: Boolean): Boolean = (alertedThisRun && carryingTraffic).also { alertedThisRun = true }
 
     /** The run stops or is replaced: the next run's first notice alerts again. */
     @Synchronized
@@ -207,7 +211,7 @@ object ManlCaptchaWebViewManager {
                 val notify = episode.ask(appInFront = MainActivity.isForeground || screenStarted)
                 liveAskState.value = redirectUri
                 neededState.value = true
-                notify to (notify && episode.takeQuiet())
+                notify to (notify && episode.takeQuiet(carryingTraffic = TunnelManager.activeWorkers.value > 0))
             }
             val intent = promptIntent(app)
             pendingIntentToStart = intent
