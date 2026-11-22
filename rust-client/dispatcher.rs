@@ -2269,6 +2269,36 @@ mod tests {
     }
 
     #[test]
+    fn a_syn_ack_out_of_the_tunnel_is_clamped_and_the_direct_relays_is_not() {
+        // P1 Bt: return_packet (the tunnel's downlink) lowers the MSS; push_inbound, which the direct relay also feeds, does not
+        let pool = PacketPool::new(8);
+        let dispatcher = Dispatcher::for_test(pool.clone(), 8);
+        let syn_ack = |mss: u16| {
+            let mut p = pool.acquire();
+            p.set_read_len(44).unwrap();
+            let b = p.as_mut_slice();
+            b[0] = 0x45;
+            b[2..4].copy_from_slice(&44u16.to_be_bytes());
+            b[8] = 64;
+            b[9] = 6;
+            b[12..16].copy_from_slice(&[93, 184, 216, 34]);
+            b[16..20].copy_from_slice(&[10, 66, 67, 2]);
+            b[20..22].copy_from_slice(&443u16.to_be_bytes());
+            b[22..24].copy_from_slice(&40000u16.to_be_bytes());
+            b[32] = 6 << 4;
+            b[33] = 0x12;
+            b[40..44].copy_from_slice(&[2, 4, (mss >> 8) as u8, mss as u8]);
+            p
+        };
+        dispatcher.return_packet(syn_ack(1460));
+        let tunnelled = dispatcher.inbound.pop().expect("the SYN-ACK reaches the TUN queue");
+        assert_eq!(tunnelled.as_slice()[42..44], 1240u16.to_be_bytes());
+        dispatcher.push_inbound(syn_ack(1460));
+        let direct = dispatcher.inbound.pop().expect("the direct relay's SYN-ACK reaches the TUN queue");
+        assert_eq!(direct.as_slice()[42..44], 1460u16.to_be_bytes());
+    }
+
+    #[test]
     fn test_dispatcher_inbound_capacity_and_overflow_replacement() {
         let profile = QueueProfile::for_worker_count(9);
         let inbound_capacity = profile.inbound_capacity;

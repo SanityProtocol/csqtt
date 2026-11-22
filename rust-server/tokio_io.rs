@@ -1246,10 +1246,11 @@ fn purge_legacy_mss_clamp() {
 }
 
 /// 1280 − 20 − 20: the largest inner packet sent unsplit, less the IPv4 and TCP headers (P1 Bt).
-const TUNNEL_TCP_MSS: &str = "1240";
+pub(crate) const TUNNEL_TCP_MSS: u16 = 1280 - 20 - 20;
 
 fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
     let subnet = crate::swgpanel::subnet_cidr();
+    let mss = TUNNEL_TCP_MSS.to_string();
     vec![
         FirewallRule::new(
             "iptables",
@@ -1280,14 +1281,14 @@ fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
             Some("mangle"),
             "FORWARD",
             &["-s", subnet, "-p", "tcp", "-m", "tcp", "--tcp-flags", "SYN,RST", "SYN"],
-            &["-j", "TCPMSS", "--set-mss", TUNNEL_TCP_MSS],
+            &["-j", "TCPMSS", "--set-mss", &mss],
         ),
         FirewallRule::new(
             "iptables",
             Some("mangle"),
             "FORWARD",
             &["-d", subnet, "-p", "tcp", "-m", "tcp", "--tcp-flags", "SYN,RST", "SYN"],
-            &["-j", "TCPMSS", "--set-mss", TUNNEL_TCP_MSS],
+            &["-j", "TCPMSS", "--set-mss", &mss],
         ),
         FirewallRule::new(
             "ip6tables",
@@ -1557,7 +1558,7 @@ mod tests {
             assert!(rule.spec.windows(3).any(|w| w == ["--tcp-flags", "SYN,RST", "SYN"]));
             assert!(rule.spec.windows(4).any(|w| w == ["-j", "TCPMSS", "--set-mss", "1240"]));
         }
-        assert_eq!(TUNNEL_TCP_MSS, (1280 - 20 - 20).to_string());
+        assert_eq!(TUNNEL_TCP_MSS, 1240);
     }
 
     #[test]

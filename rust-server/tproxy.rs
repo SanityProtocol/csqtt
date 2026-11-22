@@ -1131,6 +1131,13 @@ mod linux {
                 port,
             ))))
             .with_context(|| format!("bind transparent TCP listener on 0.0.0.0:{port}"))?;
+        // P1 Bt: a proxied flow's own leg never crosses mangle FORWARD (TPROXY delivers it here), so the clamp is the
+        // listener's: its SYN-ACKs ask for, and its accepted sockets send, segments that fit one wire packet. Best effort:
+        // a kernel that refuses it costs only the clamp
+        let mss = libc::c_int::from(crate::tokio_io::TUNNEL_TCP_MSS);
+        if let Err(error) = set_int_option(socket.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_MAXSEG, mss) {
+            eprintln!("[NET] TCP_MAXSEG on the transparent TCP listener: {error}");
+        }
         socket
             .listen(LISTEN_BACKLOG)
             .context("listen on transparent TCP listener")?;

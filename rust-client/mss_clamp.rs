@@ -136,6 +136,16 @@ mod tests {
     }
 
     #[test]
+    fn the_checksum_matches_an_independent_computation() {
+        // the expected values come from a separate implementation over the same bytes (RFC 793's pseudo-header sum), so
+        // tcp_checksum is not checked against itself (review)
+        let mut p = segment(0x02, &linux_syn_options(1460), &[]);
+        assert_eq!(u16::from_be_bytes([p[36], p[37]]), 0x2bf4);
+        assert!(clamp_tcp_mss(&mut p, TUNNEL_TCP_MSS));
+        assert_eq!(u16::from_be_bytes([p[36], p[37]]), 0x2cd0);
+    }
+
+    #[test]
     fn the_mss_option_is_found_after_nops_and_other_options() {
         let mut options = vec![1, 1, 4, 2, 2, 4];
         options.extend_from_slice(&1400u16.to_be_bytes());
