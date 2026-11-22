@@ -227,9 +227,11 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
     var fine by remember { mutableStateOf(hasFineLocation(context)) }
     var locationOn by remember { mutableStateOf(locationEnabled(context)) }
     var deniedForGood by rememberSaveable { mutableStateOf(false) }
-    // when the request went out, and whether Android showed its rationale before it (review F5)
+    // when the request went out, whether Android showed its rationale before it (review F5), and whether the fix button
+    // asked (a pick in the dropdown never opens the settings: review N2)
     var askedAt by rememberSaveable { mutableLongStateOf(0L) }
     var rationaleBefore by rememberSaveable { mutableStateOf(false) }
+    var askedByButton by rememberSaveable { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -258,17 +260,19 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
         val activity = context.findActivity() ?: return@rememberLauncherForActivityResult
         val rationaleAfter = ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION)
         // Android stops asking after a second refusal: its rationale shown before the request and not after. Refused for
-        // good earlier, it shows no dialog and answers at once — then the app's settings open instead of a dead tap. A
-        // dialog dismissed with Back changes nothing: Android asks again next time (review F5)
-        val noDialog = SystemClock.elapsedRealtime() - askedAt < NO_DIALOG_ANSWER_MS
+        // good earlier, it shows no dialog and answers at once — then the fix button opens the app's settings instead of
+        // a dead tap. With the rationale shown before, Android always shows its dialog, so a fast answer there is a
+        // person's. A dialog dismissed with Back changes nothing: Android asks again next time (review F5, N2)
+        val noDialog = !rationaleBefore && SystemClock.elapsedRealtime() - askedAt < NO_DIALOG_ANSWER_MS
         if (!rationaleAfter && (rationaleBefore || noDialog)) {
             deniedForGood = true
-            if (noDialog) openAppSettings(context)
+            if (noDialog && askedByButton) openAppSettings(context)
         }
     }
-    val ask = {
+    val ask = { byButton: Boolean ->
         rationaleBefore = context.findActivity()
             ?.let { ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.ACCESS_FINE_LOCATION) } == true
+        askedByButton = byButton
         askedAt = SystemClock.elapsedRealtime()
         launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
     }
@@ -277,8 +281,8 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
             fine = false,
             locationOn = locationOn,
             fixLabel = "Разрешить доступ к местоположению",
-            fix = { if (deniedForGood) openAppSettings(context) else ask() },
-            request = { if (!deniedForGood) ask() },
+            fix = { if (deniedForGood) openAppSettings(context) else ask(true) },
+            request = { if (!deniedForGood) ask(false) },
         )
         !locationOn -> WifiNameAccess(
             fine = true,
@@ -292,7 +296,7 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
 }
 
 // no person answers Android's dialog this fast: an answer sooner means none was shown
-private const val NO_DIALOG_ANSWER_MS = 800L
+private const val NO_DIALOG_ANSWER_MS = 300L
 
 private fun openAppSettings(context: Context) {
     runCatching {

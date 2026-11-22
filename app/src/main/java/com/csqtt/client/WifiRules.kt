@@ -146,13 +146,19 @@ internal fun foregroundTypes(sdk: Int, wantLocation: Boolean): Int? = when {
 /** The location type is wanted only while a list rule is on and precise location is granted. */
 internal fun wantsLocationType(rules: WifiRules, fineGranted: Boolean): Boolean = rules.needsNames && fineGranted
 
+internal enum class TypeChange { NONE, DROP, TAKE }
+
 /**
  * F4 at a change of the rules: the type is dropped once nothing needs it; it is taken when a list rule comes on while the
  * app is in front (the user's own change, or a start the app made before the rules were read: review F2), never from a
  * re-check in the background.
  */
-internal fun changesForegroundType(typeActive: Boolean, typeWanted: Boolean, listRuleCameOn: Boolean, appInFront: Boolean) =
-    (typeActive && !typeWanted) || (listRuleCameOn && appInFront)
+internal fun foregroundTypeChange(typeActive: Boolean, typeWanted: Boolean, listRuleCameOn: Boolean, appInFront: Boolean) =
+    when {
+        typeActive && !typeWanted -> TypeChange.DROP
+        listRuleCameOn && appInFront -> TypeChange.TAKE
+        else -> TypeChange.NONE
+    }
 
 internal fun hasFineLocation(context: Context): Boolean =
     ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED

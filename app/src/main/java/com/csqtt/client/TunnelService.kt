@@ -1360,23 +1360,35 @@ class TunnelService : Service() {
         // review F1: the phone may sit on its Wi-Fi already, and no callback brings the name before that network's next
         // change (API 26–30) or the flagged callback's first delivery (31+): it is read once now
         if (rules.needsNames && currentWifiName() == null) seedWifiName()
-        // review F2: a list rule that comes on while the app is in front takes the type now (reissueForeground decides on
-        // Main whether it is still missing); the type is dropped once nothing needs it
-        if (changesForegroundType(
+        // review F2: a list rule that comes on while the app is in front takes the type now; the type is dropped once
+        // nothing needs it
+        when (
+            foregroundTypeChange(
                 typeActive = locationTypeActive,
                 typeWanted = wantLocationType(),
                 listRuleCameOn = rules.needsNames && !namesBefore,
                 appInFront = MainActivity.isForeground,
             )
         ) {
-            serviceScope.launch(Dispatchers.Main) { reissueForeground() }
+            TypeChange.DROP -> serviceScope.launch(Dispatchers.Main) { reissueForeground() }
+            // through the app's own start, as the poke: Android 11 lets a service started in the background use location
+            // only after a start from the visible app, a second startForeground alone is not enough (review N1)
+            TypeChange.TAKE -> runCatching {
+                startService(Intent(this, TunnelService::class.java).setAction(ACTION_WIFI_IN_FRONT))
+            }
+            TypeChange.NONE -> Unit
         }
     }
 
     /** The name of the Wi-Fi the phone is on, from Android's Wi-Fi service, for the one Wi-Fi network (a list rule only). */
     private fun seedWifiName() {
+        // asked only for a Wi-Fi network whose name is not known: off Wi-Fi nothing is read, nor a location access noted
+        // (review N3)
+        val network = synchronized(wifiNetworkLock) {
+            physicalWifiNetworks.singleOrNull()?.takeIf { !wifiNames.known(it) }
+        } ?: return
         val name = connectedWifiName(applicationContext) ?: return
-        synchronized(wifiNetworkLock) { physicalWifiNetworks.singleOrNull()?.let { wifiNames.seen(it, name) } }
+        synchronized(wifiNetworkLock) { if (network in physicalWifiNetworks) wifiNames.seen(network, name) }
     }
 
     // the permission is checked only in a list rule: «В любой» pays nothing for it
