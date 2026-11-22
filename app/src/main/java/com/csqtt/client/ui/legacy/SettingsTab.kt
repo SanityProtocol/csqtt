@@ -970,6 +970,8 @@ internal fun SettingsTabContent(
                     selectedKey = if (mtuCustom) MTU_CUSTOM_KEY else shownMtu.toString(),
                     options = VpnMtu.PRESETS.map { it.toString() to it.toString() } + (MTU_CUSTOM_KEY to "Своё значение"),
                     enabled = !tunnelRunning,
+                    // «Своё значение» whole beside the short title, as «Кроме отмеченных» on the Wi-Fi rule
+                    valueMaxWidth = 176.dp,
                     onSelected = { key ->
                         val preset = key.toIntOrNull()
                         mtuCustomPicked = preset == null
