@@ -1,6 +1,7 @@
 package com.csqtt.client
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -60,6 +61,35 @@ internal fun wifiDecision(rules: WifiRules, onWifi: Boolean, name: String?): Wif
     else -> WifiDecision.STAY
 }
 
+/** M-51's action from the rule's decision: the service's reconcile and its guards decide through this one function. */
+internal fun wifiPauseAction(rules: WifiRules, onWifi: Boolean, name: String?, desiredRunning: Boolean, paused: Boolean) =
+    wifiAutoPauseAction(
+        enabled = rules.enabled,
+        wifiConnected = wifiDecision(rules, onWifi, name) == WifiDecision.PAUSE,
+        desiredRunning = desiredRunning,
+        paused = paused,
+    )
+
+/**
+ * The last readable name of each Wi-Fi network: a redacted update keeps it (a network's name never changes while it
+ * lives), the network's loss drops it, «В любой» and off drop them all (F2). Not thread-safe: the service holds its lock.
+ */
+internal class WifiNameCache<N> {
+    private val names = HashMap<N, String>()
+
+    /** [name] null: Android redacted it this time — the name read before stays. */
+    fun seen(network: N, name: String?) {
+        if (name != null) names[network] = name
+    }
+
+    fun known(network: N): Boolean = network in names
+    fun lost(network: N) { names.remove(network) }
+    fun clear() = names.clear()
+
+    /** The name of the Wi-Fi the phone is on: one network at a time in practice; a hand-over keeps the old name meanwhile. */
+    fun current(wifiNetworks: Collection<N>): String? = wifiNetworks.firstNotNullOfOrNull { names[it] }
+}
+
 /** «Запомнить «<сеть>»?»: in a list rule, on a Wi-Fi whose name is known and neither saved nor dismissed. */
 internal fun wifiOffer(rules: WifiRules, onWifi: Boolean, name: String?): String? =
     name?.takeIf { rules.needsNames && onWifi && it !in rules.saved && it !in rules.dismissed }
@@ -105,6 +135,7 @@ internal fun encodeWifiSsids(names: Collection<String>): String =
  * an explicit type, since the two-argument call takes every type of the manifest (location included); 26–28: null, the
  * two-argument call (no types, nor a while-in-use rule).
  */
+@SuppressLint("InlinedApi") // the constants are compile-time; each is used only on the API level that has it
 internal fun foregroundTypes(sdk: Int, wantLocation: Boolean): Int? = when {
     sdk >= 34 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
         (if (wantLocation) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0)
@@ -114,6 +145,14 @@ internal fun foregroundTypes(sdk: Int, wantLocation: Boolean): Int? = when {
 
 /** The location type is wanted only while a list rule is on and precise location is granted. */
 internal fun wantsLocationType(rules: WifiRules, fineGranted: Boolean): Boolean = rules.needsNames && fineGranted
+
+/**
+ * F4 at a change of the rules: the type is dropped once nothing needs it; it is taken when a list rule comes on while the
+ * app is in front (the user's own change, or a start the app made before the rules were read: review F2), never from a
+ * re-check in the background.
+ */
+internal fun changesForegroundType(typeActive: Boolean, typeWanted: Boolean, listRuleCameOn: Boolean, appInFront: Boolean) =
+    (typeActive && !typeWanted) || (listRuleCameOn && appInFront)
 
 internal fun hasFineLocation(context: Context): Boolean =
     ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED

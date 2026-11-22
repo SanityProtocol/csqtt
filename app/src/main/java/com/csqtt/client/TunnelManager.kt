@@ -524,6 +524,7 @@ object TunnelManager {
     private class OfflineRestart(val job: Job, val context: Context, val params: TunnelParams, val epoch: Long)
 
     @Volatile
+    @SuppressLint("StaticFieldLeak") // the application context only
     private var offlineRestart: OfflineRestart? = null
 
     /**
@@ -2063,7 +2064,7 @@ object TunnelManager {
                             }
                             scheduleRestartLocked(restartContext, restartParams, identity.ticket.epoch, restartDelayMs)
                             offlineRestart = restartJob?.takeIf { offline }
-                                ?.let { OfflineRestart(it, restartContext, restartParams, identity.ticket.epoch) }
+                                ?.let { OfflineRestart(it, restartContext.applicationContext, restartParams, identity.ticket.epoch) }
                         } else if (!lifecycleState.isDesiredRunning()) {
                             running.value = false
                         } else {

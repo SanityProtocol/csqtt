@@ -2,10 +2,13 @@ package com.csqtt.client.ui.legacy
 
 import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
-import android.net.Uri
+import android.content.IntentFilter
+import android.location.LocationManager
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,8 +30,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -41,12 +46,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.TunnelService
 import com.csqtt.client.WifiRule
 import com.csqtt.client.connectedWifiName
 import com.csqtt.client.hasFineLocation
@@ -209,8 +217,9 @@ internal class WifiNameAccess(
 }
 
 /**
- * Re-read on every return to the screen (a grant, the location settings). The fix: Android's request for precise
- * location; once Android refuses to ask again, the app's settings; with the permission but location off, its settings.
+ * Re-read on every return to the screen (a grant, the location settings) and on every location switch while shown (the
+ * quick settings leave the app resumed). The fix: Android's request for precise location; once Android refuses to ask
+ * again, the app's settings; with the permission but location off, its settings.
  */
 @Composable
 internal fun rememberWifiNameAccess(): WifiNameAccess {
@@ -218,6 +227,9 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
     var fine by remember { mutableStateOf(hasFineLocation(context)) }
     var locationOn by remember { mutableStateOf(locationEnabled(context)) }
     var deniedForGood by rememberSaveable { mutableStateOf(false) }
+    // when the request went out, and whether Android showed its rationale before it (review F5)
+    var askedAt by rememberSaveable { mutableLongStateOf(0L) }
+    var rationaleBefore by rememberSaveable { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -225,13 +237,39 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
             locationOn = locationEnabled(context)
         }
     }
+    // review F4: location switched from the quick settings — the line follows, and the service reads the name again
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent) {
+                locationOn = locationEnabled(context)
+                TunnelService.onAppInFront(context)
+            }
+        }
+        val registered = runCatching {
+            ContextCompat.registerReceiver(
+                context, receiver, IntentFilter(LocationManager.MODE_CHANGED_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }.isSuccess
+        onDispose { if (registered) runCatching { context.unregisterReceiver(receiver) } }
+    }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         fine = hasFineLocation(context)
-        val activity = context.findActivity()
-        deniedForGood = result[Manifest.permission.ACCESS_FINE_LOCATION] != true && activity != null &&
-            !ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true) return@rememberLauncherForActivityResult
+        val activity = context.findActivity() ?: return@rememberLauncherForActivityResult
+        val rationaleAfter = ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION)
+        // Android stops asking after a second refusal: its rationale shown before the request and not after. Refused for
+        // good earlier, it shows no dialog and answers at once — then the app's settings open instead of a dead tap. A
+        // dialog dismissed with Back changes nothing: Android asks again next time (review F5)
+        val noDialog = SystemClock.elapsedRealtime() - askedAt < NO_DIALOG_ANSWER_MS
+        if (!rationaleAfter && (rationaleBefore || noDialog)) {
+            deniedForGood = true
+            if (noDialog) openAppSettings(context)
+        }
     }
     val ask = {
+        rationaleBefore = context.findActivity()
+            ?.let { ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.ACCESS_FINE_LOCATION) } == true
+        askedAt = SystemClock.elapsedRealtime()
         launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
     }
     return when {
@@ -253,10 +291,13 @@ internal fun rememberWifiNameAccess(): WifiNameAccess {
     }
 }
 
+// no person answers Android's dialog this fast: an answer sooner means none was shown
+private const val NO_DIALOG_ANSWER_MS = 800L
+
 private fun openAppSettings(context: Context) {
     runCatching {
         context.startActivity(
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${context.packageName}".toUri()),
         )
     }
 }

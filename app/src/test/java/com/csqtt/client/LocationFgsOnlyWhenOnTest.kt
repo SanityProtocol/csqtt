@@ -38,6 +38,19 @@ class LocationFgsOnlyWhenOnTest {
     }
 
     @Test
+    fun `a change of the rules drops the type once nothing needs it, and takes it only for a list rule turned on in front`() {
+        // «В любой» or off after a list rule: dropped, wherever the app is
+        assertTrue(changesForegroundType(typeActive = true, typeWanted = false, listRuleCameOn = false, appInFront = false))
+        // review F2: the user turns a list rule on in the app (or the app's start read the rules late): taken now
+        assertTrue(changesForegroundType(typeActive = false, typeWanted = true, listRuleCameOn = true, appInFront = true))
+        // the same in the background (a sticky restart, the tile): never — the app's return takes it (the poke)
+        assertFalse(changesForegroundType(typeActive = false, typeWanted = true, listRuleCameOn = true, appInFront = false))
+        // a change of the networks only (a check, «Запомнить» from the notice): nothing
+        assertFalse(changesForegroundType(typeActive = true, typeWanted = true, listRuleCameOn = false, appInFront = false))
+        assertFalse(changesForegroundType(typeActive = false, typeWanted = true, listRuleCameOn = false, appInFront = true))
+    }
+
+    @Test
     fun `wanted only by a list rule that is on, with precise location`() {
         val only = WifiRules(enabled = true, rule = WifiRule.ONLY_CHECKED)
         val except = WifiRules(enabled = true, rule = WifiRule.EXCEPT_CHECKED)
