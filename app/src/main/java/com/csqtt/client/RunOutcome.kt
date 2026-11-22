@@ -48,7 +48,7 @@ internal object StopCause {
      * battery cleaner, which Android records the same way — so the advice stays, for the case it was not the user.
      */
     const val STOPPED_OUTSIDE =
-        "Туннель остановлен вне приложения: если не вами — разрешите CSQTT работать в фоне без ограничений"
+        "Туннель остановлен вне приложения: если не вами\u00A0— разрешите CSQTT работать в фоне без ограничений"
 
     /**
      * B5f: the cause of a run that ended with no stop, decided a few seconds after the app's screen starts — long enough
