@@ -81,6 +81,7 @@ import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
 import com.csqtt.client.ui.legacy.dialogs.VkAuthDialog
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
@@ -131,14 +132,36 @@ class MainActivity : ComponentActivity() {
     private fun checkSystemStop() {
         if (systemStopChecked) return
         systemStopChecked = true
-        lifecycleScope.launch {
+        val app = applicationContext
+        val store = appSettingsStore
+        // on the process's scope: a Back or a recreate within the grace must not lose the check (review F3)
+        TunnelManager.scope.launch(Dispatchers.Main) {
             delay(SYSTEM_STOP_GRACE_MS)
-            val (wasRunning, savedBoot) = runCatching { appSettingsStore.tunnelWasRunningState() }.getOrNull() ?: return@launch
+            val was = runCatching { store.tunnelWasRunningState() }.getOrNull() ?: return@launch
             val runOn = TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value ||
                 TunnelManager.autoPausedForWifi.value
-            StopCause.systemStop(wasRunning, savedBoot, appSettingsStore.bootCount(), runOn, TunnelManager.failure.value)
-                ?.let { TunnelManager.recordRunFailure(it, applicationContext) }
+            StopCause.systemStop(
+                wasRunning = was.running,
+                savedBoot = was.boot,
+                bootNow = store.bootCount(),
+                savedUpdate = was.update,
+                updateNow = store.appUpdateTime(),
+                userStopped = lastExitWasTheUsers(app),
+                runOn = runOn,
+                failure = TunnelManager.failure.value,
+            )?.let { TunnelManager.recordRunFailure(it, app) }
         }
+    }
+
+    /** Android's own «Остановить» (API 30+ records why the last process ended; review F2). */
+    private fun lastExitWasTheUsers(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return runCatching {
+            val reason = context.getSystemService(android.app.ActivityManager::class.java)
+                .getHistoricalProcessExitReasons(context.packageName, 0, 1).firstOrNull()?.reason
+            reason == android.app.ApplicationExitInfo.REASON_USER_REQUESTED ||
+                reason == android.app.ApplicationExitInfo.REASON_USER_STOPPED
+        }.getOrDefault(false)
     }
 
     // The composition is kept while the app is in the background (§4.2 rule 1): Compose pauses recomposition while the

@@ -98,6 +98,7 @@ class TunnelService : Service() {
     // the tunnel status notification: built and posted only while the screen is on, ≥ 5 s apart (M-48)
     private val notificationThrottle = NotificationThrottle(NOTIFICATION_MIN_REBUILD_INTERVAL_MS)
     @Volatile
+    @Volatile
     private var isStopping = false
     @Volatile
     private var resourcesReleased = false
@@ -1555,6 +1556,7 @@ class TunnelService : Service() {
 
     @Synchronized
     private fun acquireWakeLock() {
+        if (isStopping) return
         // «Экономия батареи» in force: the CPU may sleep, the tunnel with it — except for a deploy, which needs it awake
         if (BatterySaver.active.value && !DeployManager.isDeploying.value) {
             releaseWakeLock() // one a deploy or a server check took meanwhile
@@ -1574,12 +1576,13 @@ class TunnelService : Service() {
         wakeLockExpiresAtElapsedMs = now + WAKE_LOCK_TIMEOUT_MS
     }
 
-    // M-50: the lock operations are serialized — the Wi-Fi pause and resume run them off Main, beside the stats loop,
-    // the battery broadcast and the stop on Main, so a race could leave a lock held
+    // M-50: the lock operations are serialized — the Wi-Fi pause and resume and the stop run them off Main, beside the
+    // stats loop and the battery broadcast on Main — and none is taken once the service stops, so a late acquire after
+    // the stop's release cannot leave a lock held
     @Synchronized
     @Suppress("DEPRECATION")
     private fun acquireWifiLock() {
-        if (wifiLock?.isHeld == true) return
+        if (isStopping || wifiLock?.isHeld == true) return
         val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
 
         wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "csqtt:wifi_perf").apply {

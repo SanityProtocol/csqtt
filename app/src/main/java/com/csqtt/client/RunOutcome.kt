@@ -41,16 +41,33 @@ internal object StopCause {
     const val SYSTEM_KILLED = "Туннель остановлен системой: разрешите CSQTT работать в фоне без ограничений"
     /** B5f: the phone restarted with the tunnel on; nothing brings it back by itself. */
     const val REBOOTED = "Телефон перезагрузился: туннель выключен"
+    /** B5f (review F1): installing an update stops the app, and Android restarts none of its services. */
+    const val UPDATED = "CSQTT обновился: туннель выключен"
+    /** B5f (review F2): Android's own «Остановить» (the task manager, the app's settings) — the user's act, no advice. */
+    const val STOPPED_OUTSIDE = "Туннель остановлен вне приложения"
 
     /**
      * B5f: the cause of a run that ended with no stop, decided a few seconds after the app's screen starts — long enough
      * for a sticky restart Android has pending to show as a start. [wasRunning]: the run's own flag (set at its start,
-     * cleared by every stop); [savedBoot] and [bootNow]: the phone's boot count then and now. Null when there is
-     * nothing to say: no run was cut, a run or a start is on, or a cause is already shown.
+     * cleared by every stop); [savedBoot] and [bootNow]: the phone's boot count then and now; [savedUpdate] and
+     * [updateNow]: the app's install time then and now (none saved: an earlier build set the flag, so an update came);
+     * [userStopped]: Android says the user stopped the app. Null when there is nothing to say: no run was cut, a run or a
+     * start is on, or a cause is already shown.
      */
-    fun systemStop(wasRunning: Boolean, savedBoot: Int?, bootNow: Int?, runOn: Boolean, failure: String?): String? = when {
+    fun systemStop(
+        wasRunning: Boolean,
+        savedBoot: Int?,
+        bootNow: Int?,
+        savedUpdate: Long?,
+        updateNow: Long?,
+        userStopped: Boolean,
+        runOn: Boolean,
+        failure: String?,
+    ): String? = when {
         !wasRunning || runOn || failure != null -> null
+        savedUpdate == null || (updateNow != null && savedUpdate != updateNow) -> UPDATED
         savedBoot != null && bootNow != null && savedBoot != bootNow -> REBOOTED
+        userStopped -> STOPPED_OUTSIDE
         else -> SYSTEM_KILLED
     }
 

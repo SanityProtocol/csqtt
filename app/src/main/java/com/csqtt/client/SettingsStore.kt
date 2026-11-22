@@ -446,8 +446,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val TUNNEL_LAST_DIAGNOSTIC = stringPreferencesKey("tunnel_last_diagnostic")
         private val TUNNEL_LAST_DIAGNOSTIC_AT = longPreferencesKey("tunnel_last_diagnostic_at")
         private val TUNNEL_WAS_RUNNING = booleanPreferencesKey("tunnel_was_running")
-        // B5f: the phone's boot count when the flag was set, so a reboot is told from a kill
+        // B5f: the phone's boot count and the app's install time when the flag was set, so a reboot and an update are
+        // told from a kill
         private val TUNNEL_WAS_RUNNING_BOOT = intPreferencesKey("tunnel_was_running_boot")
+        private val TUNNEL_WAS_RUNNING_UPDATE = longPreferencesKey("tunnel_was_running_update")
         // B5h1: the cause of the last stop the user did not ask for, until the next start (this device's state)
         private val LAST_STOP_CAUSE = stringPreferencesKey("last_stop_cause")
         // the profile the tunnel runs on, from its start (or the switch onto it) to its stop (this device's state)
@@ -718,8 +720,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
-                TUNNEL_WAS_RUNNING, TUNNEL_WAS_RUNNING_BOOT, PROFILE_EPOCH, VK_ACCOUNTS, UI_OWNER_MODE, LAST_STOP_CAUSE,
-                RUN_PROFILE,
+                TUNNEL_WAS_RUNNING, TUNNEL_WAS_RUNNING_BOOT, TUNNEL_WAS_RUNNING_UPDATE, PROFILE_EPOCH, VK_ACCOUNTS,
+                UI_OWNER_MODE, LAST_STOP_CAUSE, RUN_PROFILE,
             ).mapTo(HashSet()) { it.name }
         }
 
@@ -2071,15 +2073,26 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
     suspend fun saveTunnelWasRunning(running: Boolean) {
         val boot = if (running) bootCount() else null
+        val update = if (running) appUpdateTime() else null
         dataStore.edit { prefs ->
             prefs[TUNNEL_WAS_RUNNING] = running
             if (boot != null) prefs[TUNNEL_WAS_RUNNING_BOOT] = boot else prefs.remove(TUNNEL_WAS_RUNNING_BOOT)
+            if (update != null) prefs[TUNNEL_WAS_RUNNING_UPDATE] = update else prefs.remove(TUNNEL_WAS_RUNNING_UPDATE)
         }
     }
 
-    /** B5f: the run's flag and the boot count it was set in (null: none recorded). */
-    internal suspend fun tunnelWasRunningState(): Pair<Boolean, Int?> =
-        dataStore.data.first().let { (it[TUNNEL_WAS_RUNNING] ?: false) to it[TUNNEL_WAS_RUNNING_BOOT] }
+    /** B5f: the run's flag, and the boot count and install time it was set with (null: none recorded). */
+    internal data class WasRunning(val running: Boolean, val boot: Int?, val update: Long?)
+
+    internal suspend fun tunnelWasRunningState(): WasRunning = dataStore.data.first().let {
+        WasRunning(it[TUNNEL_WAS_RUNNING] ?: false, it[TUNNEL_WAS_RUNNING_BOOT], it[TUNNEL_WAS_RUNNING_UPDATE])
+    }
+
+    /** The app's install time (it changes with every update), or null. */
+    @Suppress("DEPRECATION")
+    internal fun appUpdateTime(): Long? = runCatching {
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0).lastUpdateTime
+    }.getOrNull()
 
     /** The phone's boot count, or null where Android does not give it. */
     internal fun bootCount(): Int? = runCatching {

@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -52,6 +53,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.NotificationManagerCompat
+import android.net.Uri
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import com.csqtt.client.ConnectionState
@@ -64,6 +67,7 @@ import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.HandOverResult
+import com.csqtt.client.StopCause
 import com.csqtt.client.ManlCaptchaWebViewManager
 import com.csqtt.client.SubscriptionMeta
 import com.csqtt.client.handOverNoticeLine
@@ -349,6 +353,8 @@ private fun TunnelConnectionPanel(
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center,
                 )
+                // B5f: the cause asks for a setting, so it carries the way there (review: «the battery prompt beside it»)
+                if (state.reason == StopCause.SYSTEM_KILLED) BackgroundWorkButton()
             }
 
             // «Нужна капча» (B5h2): the captcha screen, which follows the core's ask; the logo still stops
@@ -465,6 +471,31 @@ internal fun workersLine(active: Int, target: Int, serverLimit: Int?): String = 
     append("Потоки: ").append(active)
     if (target > 0) append(" / ").append(target)
     if (serverLimit != null) append(" · сервер: ").append(serverLimit)
+}
+
+/**
+ * B5f: «Разрешить работу в фоне» — Android's own request to run without battery limits; already exempt, the app's settings,
+ * where the phone's maker keeps its own background limits.
+ */
+@Composable
+private fun BackgroundWorkButton() {
+    val context = LocalContext.current
+    TextButton(
+        onClick = {
+            val exempt = context.getSystemService(PowerManager::class.java)
+                ?.isIgnoringBatteryOptimizations(context.packageName) == true
+            val packageUri = Uri.parse("package:${context.packageName}")
+            val intent = if (exempt) {
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)
+            } else {
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, packageUri)
+            }
+            runCatching { context.startActivity(intent) }
+                .onFailure { runCatching { context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)) } }
+        },
+    ) {
+        Text("Разрешить работу в фоне", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+    }
 }
 
 /** B5h2: one background operation's last outcome (a subscription refresh, the hand-over of the pool to the server). */
