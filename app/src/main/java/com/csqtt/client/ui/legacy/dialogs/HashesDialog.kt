@@ -351,7 +351,12 @@ fun HashesDialog(
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
                 ) {
                     Text(
-                        if (isChecking) "Проверяем..." else "Проверить актив",
+                        when {
+                            isChecking -> "Проверяем..."
+                            // a check of another profile runs: one at a time (review F2)
+                            checkBusy -> "Идёт проверка другого профиля"
+                            else -> "Проверить актив"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                     )

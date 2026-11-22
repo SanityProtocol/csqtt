@@ -1047,11 +1047,19 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             val key = getProfileKey(DEPLOY_VK_POOL_HANDOVER, vps)
             val previous = HandOverResult.decode(prefs[key])
             prefs[key] = result.encode()
-            return !result.ok && (previous == null || previous.ok || previous.text != result.text)
+            return !result.ok && (previous == null || previous.ok || failureKey(previous.text) != failureKey(result.text))
         }
 
-        /** B5h2: [profile]'s own server, in «Авто API», with a hand-over on record: its last result. */
-        internal fun handOverNoticeOf(prefs: Preferences, profile: Int): HandOverResult? {
+        /**
+         * B5h2: [profile]'s own server's last hand-over; else a failed one of another owner profile — the one its notice
+         * may have brought the user here for (review F3).
+         */
+        internal fun handOverNoticeOf(prefs: Preferences, profile: Int): HandOverResult? =
+            handOverOfProfile(prefs, profile)
+                ?: profileIndices.firstNotNullOfOrNull { other -> handOverOfProfile(prefs, other)?.takeIf { !it.ok } }
+
+        /** [profile]'s own server, in «Авто API», with a hand-over on record: its last result. */
+        private fun handOverOfProfile(prefs: Preferences, profile: Int): HandOverResult? {
             if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) return null
             val mode = prefs[getProfileKey(VK_HASH_MODE, profile)]
             if (mode != "auto" && mode != CsqttConstants.VkAutoHash.MODE_AUTO_API) return null
@@ -1065,17 +1073,21 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             if (key.isEmpty()) return false
             val meta = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META]).toMutableMap()
             val current = meta[key] ?: SubscriptionMeta(url = key)
-            meta[key] = current.copy(lastError = error, lastSkipped = skipped)
+            meta[key] = current.copy(lastError = error.trim(), lastSkipped = skipped.trim())
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
-            return error.isNotEmpty() && error != current.lastError
+            return error.isNotBlank() && failureKey(error) != failureKey(current.lastError)
         }
 
-        /** B5h2 (U3): [profile]'s subscription, when its last refresh failed or skipped nodes. */
+        /**
+         * B5h2 (U3): [profile]'s subscription, when its last refresh failed or skipped nodes; else a failure of another
+         * subscription in use — the one its notice may have brought the user here for (review F3).
+         */
         internal fun subscriptionNoticeOf(prefs: Preferences, profile: Int): SubscriptionMeta? {
+            val all = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])
             val url = prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim().orEmpty()
-            if (url.isEmpty()) return null
-            return decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])[url]
-                ?.takeIf { it.lastError.isNotEmpty() || it.lastSkipped.isNotEmpty() }
+            all[url]?.takeIf { it.lastError.isNotEmpty() || it.lastSkipped.isNotEmpty() }?.let { return it }
+            val inUse = profileIndices.mapNotNullTo(HashSet()) { prefs[getProfileKey(SUBSCRIPTION_URL, it)]?.trim() }
+            return all.values.firstOrNull { it.lastError.isNotEmpty() && it.url in inUse }
         }
 
         /** M-70: what an import can write into, read in one pass. */

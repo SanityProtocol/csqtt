@@ -86,7 +86,7 @@ internal object VkPoolHandOver {
     /**
      * Sends [panel]'s pool when it differs from what the panel last accepted (always with [force]). Returns the log
      * line, or null when there was nothing to send. A failure is tried again at the next pool run. A failure of a try
-     * that is not the [lastTry] (the deploy end tries three times) is only logged; a success is always kept.
+     * that is not the [lastTry] (the deploy end tries three times) is neither kept nor announced; a success always is.
      */
     suspend fun handOver(
         store: SettingsStore,
@@ -125,7 +125,7 @@ internal object VkPoolHandOver {
      * answer and a network error can carry anything.
      */
     private suspend fun recordResult(store: SettingsStore, vps: Int, ok: Boolean, line: String) {
-        val text = LogRedaction.redact(line.removePrefix("[OK] ").removePrefix("[ERR] ").removeSuffix(" ✓"))
+        val text = handOverNoticeText(line)
         val id = CsqttConstants.Notifications.HANDOVER_NOTIFICATION_ID
         val tag = "handover:$vps"
         if (store.recordHandOverResult(vps, HandOverResult(ok, text, System.currentTimeMillis()))) {

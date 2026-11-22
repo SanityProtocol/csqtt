@@ -48,9 +48,12 @@ class HashCheckSurvivesDialogTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     private val store by lazy { SettingsStore(context) }
     private val realValidator = VkHashCheck.validator
+    // the checker answers only when the test lets it; a failed wait still lets it go, or the check stays Running (review)
+    private val release = CompletableDeferred<Unit>()
 
     @After
     fun restore() {
+        release.complete(Unit)
         VkHashCheck.validator = realValidator
         runBlocking {
             store.deleteProfileFromClassic(SLOT)
@@ -66,8 +69,7 @@ class HashCheckSurvivesDialogTest {
 
     @Test
     fun theCheckOutlivesTheDialogTheTabAndTheScreen() {
-        // the checker answers only when the test lets it: the dialog, the tab and the screen go first
-        val release = CompletableDeferred<Unit>()
+        // the dialog, the tab and the screen go first
         VkHashCheck.validator = { _, hashes, _, _ ->
             release.await()
             hashes.associateWith { VkHashValidationStatus.Valid }

@@ -31,6 +31,38 @@ class SubscriptionOutcomeTest {
     }
 
     @Test
+    fun theSameFailureWithOtherPortsOrPointersIsNotNew() {
+        val prefs = prefs()
+        val timeout = { port: Int -> "Ошибка сети: failed to connect to /203.0.113.2 (port 443) from /10.0.0.5 (port $port) after 10000ms" }
+        assertTrue(SettingsStore.writeSubscriptionOutcome(prefs, url, timeout(51234), ""))
+        assertFalse(SettingsStore.writeSubscriptionOutcome(prefs, url, timeout(51999), ""))
+        assertFalse(SettingsStore.writeSubscriptionOutcome(prefs, url, timeout(40001) + " ", ""))
+        assertTrue(SettingsStore.writeSubscriptionOutcome(prefs, url, "Ошибка TLS: SSL handshake aborted: ssl=0x7c8f6a5d48", ""))
+        assertFalse(SettingsStore.writeSubscriptionOutcome(prefs, url, "Ошибка TLS: SSL handshake aborted: ssl=0x7d10aa0c00", ""))
+    }
+
+    @Test
+    fun whatARefreshKeepsIsMasked() {
+        val (error, skipped) = subscriptionOutcomeTexts(false, "Ошибка сети: token=SECRET123 csqtt://203.0.113.9:443/x", 0)
+        assertFalse(error, error.contains("SECRET123") || error.contains("203.0.113.9"))
+        assertEquals("", skipped)
+        val ok = subscriptionOutcomeTexts(true, "Подписка — добавлено: 1, пропущено: 2 (нет свободного профиля: 2)", 2)
+        assertEquals("" to "добавлено: 1, пропущено: 2 (нет свободного профиля: 2)", ok)
+        assertEquals("" to "", subscriptionOutcomeTexts(true, "Подписка — обновлено: 3", 0))
+    }
+
+    @Test
+    fun anotherSubscriptionsFailureShowsWhenTheOpenProfileHasNone() {
+        val prefs = prefs()
+        SettingsStore.writeSubscriptionOutcome(prefs, url, "Сервер вернул 503", "")
+        // profile 4 came from no subscription: the failing one its notice was about is shown
+        assertEquals(url, SettingsStore.subscriptionNoticeOf(prefs, 4)?.url)
+        // skipped nodes alone stay with their own profile
+        SettingsStore.writeSubscriptionOutcome(prefs, url, "", "пропущено: 1")
+        assertNull(SettingsStore.subscriptionNoticeOf(prefs, 4))
+    }
+
+    @Test
     fun aSuccessClearsItAndKeepsTheRest() {
         val prefs = prefs()
         SettingsStore.writeSubscriptionOutcome(prefs, url, "Сервер вернул 503", "")
@@ -52,14 +84,14 @@ class SubscriptionOutcomeTest {
     }
 
     @Test
-    fun theLineIsForTheOpenProfilesSubscriptionOnly() {
+    fun theLineForTheOpenProfilesSubscription() {
         val prefs = prefs()
+        assertNull("nothing to say before a refresh", SettingsStore.subscriptionNoticeOf(prefs, 3))
         SettingsStore.writeSubscriptionOutcome(prefs, url, "Ошибка сети: timeout", "")
         assertEquals(
             "Подписка «Мой VPN» не обновилась: Ошибка сети: timeout · 14:05",
             subscriptionNoticeLine(SettingsStore.subscriptionNoticeOf(prefs, 3)!!) { "14:05" },
         )
-        assertNull(SettingsStore.subscriptionNoticeOf(prefs, 4))
         assertNull(subscriptionNoticeLine(SubscriptionMeta(url = url, title = "Мой VPN")))
     }
 

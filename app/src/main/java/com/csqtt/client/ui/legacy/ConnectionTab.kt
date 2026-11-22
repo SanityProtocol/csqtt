@@ -65,6 +65,7 @@ import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.HandOverResult
 import com.csqtt.client.ManlCaptchaWebViewManager
+import com.csqtt.client.SubscriptionMeta
 import com.csqtt.client.handOverNoticeLine
 import com.csqtt.client.subscriptionNoticeLine
 import com.csqtt.client.R
@@ -257,7 +258,7 @@ internal fun ConnectionTab(
                 cooldownActive = cooldownActive,
                 configurationValid = isValid,
                 onToggleTunnel = { toggleTunnel() },
-                subscriptionLine = subscriptionNotice?.let { subscriptionNoticeLine(it) },
+                subscription = subscriptionNotice,
                 handOver = handOverNotice,
             )
         }
@@ -270,7 +271,7 @@ private fun TunnelConnectionPanel(
     cooldownActive: Boolean,
     configurationValid: Boolean,
     onToggleTunnel: () -> Unit,
-    subscriptionLine: String? = null,
+    subscription: SubscriptionMeta? = null,
     handOver: HandOverResult? = null,
 ) {
     val tunnelStopping = state is ConnectionState.Stopping
@@ -368,7 +369,13 @@ private fun TunnelConnectionPanel(
 
             NotificationsOffWarning()
 
-            subscriptionLine?.let { OutcomeLine(it, MaterialTheme.colorScheme.error) }
+            subscription?.let { meta ->
+                subscriptionNoticeLine(meta)?.let { line ->
+                    // a failure in the error colour; skipped nodes of a refresh that worked as a warning (review)
+                    val failed = meta.lastError.isNotEmpty()
+                    OutcomeLine(line, if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary)
+                }
+            }
             handOver?.let {
                 OutcomeLine(
                     handOverNoticeLine(it),

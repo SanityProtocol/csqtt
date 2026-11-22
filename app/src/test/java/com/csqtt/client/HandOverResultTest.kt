@@ -42,6 +42,36 @@ class HandOverResultTest {
     }
 
     @Test
+    fun theSameFailureWithAnotherPortIsNotNew() {
+        val prefs = owner()
+        val timeout = { port: Int ->
+            HandOverResult(false, "Хеши не переданы: панель не ответила (адрес, порт или секретный путь) · failed to connect " +
+                "to /203.0.113.2 (port 8443) from /10.0.0.5 (port $port) after 8000ms", 1L)
+        }
+        assertTrue(SettingsStore.writeHandOverResult(prefs, 2, timeout(51234)))
+        assertFalse(SettingsStore.writeHandOverResult(prefs, 2, timeout(51999)))
+        assertTrue("another failure is new", SettingsStore.writeHandOverResult(prefs, 2, refused))
+    }
+
+    @Test
+    fun theNoticeTextHasNoLogTagsAndIsMasked() {
+        assertEquals("Хеши звонков переданы серверу (6)", handOverNoticeText("[OK] Хеши звонков переданы серверу (6) ✓"))
+        val failed = handOverNoticeText("[ERR] Сервер не принял хеши · код=403 password=hunter2")
+        assertEquals("Сервер не принял хеши · код=403 password=${LogRedaction.HIDDEN}", failed)
+    }
+
+    @Test
+    fun anotherOwnerProfilesFailureShowsWhenTheOpenProfileHasNone() {
+        val prefs = owner()
+        SettingsStore.writeHandOverResult(prefs, 2, refused)
+        // profile 5 is no owner profile on a pool: the failure its notice was about is shown
+        assertEquals(refused, SettingsStore.handOverNoticeOf(prefs, 5))
+        // a success elsewhere is not
+        SettingsStore.writeHandOverResult(prefs, 2, ok)
+        assertNull(SettingsStore.handOverNoticeOf(prefs, 5))
+    }
+
+    @Test
     fun shownForTheOwnerProfileOnThePoolOnly() {
         val prefs = owner()
         SettingsStore.writeHandOverResult(prefs, 2, ok)

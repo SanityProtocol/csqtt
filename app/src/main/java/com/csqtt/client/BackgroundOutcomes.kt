@@ -22,6 +22,22 @@ import java.util.TimeZone
  * «Подключение», and announce a new failure while the app is not in front. A log line alone is not the signal.
  */
 
+/** «Is it new»: the same failure differs only in ports, timings or pointers (a timeout's local port, Conscrypt's ssl=0x…). */
+internal fun failureKey(text: String): String = text.trim().replace(FAILURE_NOISE, "#")
+
+private val FAILURE_NOISE = Regex("0x[0-9a-fA-F]+|[0-9]+")
+
+/** U3: what a refresh keeps — its failure, or what it skipped — masked: a server's message can carry anything. */
+internal fun subscriptionOutcomeTexts(success: Boolean, message: String, skipped: Int): Pair<String, String> {
+    val error = if (success) "" else LogRedaction.redact(message).trim()
+    val skippedText = if (success && skipped > 0) LogRedaction.redact(message.removePrefix("Подписка — ")).trim() else ""
+    return error to skippedText
+}
+
+/** The hand-over's log line as «Подключение» and the notice say it: no log tags, masked. */
+internal fun handOverNoticeText(logLine: String): String =
+    LogRedaction.redact(logLine.removePrefix("[OK] ").removePrefix("[ERR] ").removeSuffix(" ✓")).trim()
+
 /** The D6 hand-over's last result for a server: what its panel was told, and when. */
 internal data class HandOverResult(val ok: Boolean, val text: String, val at: Long) {
     fun encode(): String = JSONObject().put("ok", ok).put("text", text).put("at", at).toString()
