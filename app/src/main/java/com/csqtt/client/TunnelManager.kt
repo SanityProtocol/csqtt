@@ -1244,6 +1244,8 @@ object TunnelManager {
         if (identity != null && !isCurrent(identity)) return
         val cleanMessage = LogRedaction.redact(maskOwnerHashes(withoutLogStickers(message), ownerHashes))
         LogBook.app.append(key, cleanMessage, priority, isError, level)
+        // B5g: an error is kept across a kill of the process too, at most once a minute
+        if (isError) LogTail.errorRecorded()
     }
 
     private fun isCurrent(identity: ProcessIdentity): Boolean =
@@ -2183,6 +2185,8 @@ object TunnelManager {
         activeSettingsStore = null
         lastAppliedDns = null
         ManlCaptchaWebViewManager.cancelCaptcha()
+        // B5g: a stop's lines are kept across the process's death once its own last ones are in
+        LogTail.requestSave(LogTail.STOP_SETTLE_MS)
     }
 
     fun reloadVpn() {

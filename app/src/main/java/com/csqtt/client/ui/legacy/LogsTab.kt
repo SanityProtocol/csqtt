@@ -3,6 +3,7 @@ package com.csqtt.client.ui.legacy
 import com.csqtt.client.copySensitive
 import com.csqtt.client.shareLogFile
 import com.csqtt.client.showRaisedToast
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
@@ -38,8 +39,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.csqtt.client.BuildConfig
 import com.csqtt.client.DeployManager
 import com.csqtt.client.LogBook
+import com.csqtt.client.LogEntry
 import com.csqtt.client.LogText
 import com.csqtt.client.R
 import com.csqtt.client.TunnelManager
@@ -140,7 +143,7 @@ private fun LogsTerminal() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = { context.shareLogFile(LogText.text(currentLogs)) },
+                onClick = { context.shareLogFile(exportText(currentLogs)) },
                 enabled = currentLogs.isNotEmpty(),
                 modifier = Modifier.size(40.dp)
             ) {
@@ -154,7 +157,7 @@ private fun LogsTerminal() {
 
             IconButton(
                 onClick = {
-                    if (context.copySensitive("CSQTT Logs", LogText.text(currentLogs))) {
+                    if (context.copySensitive("CSQTT Logs", exportText(currentLogs))) {
                         context.showRaisedToast(copiedMessage, Toast.LENGTH_SHORT)
                     }
                 },
@@ -183,3 +186,16 @@ private fun LogsTerminal() {
         }
     }
 }
+
+/** B5g: the copied or shared log, under a header that says what wrote it and when; no secret is in either. */
+private fun exportText(entries: List<LogEntry>): String = LogText.export(
+    entries,
+    LogText.header(
+        appVersion = BuildConfig.VERSION_NAME,
+        versionCode = BuildConfig.VERSION_CODE.toLong(),
+        androidRelease = Build.VERSION.RELEASE,
+        sdk = Build.VERSION.SDK_INT,
+        device = "${Build.MANUFACTURER} ${Build.MODEL}",
+        nowMs = System.currentTimeMillis(),
+    ),
+)

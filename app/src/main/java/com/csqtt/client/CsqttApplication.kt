@@ -10,6 +10,21 @@ import kotlinx.coroutines.launch
 class CsqttApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // B5g: the log's tail an earlier process left goes in front of this one's; a crash writes this one's
+        LogTail.restore(this)
+        val crashHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching {
+                TunnelManager.updateLog(
+                    "app_crash",
+                    "✗ Сбой приложения: ${error.javaClass.name}: ${error.message.orEmpty().take(300)}",
+                    99,
+                    true,
+                )
+                LogTail.saveNow()
+            }
+            crashHandler?.uncaughtException(thread, error)
+        }
         DeployManager.init(this)
 
         // The QS tile and the widgets follow the tunnel from process start, not from MainActivity:

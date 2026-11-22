@@ -176,6 +176,8 @@ class MainActivity : ComponentActivity() {
     // lost every open dialog and the flows' loaded values.
     override fun onStop() {
         activeActivities = (activeActivities - 1).coerceAtLeast(0)
+        // B5g: the app leaves the screen: the log's tail is kept, if it changed since it was last kept
+        LogTail.requestSave()
         super.onStop()
     }
 

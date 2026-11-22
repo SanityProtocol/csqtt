@@ -72,6 +72,24 @@ internal class LogBook(
 
     fun snapshot(): List<LogEntry> = synchronized(lock) { records.toList() }
 
+    /**
+     * B5g: the records an earlier process left (LogTail) go in front of this one's, under «Перезапуск приложения»; they
+     * count as read. The newest are kept when they all do not fit.
+     */
+    fun restore(earlier: List<LogEntry>) {
+        if (earlier.isEmpty()) return
+        val now = clock()
+        synchronized(lock) {
+            val current = records.toList()
+            records.clear()
+            earlier.forEach { records.addLast(it.copy(id = nextId++)) }
+            records.addLast(LogEntry(nextId++, now, SECTION_KEY, RESTART_LABEL, separator = true))
+            current.forEach(records::addLast)
+            while (records.size > capacity) records.removeFirst()
+            versionState.value += 1
+        }
+    }
+
     fun clear() {
         synchronized(lock) {
             records.clear()
@@ -109,6 +127,7 @@ internal class LogBook(
         const val MAX_TEXT = 1_024
         const val FOLD_WINDOW = 8
         const val SECTION_KEY = "section"
+        const val RESTART_LABEL = "Перезапуск приложения"
 
         /** The app's log. */
         val app = LogBook()
