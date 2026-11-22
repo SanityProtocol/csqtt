@@ -44,7 +44,7 @@ class QuickToggleTileService : TileService() {
         super.onClick()
         scope.launch {
             try {
-                toggleTunnelFromQuickAction(this@QuickToggleTileService) { openMainActivity() }
+                toggleTunnelFromQuickAction(this@QuickToggleTileService) { intent -> openActivity(intent) }
             } catch (e: Exception) {
                 Log.e("QuickToggleTile", "Failed to toggle tunnel via QS tile", e)
                 this@QuickToggleTileService.showRaisedToast("Ошибка запуска: ${e.localizedMessage}", Toast.LENGTH_SHORT)
@@ -74,11 +74,8 @@ class QuickToggleTileService : TileService() {
     }
 
     @SuppressLint("StartActivityAndCollapseDeprecated")
-    private fun openMainActivity() {
+    private fun openActivity(intent: Intent) {
         runCatching {
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
             if (Build.VERSION.SDK_INT >= 34) {
                 val pendingIntent = PendingIntent.getActivity(
                     this,
@@ -92,7 +89,7 @@ class QuickToggleTileService : TileService() {
                 startActivityAndCollapse(intent)
             }
         }.onFailure { e ->
-            Log.e("QuickToggleTile", "Failed to open MainActivity", e)
+            Log.e("QuickToggleTile", "Failed to open ${intent.component?.shortClassName}", e)
         }
     }
 }

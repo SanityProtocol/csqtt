@@ -46,7 +46,11 @@ internal data class ConnectionInputs(
     val stopping: Boolean = false,
     val pausedOnWifi: Boolean = false,
     val waitingForNetwork: Boolean = false,
-    val captchaPending: Boolean = false,
+    /**
+     * A captcha episode is open (B5h2): from the core's ask until it is solved, the run connects or gets credentials, or
+     * it stops. It outlives one ask, as the core asks again after its captcha lock.
+     */
+    val captchaNeeded: Boolean = false,
     /** The running process sent its TUNCONF (a crash restart's retained one does not count). */
     val tunconf: Boolean = false,
     val vpnReady: Boolean = false,
@@ -64,9 +68,10 @@ internal fun deriveConnectionState(input: ConnectionInputs): ConnectionState = w
         stopping -> ConnectionState.Stopping
         pausedOnWifi -> ConnectionState.PausedOnWifi
         !running && !starting -> failure?.let { ConnectionState.Failed(it) } ?: ConnectionState.Idle
-        captchaPending -> ConnectionState.CaptchaNeeded
         waitingForNetwork -> ConnectionState.WaitingForNetwork
         running && tunconf && vpnReady && activeWorkers > 0 -> ConnectionState.Connected(activeWorkers)
+        // after «Подключено»: a captcha asked for more workers does not hide a working tunnel (B5h2)
+        captchaNeeded -> ConnectionState.CaptchaNeeded
         serverSilent -> ConnectionState.ServerNotResponding
         running && everConnected -> ConnectionState.Reconnecting
         !running -> ConnectionState.Preparing

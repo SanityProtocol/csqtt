@@ -12,16 +12,21 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 class ManlCaptchaActivity : ComponentActivity() {
     private var captchaWebView: WebView? = null
+    private var loadedUrl: String? = null
     private val interceptorJSCode = """
         (function() {
             if (window.__csqtt_interceptor_installed) return;
@@ -130,22 +135,39 @@ class ManlCaptchaActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         val discardStaleUiState = UpdateLaunchGuard.consumeStaleSavedState(this)
         super.onCreate(if (discardStaleUiState) null else savedInstanceState)
+        // B5h2: a tap that comes after the need ended (a stale tile, widget or notification) opens the app instead
+        if (!ManlCaptchaWebViewManager.needed.value) {
+            runCatching { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            finish()
+            return
+        }
         ManlCaptchaWebViewManager.activeActivity = this
-        val redirectUri = intent.getStringExtra("redirectUri") ?: return finish()
-        if (!CaptchaUriPolicy.isAllowed(redirectUri)) {
-            ManlCaptchaWebViewManager.notifyResult(Result.failure(IllegalArgumentException("Недопустимый адрес captcha")))
-            return finish()
+        // the screen lives as long as the need: solved, connected or stopped closes it, while in the background too
+        lifecycleScope.launch {
+            ManlCaptchaWebViewManager.needed.first { !it }
+            finish()
         }
 
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+                // the ask the core is waiting on; between asks the screen waits for the next one (B5h2)
+                val ask by ManlCaptchaWebViewManager.liveAsk.collectAsState()
+                val uri = ask?.takeIf(CaptchaUriPolicy::isAllowed)
+                var isLoading by remember { mutableStateOf(true) }
+                LaunchedEffect(ask) {
+                    if (ask != null && uri == null) {
+                        ManlCaptchaWebViewManager.notifyResult(Result.failure(IllegalArgumentException("Недопустимый адрес captcha")))
+                    }
+                }
+                LaunchedEffect(uri) {
+                    isLoading = uri != null
+                    show(captchaWebView, uri ?: BLANK)
+                }
                 Box(modifier = Modifier.fillMaxSize()) {
                     Column(
                         modifier = Modifier.align(Alignment.Center),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        var isLoading by rememberSaveable { mutableStateOf(true) }
-
                         Box {
                             Surface(
                                 modifier = Modifier.fillMaxSize(),
@@ -182,11 +204,11 @@ class ManlCaptchaActivity : ComponentActivity() {
                                                     ManlCaptchaWebViewManager.notifyResult(Result.success(token))
                                                     finish()
                                                 }
+                                                // VK refused the answer: that ask is over, and the screen waits for the next one
                                                 @JavascriptInterface
                                                 fun onError(err: String) {
                                                     Log.e("ManlCaptchaWV", "Error: $err")
                                                     ManlCaptchaWebViewManager.notifyResult(Result.failure(Exception("VK Captcha error: $err")))
-                                                    finish()
                                                 }
                                                 @JavascriptInterface
                                                 fun onCancelAndStop() {
@@ -205,24 +227,27 @@ class ManlCaptchaActivity : ComponentActivity() {
 
                                                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                                     super.onPageStarted(view, url, favicon)
-                                                    view?.evaluateJavascript(interceptorJSCode, null)
+                                                    if (url != BLANK) view?.evaluateJavascript(interceptorJSCode, null)
                                                 }
                                                 override fun onPageFinished(view: WebView?, url: String?) {
                                                     super.onPageFinished(view, url)
+                                                    // the blank page between asks may finish after the next ask began loading
+                                                    if (url == BLANK) return
                                                     view?.evaluateJavascript(interceptorJSCode, null)
                                                     view?.evaluateJavascript(hideElementsJSCode, null)
                                                     isLoading = false
                                                 }
                                             }
                                             webChromeClient = WebChromeClient()
-                                            loadUrl(redirectUri)
+                                            show(this, uri ?: BLANK)
                                         }
                                     }
                                 )
                             }
 
-                            if (isLoading) {
-                                CircularProgressIndicator(
+                            when {
+                                uri == null -> WaitingForNextCaptcha(onClose = { finish() })
+                                isLoading -> CircularProgressIndicator(
                                     modifier = Modifier.align(Alignment.Center).size(48.dp),
                                     color = MaterialTheme.colorScheme.primary
                                 )
@@ -232,6 +257,23 @@ class ManlCaptchaActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Loads [target] once: the WebView's creation and the ask's effect may both ask for it. */
+    private fun show(view: WebView?, target: String) {
+        if (view == null || loadedUrl == target) return
+        loadedUrl = target
+        view.loadUrl(target)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ManlCaptchaWebViewManager.screenStarted = true
+    }
+
+    override fun onStop() {
+        ManlCaptchaWebViewManager.screenStarted = false
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -250,6 +292,45 @@ class ManlCaptchaActivity : ComponentActivity() {
         super.onDestroy()
         if (ManlCaptchaWebViewManager.activeActivity === this) {
             ManlCaptchaWebViewManager.activeActivity = null
+        }
+    }
+}
+
+private const val BLANK = "about:blank"
+
+/**
+ * B5h2: the screen between the core's asks. It looks like the VK card it stands in for, so the screen keeps one face.
+ * «Закрыть» only hides it: the tunnel goes on, and «Нужна капча» opens it again (the VK card's red cross stops the tunnel,
+ * so this one is not red).
+ */
+@Composable
+private fun WaitingForNextCaptcha(onClose: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+        Surface(
+            modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            color = Color.Black,
+            contentColor = Color.White,
+        ) {
+            Column(
+                modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp), color = Color.White, strokeWidth = 2.5.dp)
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    text = "Эта капча больше не действует. ВК пришлёт новую в течение пары минут — экран обновится сам.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(12.dp))
+                TextButton(
+                    onClick = onClose,
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.72f)),
+                ) {
+                    Text("Закрыть")
+                }
+            }
         }
     }
 }

@@ -1587,7 +1587,10 @@ class TunnelService : Service() {
             return
         }
         getSystemService(NotificationManager::class.java)
-            .notify(TUNNEL_NOTIFICATION_ID, createNotification(text, title = title))
+            .notify(
+                TUNNEL_NOTIFICATION_ID,
+                createNotification(text, title = title, captcha = state is ConnectionState.CaptchaNeeded),
+            )
     }
 
     private fun createNotificationChannel() {
@@ -1611,6 +1614,7 @@ class TunnelService : Service() {
         actionName: String = "STOP",
         actionTitle: String = "Отключить",
         title: String = "CSQTT",
+        captcha: Boolean = false,
     ): Notification {
         val openIntent = PendingIntent.getActivity(
             this, 0,
@@ -1637,6 +1641,16 @@ class TunnelService : Service() {
             .setOngoing(true)
             .setLocalOnly(true)
             .setContentIntent(openIntent)
+            .apply {
+                // «Нужна капча» (B5h2): the captcha screen, which follows the ask the core is waiting on
+                if (captcha) {
+                    val solve = PendingIntent.getActivity(
+                        this@TunnelService, 5, ManlCaptchaWebViewManager.promptIntent(this@TunnelService),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                    )
+                    addAction(0, "Решить капчу", solve)
+                }
+            }
             .addAction(R.drawable.ic_stop, actionTitle, stopIntent)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 

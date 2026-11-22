@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -62,6 +63,7 @@ import com.csqtt.client.BatterySaver
 import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.ManlCaptchaWebViewManager
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.StoredSecretState
@@ -73,6 +75,7 @@ import com.csqtt.client.newTunnelSessionId
 import com.csqtt.client.showRaisedToast
 import com.csqtt.client.ui.legacy.components.CsqttScreen
 import com.csqtt.client.ui.legacy.design.CsqttShapes
+import com.csqtt.client.ui.legacy.design.CsqttSizes
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -335,6 +338,18 @@ private fun TunnelConnectionPanel(
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center,
                 )
+            }
+
+            // «Нужна капча» (B5h2): the captcha screen, which follows the core's ask; the logo still stops
+            if (state is ConnectionState.CaptchaNeeded) {
+                val context = LocalContext.current
+                Button(
+                    onClick = { runCatching { context.startActivity(ManlCaptchaWebViewManager.promptIntent(context)) } },
+                    modifier = Modifier.height(CsqttSizes.CompactControlHeight),
+                    shape = CsqttShapes.Pill,
+                ) {
+                    Text("Решить капчу", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                }
             }
 
             TunnelUptimeText(tunnelRunning = activeVisual)

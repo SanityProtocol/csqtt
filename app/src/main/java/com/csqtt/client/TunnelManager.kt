@@ -330,7 +330,7 @@ object TunnelManager {
     val connectionState: StateFlow<ConnectionState> = combine(
         listOf<kotlinx.coroutines.flow.Flow<Any?>>(
             running, starting, stopping, autoPausedForWifi, networkPaused, awaitingNetwork,
-            ManlCaptchaWebViewManager.pending, tunconfThisProcess, vpnReady, activeWorkers, everConnected, serverSilent,
+            ManlCaptchaWebViewManager.needed, tunconfThisProcess, vpnReady, activeWorkers, everConnected, serverSilent,
             failure,
         ),
     ) { values: Array<Any?> ->
@@ -341,7 +341,7 @@ object TunnelManager {
                 stopping = values[2] as Boolean,
                 pausedOnWifi = values[3] as Boolean,
                 waitingForNetwork = values[4] as Boolean || values[5] as Boolean,
-                captchaPending = values[6] as Boolean,
+                captchaNeeded = values[6] as Boolean,
                 tunconf = values[7] as Boolean,
                 vpnReady = values[8] as Boolean,
                 activeWorkers = values[9] as Int,
@@ -360,7 +360,7 @@ object TunnelManager {
             stopping = stopping.value,
             pausedOnWifi = autoPausedForWifi.value,
             waitingForNetwork = networkPaused.value || awaitingNetwork.value,
-            captchaPending = ManlCaptchaWebViewManager.pending.value,
+            captchaNeeded = ManlCaptchaWebViewManager.needed.value,
             tunconf = tunconfThisProcess.value,
             vpnReady = vpnReady.value,
             activeWorkers = activeWorkers.value,
@@ -409,6 +409,8 @@ object TunnelManager {
     private fun markConnectedIfReady() {
         if (running.value && tunconfThisProcess.value && vpnReady.value && activeWorkers.value > 0) {
             everConnected.value = true
+            // a captcha need with no ask live is over once the run works (B5h2)
+            ManlCaptchaWebViewManager.onRunProgress()
         }
     }
 
@@ -777,6 +779,8 @@ object TunnelManager {
             is TunnelEventParser.Event.Progress -> {
                 if (event.kind == "credentials") {
                     identity.startupProgress.credentialReceived()
+                    // VK gave credentials: a captcha need with no ask live is over (B5h2)
+                    ManlCaptchaWebViewManager.onRunProgress()
                 }
             }
             is TunnelEventParser.Event.TunLost -> {

@@ -17,7 +17,7 @@ class VpnWidgetToggleReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
             try {
-                toggleTunnelFromQuickAction(context) { openMainActivity(context) }
+                toggleTunnelFromQuickAction(context) { target -> openActivity(context, target) }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to toggle tunnel from widget", e)
                 context.showRaisedToast("Ошибка запуска: ${e.localizedMessage}", Toast.LENGTH_SHORT)
@@ -28,10 +28,7 @@ class VpnWidgetToggleReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun openMainActivity(context: Context) {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
+    private fun openActivity(context: Context, intent: Intent) {
         runCatching {
             PendingIntent.getActivity(
                 context,

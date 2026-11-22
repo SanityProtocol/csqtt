@@ -90,22 +90,41 @@ internal fun Intent.putTunnelSettings(settings: TunnelStartSettings): Intent = a
     putExtra("custom_turn_ips", settings.customTurnIps)
 }
 
-internal suspend fun toggleTunnelFromQuickAction(context: Context, openMain: () -> Unit) {
-    val state = TunnelManager.currentConnectionState()
-    if (state is ConnectionState.Stopping || TunnelManager.stopping.value) return
-    if (state.powerIsOn) {
-        context.startService(Intent(context, TunnelService::class.java).apply { action = QuickTunnelAction.STOP })
-        return
+/** What a tap on the tile or the widget does (M-44). */
+internal enum class QuickTap { IGNORE, STOP, OPEN_CAPTCHA, START }
+
+/** B5h2 (B5): «Нужна капча» opens the captcha instead of stopping; the app and the notification still stop. */
+internal fun quickTapFor(state: ConnectionState, stopping: Boolean): QuickTap = when {
+    state is ConnectionState.Stopping || stopping -> QuickTap.IGNORE
+    state is ConnectionState.CaptchaNeeded -> QuickTap.OPEN_CAPTCHA
+    state.powerIsOn -> QuickTap.STOP
+    else -> QuickTap.START
+}
+
+/** [open] starts an activity the way its caller may: the tile collapses the shade, the widget sends a PendingIntent. */
+internal suspend fun toggleTunnelFromQuickAction(context: Context, open: (Intent) -> Unit) {
+    when (quickTapFor(TunnelManager.currentConnectionState(), TunnelManager.stopping.value)) {
+        QuickTap.IGNORE -> return
+        QuickTap.OPEN_CAPTCHA -> {
+            open(ManlCaptchaWebViewManager.promptIntent(context))
+            return
+        }
+        QuickTap.STOP -> {
+            context.startService(Intent(context, TunnelService::class.java).apply { action = QuickTunnelAction.STOP })
+            return
+        }
+        QuickTap.START -> Unit
     }
+    val openMain = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     if (VpnService.prepare(context) != null) {
         context.showRaisedToast("Откройте CSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
-        openMain()
+        open(openMain)
         return
     }
     val startIntent = buildTunnelStartIntent(context)
     if (startIntent == null) {
         context.showRaisedToast("Заполните настройки подключения в CSQTT", Toast.LENGTH_LONG)
-        openMain()
+        open(openMain)
         return
     }
     context.startForegroundService(startIntent)

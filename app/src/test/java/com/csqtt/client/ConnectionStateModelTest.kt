@@ -21,7 +21,7 @@ class ConnectionStateModelTest {
         assertEquals(ConnectionState.WaitingForNetwork, state(ConnectionInputs(starting = true, waitingForNetwork = true)))
         assertEquals(ConnectionState.PausedOnWifi, state(ConnectionInputs(pausedOnWifi = true)))
         assertEquals(ConnectionState.Stopping, state(live.copy(stopping = true)))
-        assertEquals(ConnectionState.CaptchaNeeded, state(ConnectionInputs(running = true, captchaPending = true)))
+        assertEquals(ConnectionState.CaptchaNeeded, state(ConnectionInputs(running = true, captchaNeeded = true)))
         assertEquals(ConnectionState.ServerNotResponding, state(ConnectionInputs(running = true, serverSilent = true)))
         assertEquals(ConnectionState.Failed("API 18"), state(ConnectionInputs(failure = "API 18")))
     }
