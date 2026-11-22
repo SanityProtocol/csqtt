@@ -22,10 +22,14 @@ import java.util.TimeZone
  * «Подключение», and announce a new failure while the app is not in front. A log line alone is not the signal.
  */
 
-/** «Is it new»: the same failure differs only in ports, timings or pointers (a timeout's local port, Conscrypt's ssl=0x…). */
+/**
+ * «Is it new»: the same failure differs only in ports, timings or pointers (a timeout's local port, Conscrypt's ssl=0x…);
+ * an HTTP code is kept — 503 (down for now) and 404 (gone) ask different things of the user (verify N2).
+ */
 internal fun failureKey(text: String): String = text.trim().replace(FAILURE_NOISE, "#")
 
-private val FAILURE_NOISE = Regex("0x[0-9a-fA-F]+|[0-9]+")
+// a number is collapsed whole, never from its middle, so a kept code stays whole too
+private val FAILURE_NOISE = Regex("0x[0-9a-fA-F]+|(?<![0-9]|вернул |код=)[0-9]+")
 
 /** U3: what a refresh keeps — its failure, or what it skipped — masked: a server's message can carry anything. */
 internal fun subscriptionOutcomeTexts(success: Boolean, message: String, skipped: Int): Pair<String, String> {

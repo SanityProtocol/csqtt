@@ -64,8 +64,8 @@ class HandOverResultTest {
     fun anotherOwnerProfilesFailureShowsWhenTheOpenProfileHasNone() {
         val prefs = owner()
         SettingsStore.writeHandOverResult(prefs, 2, refused)
-        // profile 5 is no owner profile on a pool: the failure its notice was about is shown
-        assertEquals(refused, SettingsStore.handOverNoticeOf(prefs, 5))
+        // profile 5 is no owner profile on a pool: the failure its notice was about is shown, named (verify N1)
+        assertEquals(refused.copy(text = "«Профиль 3»: ${refused.text}"), SettingsStore.handOverNoticeOf(prefs, 5))
         // a success elsewhere is not
         SettingsStore.writeHandOverResult(prefs, 2, ok)
         assertNull(SettingsStore.handOverNoticeOf(prefs, 5))

@@ -39,6 +39,12 @@ class SubscriptionOutcomeTest {
         assertFalse(SettingsStore.writeSubscriptionOutcome(prefs, url, timeout(40001) + " ", ""))
         assertTrue(SettingsStore.writeSubscriptionOutcome(prefs, url, "Ошибка TLS: SSL handshake aborted: ssl=0x7c8f6a5d48", ""))
         assertFalse(SettingsStore.writeSubscriptionOutcome(prefs, url, "Ошибка TLS: SSL handshake aborted: ssl=0x7d10aa0c00", ""))
+        // an HTTP code is the failure itself: down for now, then gone (verify N2)
+        assertTrue(SettingsStore.writeSubscriptionOutcome(prefs, url, "Сервер вернул 503", ""))
+        assertTrue(SettingsStore.writeSubscriptionOutcome(prefs, url, "Сервер вернул 404", ""))
+        assertFalse(SettingsStore.writeSubscriptionOutcome(prefs, url, "Сервер вернул 404", ""))
+        assertTrue("403 is not 404", SettingsStore.writeSubscriptionOutcome(prefs, url, "Сервер вернул 403", ""))
+        assertEquals("Сервер вернул 403 · порт #", failureKey("Сервер вернул 403 · порт 51234"))
     }
 
     @Test

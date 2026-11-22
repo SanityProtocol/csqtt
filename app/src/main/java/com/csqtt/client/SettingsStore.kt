@@ -1056,7 +1056,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
          */
         internal fun handOverNoticeOf(prefs: Preferences, profile: Int): HandOverResult? =
             handOverOfProfile(prefs, profile)
-                ?: profileIndices.firstNotNullOfOrNull { other -> handOverOfProfile(prefs, other)?.takeIf { !it.ok } }
+                ?: profileIndices.firstNotNullOfOrNull { other ->
+                    // named, since it is not the open profile's (verify N1)
+                    handOverOfProfile(prefs, other)?.takeIf { !it.ok }
+                        ?.let { it.copy(text = "«${profileDisplayName(prefs, other)}»: ${it.text}") }
+                }
 
         /** [profile]'s own server, in «Авто API», with a hand-over on record: its last result. */
         private fun handOverOfProfile(prefs: Preferences, profile: Int): HandOverResult? {
