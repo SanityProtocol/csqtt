@@ -1953,9 +1953,14 @@ object TunnelManager {
                         val fatalCause = identity.fatal.cause
                         val shouldRestart = shouldRestartProcess(lifecycleWantsRestart, identity.fatal)
                         if (fatalCause != null) lastDiagnostic = fatalCause
-                        if (lifecycleWantsRestart) {
-                            VkAutoCallsManager.finishActiveCalls()
-                        }
+                        val uptimeMs = processStartedAtMs
+                            .takeIf { it > 0 }
+                            ?.let { SystemClock.elapsedRealtime() - it }
+                            ?: Long.MAX_VALUE
+                        val nextStreak = nextCrashStreak(uptimeMs, crashRestartStreak, CRASH_RESTART_STABLE_MS)
+                        // B5e4: a core that exits before it is up, start after start (VK refusing an auto-JS account's
+                        // calls, for one), ends the run with its last line instead of restarting forever
+                        val crashLoop = shouldRestart && nextStreak >= CRASH_LOOP_STOP_STREAK
                         val restartContext = activeContext()
                         val restartParams = if (restartContext == null) {
                             null
@@ -1974,6 +1979,10 @@ object TunnelManager {
                                 currentParams
                             }
                         }
+                        // B5e4: a restart reuses the run's calls (withNewSession keeps the hashes); only the run's end
+                        // ends them
+                        val restarts = shouldRestart && !crashLoop && restartParams != null && restartContext != null
+                        if (lifecycleWantsRestart && !restarts) VkAutoCallsManager.finishActiveCalls()
                         if (fatalCause != null && lifecycleWantsRestart) {
                             updateLog(
                                 "process_exit",
@@ -1982,6 +1991,19 @@ object TunnelManager {
                                 true,
                             )
                             stopLocked(identity)
+                        } else if (crashLoop) {
+                            crashRestartStreak = 0
+                            running.value = false
+                            starting.value = false
+                            stopping.value = false
+                            updateLog(
+                                "process_exit",
+                                "✗ Rust-клиент не запускается: $nextStreak перезапусков подряд, остановлено." +
+                                    lastDiagnostic?.let { " Причина: $it" }.orEmpty(),
+                                99,
+                                true,
+                            )
+                            recordRunFailure(StopCause.crashLoop(lastDiagnostic, exitCode))
                         } else if (shouldRestart && restartParams != null && restartContext != null) {
                             currentParams = restartParams
                             val reason = lastDiagnostic?.let { " Причина: $it" }.orEmpty()
@@ -1991,12 +2013,7 @@ object TunnelManager {
                                 50,
                                 true,
                             )
-                            val uptimeMs = processStartedAtMs
-                                .takeIf { it > 0 }
-                                ?.let { SystemClock.elapsedRealtime() - it }
-                                ?: Long.MAX_VALUE
-                            crashRestartStreak =
-                                if (uptimeMs >= CRASH_RESTART_STABLE_MS) 0 else crashRestartStreak + 1
+                            crashRestartStreak = nextStreak
                             val backoffShift = crashRestartStreak.coerceIn(1, 6) - 1
                             val restartDelayMs = (2_000L shl backoffShift)
                                 .coerceAtMost(CRASH_RESTART_MAX_DELAY_MS)

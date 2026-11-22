@@ -72,12 +72,15 @@ private data class ResolvedVkHashes(
     val allowWorkerRedistribution: Boolean,
     val mode: String = CsqttConstants.VkAutoHash.MODE_MANUAL,
     val accessToken: String = "",
+    /** B5e4: calls a recovery made, not yet the run's: it takes them where its restart is scheduled. */
+    val minted: VkAutoCallsManager.StartResult? = null,
 )
 
 /** B5h1: hashes, or none and whether VK refused the token (or there is none), so no retry can help. */
 private sealed class HashResolution {
     data class Ok(val hashes: ResolvedVkHashes) : HashResolution()
-    data class Failed(val tokenInvalid: Boolean) : HashResolution()
+    /** [reason]: VK's or the network's last answer, for the cause of a stop (B5e4). */
+    data class Failed(val tokenInvalid: Boolean, val reason: String? = null) : HashResolution()
 }
 
 class TunnelService : Service() {
@@ -617,6 +620,8 @@ class TunnelService : Service() {
         accessTokenOverride: String? = null,
         tokenFromLink: Boolean = false,
         deadHash: String? = null,
+        // B5e4: a start's calls are the run's at once; a recovery's only once its restart is scheduled
+        takeAtOnce: Boolean = true,
     ): HashResolution {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
@@ -652,8 +657,16 @@ class TunnelService : Service() {
                     tokenStore = store,
                     clearStoredTokenOnInvalid = !tokenFromLink,
                 )
-                val result = attempt.result ?: return HashResolution.Failed(attempt.tokenInvalid)
-                HashResolution.Ok(ResolvedVkHashes(result.hashes, result.needsWorkerRedistribution, mode))
+                val result = attempt.result ?: return HashResolution.Failed(attempt.tokenInvalid, attempt.error)
+                if (takeAtOnce) VkAutoCallsManager.take(result)
+                HashResolution.Ok(
+                    ResolvedVkHashes(
+                        result.hashes,
+                        result.needsWorkerRedistribution,
+                        mode,
+                        minted = result.takeUnless { takeAtOnce },
+                    ),
+                )
             }
 
             CsqttConstants.VkAutoHash.MODE_AUTO_JS -> {
@@ -666,13 +679,18 @@ class TunnelService : Service() {
         }
     }
 
-    private fun recoverUnavailableVkCall(hash: String) {
+    /** [retry]: B5e4's refusal backoff, counted from 0 for a dead-call event. */
+    private fun recoverUnavailableVkCall(hash: String, retry: Int = 0) {
         if (hash.isBlank()) {
             TunnelManager.completeVkCallRecovery()
             return
         }
         serviceScope.launch {
             var restartScheduled = false
+            // B5e4: a retry waiting on the refusal backoff keeps the recovery pending
+            var retryScheduled = false
+            // B5e4: calls this recovery made, until the restart that takes them is scheduled
+            var minted: VkAutoCallsManager.StartResult? = null
             // the run this recovery serves: a start, a restore (a switch, a resume), a stop bump the generation on Main; a
             // restart of the same run (a crash, the transport, a session refresh) does not (profile-switch review F1, F2,
             // F6). Every act below is checked against it on Main.
@@ -711,6 +729,7 @@ class TunnelService : Service() {
                         forcedMode = CsqttConstants.VkAutoHash.MODE_AUTO_JS,
                         accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
                         tokenFromLink = source.tokenFromLink,
+                        takeAtOnce = false,
                     )
                     vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API || source.tokenFromLink -> resolveAutoHashes(
                         store,
@@ -720,10 +739,12 @@ class TunnelService : Service() {
                         accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
                         tokenFromLink = source.tokenFromLink,
                         deadHash = hash,
+                        takeAtOnce = false,
                     )
                     else -> HashResolution.Ok(ResolvedVkHashes(source.hashes, false))
                 }
                 val got = (resolution as? HashResolution.Ok)?.hashes
+                minted = got?.minted
                 // B5h1 (B3): a token VK refused can never mint again, so the run stops with what to do instead of staying
                 // on a dead call; a transient failure leaves the run on, and the next dead call tries again
                 val outcome = recoveryOutcome(
@@ -739,6 +760,34 @@ class TunnelService : Service() {
                         if (startGeneration != generation) return@launch
                         TunnelManager.recordRunFailure(outcome.cause, applicationContext)
                         TunnelManager.stop()
+                    }
+                    return@launch
+                }
+                // B5e4: VK refuses new calls for a reason other than the token and the run has no live call left. The
+                // core reports a dead call once per process, so nothing would ask again: retry on a backoff, then stop
+                if (outcome is RecoveryOutcome.KeepRunning && !TunnelManager.runHasLiveHashes()) {
+                    val wait = RefusalBackoff.delayFor(retry)
+                    if (wait == null) {
+                        launch(Dispatchers.Main) {
+                            if (startGeneration != generation) return@launch
+                            val reason = (resolution as? HashResolution.Failed)?.reason
+                            TunnelManager.recordRunFailure(StopCause.vkRefusesCalls(reason), applicationContext)
+                            TunnelManager.stop()
+                        }
+                    } else {
+                        retryScheduled = true
+                        launch {
+                            delay(wait)
+                            withContext(Dispatchers.Main) {
+                                // a stop, a switch or a pause bumped the generation: the new run's flag is its own
+                                if (startGeneration != generation) return@withContext
+                                if (TunnelManager.running.value) {
+                                    recoverUnavailableVkCall(hash, retry + 1)
+                                } else {
+                                    TunnelManager.completeVkCallRecovery()
+                                }
+                            }
+                        }
                     }
                     return@launch
                 }
@@ -763,14 +812,23 @@ class TunnelService : Service() {
                     vkAccessToken = resolved.accessToken,
                 )
                 launch(Dispatchers.Main) {
-                    if (startGeneration != generation) return@launch
+                    // B5e4: the run takes the new calls here, and the set it was on ends; a replaced run never takes them
+                    if (startGeneration != generation) {
+                        VkAutoCallsManager.discard(resolved.minted)
+                        return@launch
+                    }
+                    VkAutoCallsManager.take(resolved.minted)
                     TunnelManager.applyRunIdentity(activeIdentity)
                     TunnelManager.start(applicationContext, next, isSwitching = true)
                 }
                 restartScheduled = true
             } finally {
+                // calls made but never handed to a restart (an early return, a failure on the way) are ended (B5e4)
+                if (!restartScheduled) VkAutoCallsManager.discard(minted)
                 // a recovery whose run was replaced leaves the new run's own recovery flag alone (review H7)
-                if (!restartScheduled && startGeneration == generation) TunnelManager.completeVkCallRecovery()
+                if (!restartScheduled && !retryScheduled && startGeneration == generation) {
+                    TunnelManager.completeVkCallRecovery()
+                }
             }
         }
     }

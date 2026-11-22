@@ -12,13 +12,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.MessageDigest
-import java.util.concurrent.CopyOnWriteArrayList
 
 object VkAutoCallsManager {
+    /** [set]: the calls just made, kept apart until the run takes them (B5e4). */
     data class StartResult(
         val hashes: String,
         val requestedCalls: Int,
         val createdCalls: Int,
+        internal val set: CallSet? = null,
     ) {
         val needsWorkerRedistribution: Boolean
             get() = createdCalls < requestedCalls
@@ -26,21 +27,41 @@ object VkAutoCallsManager {
 
     /**
      * B5h1 (B3): [result] is null when no call was made; [tokenInvalid] then says VK refused the token or there is none,
-     * so no retry can make one until the user signs in again.
+     * so no retry can make one until the user signs in again. [error]: VK's or the network's last answer (B5e4).
      */
-    data class StartAttempt(val result: StartResult?, val tokenInvalid: Boolean = false)
+    data class StartAttempt(val result: StartResult?, val tokenInvalid: Boolean = false, val error: String? = null)
 
-    private data class ActiveCall(val callId: String, val hashKey: String)
+    internal data class ActiveCall(val callId: String, val hashKey: String)
+
+    /** B5e4: calls this app made for one run, with the token they were made with: what ends them. */
+    internal data class CallSet(val calls: List<ActiveCall>, val token: String)
     private data class PendingLog(val key: String, val message: String, val priority: Int, val isError: Boolean)
 
-    private val activeCalls = CopyOnWriteArrayList<ActiveCall>()
     private val pendingLogs = ArrayList<PendingLog>()
     private val pendingLogsLock = Any()
 
-    @Volatile
-    private var activeToken: String? = null
+    /** The set the run is on: a stop ends it. A new set replaces it only when the run takes the new one (B5e4). */
+    private var runSet: CallSet? = null
 
-    fun hasActiveCalls(): Boolean = activeCalls.isNotEmpty()
+    /** How a set is ended; a test puts a recorder here. */
+    internal var ender: (CallSet) -> Unit = ::endInBackground
+
+    fun hasActiveCalls(): Boolean = synchronized(this) { runSet?.calls?.isNotEmpty() == true }
+
+    /**
+     * B5e4: the run takes [result]'s calls, and the set it was on is ended (for a start there is none: its stop ended
+     * it). A recovery takes its set only where its restart is scheduled.
+     */
+    fun take(result: StartResult?) {
+        val set = result?.set ?: return
+        val previous = synchronized(this) { runSet.also { runSet = set } }
+        previous?.let(ender)
+    }
+
+    /** B5e4: calls made for a run that will never take them (its recovery outlived it) are ended. */
+    fun discard(result: StartResult?) {
+        result?.set?.let(ender)
+    }
 
     fun callCountForWorkers(workers: Int): Int {
         return (1..CsqttConstants.Tunnel.MAX_VK_HASHES).firstOrNull {
@@ -66,10 +87,12 @@ object VkAutoCallsManager {
         if (token.isBlank()) return StartAttempt(null, tokenInvalid = true)
 
         synchronized(pendingLogsLock) { pendingLogs.clear() }
-        activeCalls.clear()
 
         val count = callCountForWorkers(workers)
         val hashes = ArrayList<String>(count)
+        // the run's own set stays as it is until the run takes this one (B5e4)
+        val minted = ArrayList<ActiveCall>(count)
+        var lastError: String? = null
 
         val requestDelayMs = requestDelayForCallCount(count)
         val requestPacer = VkRequestPacer(
@@ -86,9 +109,8 @@ object VkAutoCallsManager {
             completedSlots++
             when (result) {
                 is VkApiResult.Ok<*> -> {
-                    activeToken = token
                     val call = result.value as VkApi.StartedCall
-                    activeCalls.add(ActiveCall(callId = call.callId, hashKey = sha256Hex(call.hash)))
+                    minted.add(ActiveCall(callId = call.callId, hashKey = sha256Hex(call.hash)))
                     hashes.add(call.hash)
                     log(
                         "vk_call_created_progress",
@@ -99,6 +121,7 @@ object VkAutoCallsManager {
                 }
 
                 is VkApiResult.ApiError -> {
+                    lastError = "код ${result.code} ${result.message}".trim()
                     log(
                         "vk_auto_call_error",
                         "[ERR] Звонок VK не создан · код=${result.code} ${result.message}",
@@ -119,13 +142,14 @@ object VkAutoCallsManager {
                             95,
                             true,
                         )
-                        finishCalls(ArrayList(activeCalls).also { activeCalls.clear() }, token, logResults = false)
-                        activeToken = null
+                        // only what this attempt made: the run's own set is the run's to end
+                        finishCalls(minted, token, logResults = false)
                         return StartAttempt(null, tokenInvalid = true)
                     }
                 }
 
                 is VkApiResult.Failed -> {
+                    lastError = result.reason
                     log(
                         "vk_auto_call_error",
                         "[ERR] Звонок VK не создан · ${result.reason}",
@@ -153,8 +177,10 @@ object VkAutoCallsManager {
                     hashes = hashes.joinToString(","),
                     requestedCalls = count,
                     createdCalls = hashes.size,
+                    set = CallSet(minted, token),
                 )
             },
+            error = lastError,
         )
     }
 
@@ -214,17 +240,17 @@ object VkAutoCallsManager {
         }
     }
 
+    /** The run ends: the set it is on is ended. */
     fun finishActiveCalls() {
-        if (activeCalls.isEmpty()) return
-        val token = activeToken
-        val calls = ArrayList(activeCalls)
-        activeCalls.clear()
-        activeToken = null
-        if (token.isNullOrBlank()) return
+        val set = synchronized(this) { runSet.also { runSet = null } } ?: return
+        ender(set)
+    }
 
+    private fun endInBackground(set: CallSet) {
+        if (set.token.isBlank() || set.calls.isEmpty()) return
         TunnelManager.scope.launch(Dispatchers.IO + NonCancellable) {
             withTimeoutOrNull(CsqttConstants.VkAutoHash.FINISH_CALLS_TIMEOUT_MS) {
-                finishCalls(calls, token, logResults = true)
+                finishCalls(set.calls, set.token, logResults = true)
             }
         }
     }

@@ -37,6 +37,14 @@ internal object StopCause {
     fun masked(cause: String, ownerHashes: List<String>): String =
         LogRedaction.redact(maskOwnerHashes(withoutLogStickers(cause), ownerHashes))
 
+    /** B5e4: VK refused new calls for a reason other than the token, through every retry of the backoff. */
+    fun vkRefusesCalls(reason: String?): String =
+        "VK не создаёт звонки" + reason?.trim()?.takeIf { it.isNotEmpty() }?.let { ": $it" }.orEmpty()
+
+    /** B5e4: the core exits before it is up, start after start; its last line says why, when it said anything. */
+    fun crashLoop(lastLine: String?, exitCode: Int?): String =
+        lastLine?.trim()?.takeIf { it.isNotEmpty() } ?: "Клиент не запускается (код ${exitCode ?: "?"})"
+
     /** VK calls could not be made: a token VK refused names what to do, a link's token is the owner's to renew. */
     fun vkCallsNotCreated(tokenInvalid: Boolean, tokenFromLink: Boolean): String = when {
         !tokenInvalid -> VK_CALLS_NOT_CREATED
@@ -88,6 +96,23 @@ internal fun recoveryOutcome(
     hashes.isBlank() && !autoJs -> RecoveryOutcome.Stop(StopCause.NO_HASHES_LEFT)
     else -> RecoveryOutcome.Restart
 }
+
+/**
+ * B5e4: an «Авто ВК» run whose calls are all dead while VK refuses new ones (flood control, for one) — the core reports a
+ * dead call once per process, so the recovery retries on this backoff and then stops the run with VK's answer.
+ */
+internal object RefusalBackoff {
+    private val DELAYS_MS = longArrayOf(30_000L, 60_000L, 120_000L, 240_000L, 480_000L)
+
+    /** The wait before retry [retry] (from 0), or null once the retries are spent and the run stops. */
+    fun delayFor(retry: Int): Long? = DELAYS_MS.getOrNull(retry)
+}
+
+/** B5e4: this many exits in a row before the process was up end the run instead of restarting forever (~4 min). */
+internal const val CRASH_LOOP_STOP_STREAK = 8
+
+/** The count of exits in a row that came before the process was up ([stableMs]): a stable one starts it again. */
+internal fun nextCrashStreak(uptimeMs: Long, streak: Int, stableMs: Long): Int = if (uptimeMs >= stableMs) 0 else streak + 1
 
 /** The stop's own notification: «CSQTT отключён» and the cause; a tap opens the app, the next start withdraws it. */
 internal object StopNotice {
