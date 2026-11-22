@@ -168,7 +168,8 @@ object ManlCaptchaWebViewManager {
             .setContentText("ВК запросил проверку безопасности. Нажмите для решения.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(openPendingIntent)
-            .setAutoCancel(true)
+            // a tap opens the screen and leaves the notice up: later asks of the episode post nothing new (review F1)
+            .setAutoCancel(false)
             .addAction(0, "Отменить и выключить", cancelPendingIntent)
             .build()
 
@@ -198,18 +199,17 @@ object ManlCaptchaWebViewManager {
                     neededState.value = true
                 }
             }
-            if (notify) showCaptchaNotification(app)
-
             val intent = promptIntent(app)
             pendingIntentToStart = intent
 
-            // an open screen loads this ask itself
-            if (MainActivity.isForeground && !screenStarted) {
-                context.startActivity(intent)
-            }
-
             var solved = false
             try {
+                // inside the try, so a failure here still ends the ask (review H4)
+                if (notify) showCaptchaNotification(app)
+                // an open screen loads this ask itself
+                if (MainActivity.isForeground && !screenStarted) {
+                    context.startActivity(intent)
+                }
                 withTimeout(CAPTCHA_TIMEOUT_MS) {
                     deferred.await().getOrThrow()
                 }.also { solved = true }

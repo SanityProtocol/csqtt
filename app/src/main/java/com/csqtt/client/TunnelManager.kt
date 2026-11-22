@@ -377,6 +377,8 @@ object TunnelManager {
     internal fun beginStartRequest(context: Context) {
         runFatal.set(FirstFatal())
         failure.value = null
+        // a new run needs no captcha yet: a need left by the last one ends here (review H1)
+        ManlCaptchaWebViewManager.cancelCaptcha()
         starting.value = true
         // B5h1: the last stop's cause and its notification belong to the run that ended
         val appContext = context.applicationContext
@@ -2302,7 +2304,7 @@ object TunnelManager {
             writeCaptchaResult("error:$errorMsg", identity)
         }
 
-        updateProcessLog(identity, "captcha_wv_step_6", "[КАПЧА WBV] WebView уничтожен", 5, false)
+        updateProcessLog(identity, "captcha_wv_step_6", "[КАПЧА WBV] Запрос капчи завершён", 5, false)
     }
 
     private suspend fun solveSingleAutoWebViewCaptcha(

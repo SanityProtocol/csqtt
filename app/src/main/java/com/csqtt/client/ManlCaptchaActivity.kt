@@ -137,7 +137,10 @@ class ManlCaptchaActivity : ComponentActivity() {
         super.onCreate(if (discardStaleUiState) null else savedInstanceState)
         // B5h2: a tap that comes after the need ended (a stale tile, widget or notification) opens the app instead
         if (!ManlCaptchaWebViewManager.needed.value) {
-            runCatching { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            // over the app, finishing reveals it; alone in its task, the app is opened (review F2)
+            if (isTaskRoot) {
+                runCatching { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            }
             finish()
             return
         }

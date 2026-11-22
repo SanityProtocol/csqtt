@@ -89,6 +89,11 @@ class CaptchaEpisodeTest {
             ConnectionState.WaitingForNetwork,
             deriveConnectionState(live.copy(activeWorkers = 0, waitingForNetwork = true)),
         )
+        // a silent server is said, not hidden by a captcha that cannot help it (review F4)
+        assertEquals(
+            ConnectionState.ServerNotResponding,
+            deriveConnectionState(live.copy(activeWorkers = 0, serverSilent = true)),
+        )
         assertEquals(ConnectionState.Stopping, deriveConnectionState(live.copy(stopping = true)))
         assertEquals(ConnectionState.Idle, deriveConnectionState(ConnectionInputs(captchaNeeded = true)))
     }

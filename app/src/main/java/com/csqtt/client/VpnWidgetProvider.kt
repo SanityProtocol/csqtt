@@ -64,15 +64,23 @@ class VpnWidgetProvider : AppWidgetProvider() {
         )
         views.setOnClickPendingIntent(R.id.widget_container, openPendingIntent)
 
-        val toggleIntent = Intent(context, VpnWidgetToggleReceiver::class.java).apply {
-            action = VpnWidgetToggleReceiver.ACTION
+        // «Нужна капча» (B5h2): the button opens the captcha itself — a receiver's PendingIntent.send() is a background
+        // activity start that Android 14+ blocks (review F3); the widget is redrawn at every label change
+        val togglePendingIntent = if (state is ConnectionState.CaptchaNeeded) {
+            PendingIntent.getActivity(
+                context,
+                appWidgetId + 2000,
+                ManlCaptchaWebViewManager.promptIntent(context),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+        } else {
+            PendingIntent.getBroadcast(
+                context,
+                appWidgetId + 1000,
+                Intent(context, VpnWidgetToggleReceiver::class.java).apply { action = VpnWidgetToggleReceiver.ACTION },
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
         }
-        val togglePendingIntent = PendingIntent.getBroadcast(
-            context,
-            appWidgetId + 1000,
-            toggleIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
         views.setOnClickPendingIntent(R.id.widget_toggle_btn, togglePendingIntent)
 
         appWidgetManager.updateAppWidget(appWidgetId, views)

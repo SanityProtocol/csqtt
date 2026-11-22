@@ -70,9 +70,10 @@ internal fun deriveConnectionState(input: ConnectionInputs): ConnectionState = w
         !running && !starting -> failure?.let { ConnectionState.Failed(it) } ?: ConnectionState.Idle
         waitingForNetwork -> ConnectionState.WaitingForNetwork
         running && tunconf && vpnReady && activeWorkers > 0 -> ConnectionState.Connected(activeWorkers)
+        // a silent server is not hidden by a captcha that cannot help it (review F4)
+        serverSilent -> ConnectionState.ServerNotResponding
         // after «Подключено»: a captcha asked for more workers does not hide a working tunnel (B5h2)
         captchaNeeded -> ConnectionState.CaptchaNeeded
-        serverSilent -> ConnectionState.ServerNotResponding
         running && everConnected -> ConnectionState.Reconnecting
         !running -> ConnectionState.Preparing
         else -> ConnectionState.Connecting
