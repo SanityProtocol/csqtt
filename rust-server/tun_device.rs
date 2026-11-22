@@ -148,7 +148,9 @@ struct ClientRoute {
     cursor: usize,
     flows: HashMap<FlowKey, FlowState>,
     flow_evict_counter: u32,
-    ip_fragment_routes: crate::ip_fragments::FragmentRoutes<Option<FlowKey>>,
+    /// Allocated with the client's first fragmented datagram: most clients never get one, and the route table holds
+    /// 256 of these inline (verify note: 1 KB each inline was ~256 KB per process)
+    ip_fragment_routes: Option<Box<crate::ip_fragments::FragmentRoutes<Option<FlowKey>>>>,
 }
 
 impl ClientRoute {
@@ -185,7 +187,7 @@ impl ClientRoute {
         self.cursor = self.cursor.min(self.endpoints.len().saturating_sub(1));
         self.flows.clear();
         self.flow_evict_counter = 0;
-        self.ip_fragment_routes.clear();
+        self.ip_fragment_routes = None;
     }
 
     fn unregister(&mut self, registration_id: RegistrationId) -> bool {
@@ -206,7 +208,7 @@ impl ClientRoute {
         self.cursor = self.cursor.min(self.endpoints.len().saturating_sub(1));
         self.flows.clear();
         self.flow_evict_counter = 0;
-        self.ip_fragment_routes.clear();
+        self.ip_fragment_routes = None;
         self.endpoints.len() != previous_len
     }
 
@@ -282,7 +284,10 @@ impl ClientRoute {
         // P1 Bt part 2: a later piece of a datagram the internet delivered in pieces follows its first piece's stream
         let fragment = crate::ip_fragments::ipv4_fragment(packet);
         if let Some(fragment) = fragment
-            && let Some((idx, head_flow)) = self.ip_fragment_routes.follow(fragment, |idx| idx < count)
+            && let Some((idx, head_flow)) = self
+                .ip_fragment_routes
+                .as_ref()
+                .and_then(|routes| routes.follow(fragment, |idx| idx < count))
         {
             self.refill(idx, now);
             self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
@@ -295,7 +300,9 @@ impl ClientRoute {
         }
         let idx = self.select_index(now, packet, len_f);
         if let Some(fragment) = fragment.filter(|fragment| fragment.first) {
-            self.ip_fragment_routes.record(fragment, idx, flow_key(packet));
+            self.ip_fragment_routes
+                .get_or_insert_with(Default::default)
+                .record(fragment, idx, flow_key(packet));
         }
         self.endpoints.get(idx).copied()
     }
@@ -733,6 +740,24 @@ mod tests {
             pkt[20..24].fill(0x5a); // payload, not ports
         }
         pkt
+    }
+
+    #[test]
+    fn a_client_without_fragments_has_no_fragment_routes() {
+        // the routes cost a client nothing until its first fragmented datagram (round 2, the verify's note)
+        let mut table = RouteTable::new();
+        for w in 1..=3u16 {
+            assert!(table.register(ip(2), w as _, w as _, w as _, w as _));
+        }
+        let now = std::time::Instant::now();
+        for sport in 0..50u16 {
+            table.select_packet(2, now, &udp_packet(1200, 40000 + sport)).unwrap();
+        }
+        let routes = |table: &RouteTable| table.groups[2].as_ref().unwrap().ip_fragment_routes.is_some();
+        assert!(!routes(&table));
+        table.select_packet(2, now, &udp_piece(9, 0, true, 1500)).unwrap();
+        assert!(routes(&table));
+        assert!(std::mem::size_of::<ClientRoute>() < 256, "{}", std::mem::size_of::<ClientRoute>());
     }
 
     #[test]
