@@ -37,6 +37,23 @@ internal object StopCause {
     fun masked(cause: String, ownerHashes: List<String>): String =
         LogRedaction.redact(maskOwnerHashes(withoutLogStickers(cause), ownerHashes))
 
+    /** B5f (rule 10): Android ended the run and never restarted it — an aggressive battery saver, as a rule. */
+    const val SYSTEM_KILLED = "Туннель остановлен системой: разрешите CSQTT работать в фоне без ограничений"
+    /** B5f: the phone restarted with the tunnel on; nothing brings it back by itself. */
+    const val REBOOTED = "Телефон перезагрузился: туннель выключен"
+
+    /**
+     * B5f: the cause of a run that ended with no stop, decided a few seconds after the app's screen starts — long enough
+     * for a sticky restart Android has pending to show as a start. [wasRunning]: the run's own flag (set at its start,
+     * cleared by every stop); [savedBoot] and [bootNow]: the phone's boot count then and now. Null when there is
+     * nothing to say: no run was cut, a run or a start is on, or a cause is already shown.
+     */
+    fun systemStop(wasRunning: Boolean, savedBoot: Int?, bootNow: Int?, runOn: Boolean, failure: String?): String? = when {
+        !wasRunning || runOn || failure != null -> null
+        savedBoot != null && bootNow != null && savedBoot != bootNow -> REBOOTED
+        else -> SYSTEM_KILLED
+    }
+
     /** B5e4: VK refused new calls for a reason other than the token, through every retry of the backoff. */
     fun vkRefusesCalls(reason: String?): String =
         "VK не создаёт звонки" + reason?.trim()?.takeIf { it.isNotEmpty() }?.let { ": $it" }.orEmpty()

@@ -1553,6 +1553,7 @@ class TunnelService : Service() {
         }
     }
 
+    @Synchronized
     private fun acquireWakeLock() {
         // «Экономия батареи» in force: the CPU may sleep, the tunnel with it — except for a deploy, which needs it awake
         if (BatterySaver.active.value && !DeployManager.isDeploying.value) {
@@ -1573,6 +1574,9 @@ class TunnelService : Service() {
         wakeLockExpiresAtElapsedMs = now + WAKE_LOCK_TIMEOUT_MS
     }
 
+    // M-50: the lock operations are serialized — the Wi-Fi pause and resume run them off Main, beside the stats loop,
+    // the battery broadcast and the stop on Main, so a race could leave a lock held
+    @Synchronized
     @Suppress("DEPRECATION")
     private fun acquireWifiLock() {
         if (wifiLock?.isHeld == true) return
@@ -1584,6 +1588,7 @@ class TunnelService : Service() {
         }
     }
 
+    @Synchronized
     private fun releaseWakeLock() {
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
@@ -1592,6 +1597,7 @@ class TunnelService : Service() {
         wakeLockExpiresAtElapsedMs = 0L
     }
 
+    @Synchronized
     private fun releaseWifiLock() {
         if (wifiLock?.isHeld == true) {
             wifiLock?.release()

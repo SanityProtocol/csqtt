@@ -110,12 +110,35 @@ class MainActivity : ComponentActivity() {
         var activeActivities = 0
         val isForeground: Boolean
             get() = activeActivities > 0
+        // B5f: the system-stop check runs once per process
+        @Volatile
+        private var systemStopChecked = false
+        private const val SYSTEM_STOP_GRACE_MS = 5_000L
     }
 
     override fun onStart() {
         super.onStart()
         activeActivities++
         ManlCaptchaWebViewManager.checkAndShowPendingCaptcha(this)
+        checkSystemStop()
+    }
+
+    /**
+     * B5f (rule 10): a run Android ended and never restarted (a battery saver, a reboot) leaves its flag set. Once per
+     * process, a few seconds after the screen starts — a sticky restart Android has pending comes up as a start by then —
+     * a flag still set with no run says why the tunnel is off. The flag stays: a restart that still comes clears the cause.
+     */
+    private fun checkSystemStop() {
+        if (systemStopChecked) return
+        systemStopChecked = true
+        lifecycleScope.launch {
+            delay(SYSTEM_STOP_GRACE_MS)
+            val (wasRunning, savedBoot) = runCatching { appSettingsStore.tunnelWasRunningState() }.getOrNull() ?: return@launch
+            val runOn = TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value ||
+                TunnelManager.autoPausedForWifi.value
+            StopCause.systemStop(wasRunning, savedBoot, appSettingsStore.bootCount(), runOn, TunnelManager.failure.value)
+                ?.let { TunnelManager.recordRunFailure(it, applicationContext) }
+        }
     }
 
     // The composition is kept while the app is in the background (§4.2 rule 1): Compose pauses recomposition while the
