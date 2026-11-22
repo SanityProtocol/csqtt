@@ -28,7 +28,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.csqtt.client.AppReleaseInfo
-import com.csqtt.client.RemoteVersionSource
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
 
@@ -38,13 +37,9 @@ fun AppUpdateDialog(
     onPostpone: () -> Unit,
     onUpdate: () -> Unit
 ) {
-    val isTagOnly = release.source == RemoteVersionSource.Tag
-    val title = if (isTagOnly) "Найден новый tag" else "Доступно обновление"
-    val description = if (isTagOnly) {
-        "На GitHub обнаружен более новый tag ${release.versionTag}. Похоже, опубликованный release ещё не догнал его."
-    } else {
-        "Вышла новая версия приложения ${release.versionTag}. Можно открыть страницу релиза и обновиться вручную."
-    }
+    // M-91: only a published release carrying this app's APK is ever offered, never a bare tag
+    val title = "Доступно обновление"
+    val description = "Вышла новая версия приложения ${release.versionTag}. Можно открыть страницу релиза и обновиться вручную."
 
     Dialog(
         onDismissRequest = {},

@@ -480,7 +480,7 @@ fun MainScreen(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
-    var pendingRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    val pendingRelease by AppUpdates.offer.collectAsStateWithLifecycle()
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
     val safeBottomInset = with(density) { WindowInsets.safeDrawing.getBottom(density).toDp() }
     val navToolbarHeight = 66.dp
@@ -520,44 +520,12 @@ fun MainScreen(
             ?: updateIntervalHoursToMillis(DEFAULT_UPDATE_CHECK_INTERVAL_HOURS)
             ?: 60L * 60L * 1000L
 
-        suspend fun runUpdateCheck(reason: String) {
-            val checkedAt = System.currentTimeMillis()
-            val release = fetchLatestReleaseInfo(currentVersion)
-            settingsStore.saveUpdateState(
-                lastCheckAt = checkedAt,
-                latestVersion = release?.versionTag ?: "",
-                error = if (release == null) "Не удалось проверить" else ""
-            )
-
-            if (release == null) {
-                Log.w("CSQTT", "[WARN] Update check: no release info, local=$currentVersion reason=$reason")
-                return
-            }
-
-            // only a published release: a tag is pushed before its release exists (CI builds it first), and its tree page
-            // has no APK to update with. The manual button still reports tags.
-            val hasUpdate = release.source == RemoteVersionSource.Release &&
-                isNewerVersion(currentVersion, release.versionTag)
-            val postponeVer = settingsStore.updatePostponeVersion.first()
-            val postponeUntil = settingsStore.updatePostponeUntil.first()
-            val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil
-            Log.i(
-                "CSQTT",
-                "Update check: local=$currentVersion remote=${release.versionTag} newer=$hasUpdate postponed=$isPostponed reason=$reason"
-            )
-
-            if (hasUpdate && !isPostponed) {
-                settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
-                pendingRelease = release
-            }
-        }
-
         // only while the app is on screen, as before the composition was kept in the background (§4.2 rule 1)
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
                 val waitMs = updateCheckDelayMs(System.currentTimeMillis(), settingsStore.updateLastCheckAt.first(), intervalMillis)
                 if (waitMs > 0) delay(waitMs)
-                if (isActive) runUpdateCheck(if (waitMs > 0) "periodic" else "startup")
+                if (isActive) AppUpdates.checkAutomatic(settingsStore, currentVersion, if (waitMs > 0) "periodic" else "startup")
             }
         }
     }
@@ -744,35 +712,17 @@ fun MainScreen(
         }
     }
 
+    // M-91: the offer lives in AppUpdates, so a recreate shows it again until it is answered (lost-prompt audit B6)
     pendingRelease?.let { release ->
         AppUpdateDialog(
             release = release,
             onPostpone = {
-                pendingRelease = null
+                AppUpdates.postpone(settingsStore, release)
                 context.showRaisedToast("Обновление отложено на 24 часа.", Toast.LENGTH_SHORT)
-                scope.launch {
-                    val now = System.currentTimeMillis()
-                    settingsStore.saveUpdatePostpone(
-                        version = release.versionTag,
-                        until = now + 24L * 60L * 60L * 1000L
-                    )
-                    settingsStore.saveUpdateDialogAction(
-                        version = release.versionTag,
-                        action = UPDATE_DIALOG_ACTION_POSTPONED,
-                        actedAt = now
-                    )
-                }
             },
             onUpdate = {
-                pendingRelease = null
-                scope.launch {
-                    settingsStore.saveUpdateDialogAction(
-                        version = release.versionTag,
-                        action = UPDATE_DIALOG_ACTION_UPDATE,
-                        actedAt = System.currentTimeMillis()
-                    )
-                    openReleaseUrl(context, release.releaseUrl)
-                }
+                AppUpdates.accept(settingsStore, release)
+                openReleaseUrl(context, release.releaseUrl)
             }
         )
     }

@@ -63,7 +63,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,12 +84,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
-import com.csqtt.client.UPDATE_DIALOG_ACTION_POSTPONED
-import com.csqtt.client.UPDATE_DIALOG_ACTION_UPDATE
 import com.csqtt.client.CSQTTColors
-import com.csqtt.client.fetchLatestReleaseInfo
+import com.csqtt.client.AppUpdates
 import com.csqtt.client.isNewerVersion
-import kotlinx.coroutines.launch
 import com.csqtt.client.ui.legacy.components.CsqttScreen
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSpacing
@@ -151,10 +147,9 @@ fun InfoTab(
     onProjectToggle: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
-    var isCheckingUpdates by remember { mutableStateOf(false) }
-    var pendingManualRelease by remember { mutableStateOf<com.csqtt.client.AppReleaseInfo?>(null) }
+    // M-91: the button's check runs in the app's scope (AppUpdates), and its offer is the main screen's one dialog
+    val isCheckingUpdates by AppUpdates.checking.collectAsStateWithLifecycle()
     var showCryptoDialog by remember { mutableStateOf(false) }
     val updateLatestVersion by settingsStore.updateLatestVersion.collectAsStateWithLifecycle(initialValue = "")
     val updateLastError by settingsStore.updateLastError.collectAsStateWithLifecycle(initialValue = "")
@@ -237,42 +232,7 @@ fun InfoTab(
             WideActionTile(
                 title = "Проверить обновления",
                 subtitle = updateStatus,
-                onClick = {
-                    if (isCheckingUpdates) return@WideActionTile
-                    isCheckingUpdates = true
-                    scope.launch {
-                        val checkedAt = System.currentTimeMillis()
-                        val release = fetchLatestReleaseInfo(currentVersion)
-                        val latest = release?.versionTag
-                        settingsStore.saveUpdateState(
-                            lastCheckAt = checkedAt,
-                            latestVersion = latest ?: "",
-                            error = if (release == null) "Не удалось проверить" else ""
-                        )
-                        isCheckingUpdates = false
-
-                        if (release == null) {
-                            val message = if (updateLatestVersion.isNotBlank()) {
-                                "Не удалось проверить. Последняя известная версия: $updateLatestVersion"
-                            } else {
-                                "Не удалось проверить обновления"
-                            }
-                            context.showRaisedToast(message, Toast.LENGTH_SHORT)
-                            return@launch
-                        }
-
-                        if (isNewerVersion(currentVersion, release.versionTag)) {
-                            settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
-                            pendingManualRelease = release
-                        } else {
-                            Toast.makeText(
-                                context,
-                                "У вас уже последняя версия: ${release.versionTag}",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    }
-                },
+                onClick = { AppUpdates.checkNow(context, settingsStore, currentVersion) },
                 icon = {
                     Icon(
                         imageVector = Icons.Outlined.Update,
@@ -280,39 +240,6 @@ fun InfoTab(
                         modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.onPrimaryContainer
                     )
-                }
-            )
-        }
-
-        pendingManualRelease?.let { release ->
-            AppUpdateDialog(
-                release = release,
-                onPostpone = {
-                    pendingManualRelease = null
-                    context.showRaisedToast("Обновление отложено на 24 часа.", Toast.LENGTH_SHORT)
-                    scope.launch {
-                        val now = System.currentTimeMillis()
-                        settingsStore.saveUpdatePostpone(
-                            version = release.versionTag,
-                            until = now + 24L * 60L * 60L * 1000L
-                        )
-                        settingsStore.saveUpdateDialogAction(
-                            version = release.versionTag,
-                            action = UPDATE_DIALOG_ACTION_POSTPONED,
-                            actedAt = now
-                        )
-                    }
-                },
-                onUpdate = {
-                    pendingManualRelease = null
-                    scope.launch {
-                        settingsStore.saveUpdateDialogAction(
-                            version = release.versionTag,
-                            action = UPDATE_DIALOG_ACTION_UPDATE,
-                            actedAt = System.currentTimeMillis()
-                        )
-                        openUrlInBrowser(context, release.releaseUrl)
-                    }
                 }
             )
         }

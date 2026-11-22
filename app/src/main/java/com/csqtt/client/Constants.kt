@@ -97,16 +97,6 @@ object CsqttConstants {
 
         const val GITHUB_RELEASES_URL =
             "https://api.github.com/repos/SanityProtocol/csqtt/releases?per_page=30"
-        const val GITHUB_LATEST_RELEASE_URL =
-            "https://api.github.com/repos/SanityProtocol/csqtt/releases/latest"
-        const val GITHUB_LATEST_RELEASE_WEB_URL =
-            "https://github.com/SanityProtocol/csqtt/releases/latest"
-        const val GITHUB_RELEASE_TAG_URL_PREFIX =
-            "https://github.com/SanityProtocol/csqtt/releases/tag/"
-        const val GITHUB_TAGS_URL =
-            "https://api.github.com/repos/SanityProtocol/csqtt/tags?per_page=100"
-        const val GITHUB_TAG_TREE_URL_PREFIX =
-            "https://github.com/SanityProtocol/csqtt/tree/"
         // The update channel is our own releases (SanityProtocol/csqtt): the only APKs with this app ID and our key.
         // The automatic check runs every DEFAULT_CHECK_INTERVAL_HOURS, counted from the last check (updateCheckDelayMs),
         // so a UI rebuilt on every return to the foreground does not check each time.
@@ -215,9 +205,5 @@ object CsqttConstants {
         const val REPOSITORY = "https://github.com/SanityProtocol/csqtt"
         const val TELEGRAM = "https://t.me/amurcanov_telegram"
         const val TELEGRAM_HANDLE = "t.me/amurcanov_telegram"
-    }
-
-    object Patterns {
-        val VERSION_NUMBER = kotlin.text.Regex("\\d+(?:\\.\\d+)*")
     }
 }
