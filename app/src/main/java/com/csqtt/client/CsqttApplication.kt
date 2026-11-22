@@ -17,6 +17,13 @@ class CsqttApplication : Application() {
         // a tile or widget tap starts the process too, and the tile is refreshed only on request.
         TunnelManager.initObservers(this)
 
+        // B5h2 (verify N1): a captcha need lives in one process; a notice an earlier process left (an app update, a crash)
+        // is no question any more, and its «Отменить и выключить» would stop a run the system restored
+        runCatching {
+            (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                .cancel(CsqttConstants.Notifications.CAPTCHA_NOTIFICATION_ID)
+        }
+
         val settingsStore = SettingsStore(this)
         // B5h1: the cause of a stop an earlier process recorded is the state again, unless a run began meanwhile
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
