@@ -889,6 +889,9 @@ impl Dispatcher {
             return;
         }
         self.inspect_domain_routing(&packet);
+        // P1 Bt: a SYN-ACK out of the tunnel too, so the phone's own segments fit one wire packet (not in push_inbound,
+        // which the direct relay also feeds)
+        crate::mss_clamp::clamp_tcp_mss(packet.as_mut_slice(), crate::mss_clamp::TUNNEL_TCP_MSS);
         self.push_inbound(packet);
     }
 
@@ -1524,7 +1527,7 @@ impl Dispatcher {
         }
     }
 
-    pub async fn dispatch(&self, packet: PacketBuf) {
+    pub async fn dispatch(&self, mut packet: PacketBuf) {
         self.inspect_domain_routing(&packet);
         if let Some(relay) = &self.direct_relay
             && relay.try_handle(&packet).await
@@ -1535,6 +1538,8 @@ impl Dispatcher {
         if workers.is_empty() {
             return;
         }
+        // P1 Bt: a SYN into the tunnel asks for segments that fit one wire packet (a direct route keeps its MSS)
+        crate::mss_clamp::clamp_tcp_mss(packet.as_mut_slice(), crate::mss_clamp::TUNNEL_TCP_MSS);
 
         if packet.len() <= 1280 {
             self.send_to_workers(packet, &workers, true).await;

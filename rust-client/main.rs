@@ -13,6 +13,7 @@ mod dns;
 pub mod dtls;
 mod events;
 mod logging;
+mod mss_clamp;
 mod namegen;
 mod obfs;
 mod packet;

@@ -1245,6 +1245,9 @@ fn purge_legacy_mss_clamp() {
     }
 }
 
+/// 1280 − 20 − 20: the largest inner packet sent unsplit, less the IPv4 and TCP headers (P1 Bt).
+const TUNNEL_TCP_MSS: &str = "1240";
+
 fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
     let subnet = crate::swgpanel::subnet_cidr();
     vec![
@@ -1268,6 +1271,23 @@ fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
             "POSTROUTING",
             &["-s", subnet, "!", "-o", tun_iface],
             &["-j", "MASQUERADE"],
+        ),
+        // P1 Bt: a TCP segment's IP packet fits one wire packet (1280 B: a longer one is split in two, which doubles its
+        // exposure to loss on a mobile path), for clients that do not clamp themselves (csq-socks, iOS, 2.5.x apps). The
+        // legacy purge above removes the same rules first, so a restart does not stack them
+        FirewallRule::new(
+            "iptables",
+            Some("mangle"),
+            "FORWARD",
+            &["-s", subnet, "-p", "tcp", "-m", "tcp", "--tcp-flags", "SYN,RST", "SYN"],
+            &["-j", "TCPMSS", "--set-mss", TUNNEL_TCP_MSS],
+        ),
+        FirewallRule::new(
+            "iptables",
+            Some("mangle"),
+            "FORWARD",
+            &["-d", subnet, "-p", "tcp", "-m", "tcp", "--tcp-flags", "SYN,RST", "SYN"],
+            &["-j", "TCPMSS", "--set-mss", TUNNEL_TCP_MSS],
         ),
         FirewallRule::new(
             "ip6tables",
@@ -1520,6 +1540,25 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_managed_rules_clamp_tcp_syns_both_ways_to_the_tunnel_mss() {
+        // P1 Bt: a TCP segment's IP packet fits one wire packet for clients that do not clamp themselves
+        let rules = managed_firewall_rules("csqtt0");
+        let clamps: Vec<&FirewallRule> = rules
+            .iter()
+            .filter(|rule| rule.table == Some("mangle") && rule.chain == "FORWARD")
+            .collect();
+        assert_eq!(clamps.len(), 2);
+        for (rule, direction) in clamps.iter().zip(["-s", "-d"]) {
+            assert_eq!(rule.program, "iptables");
+            assert_eq!(rule.spec[0], direction);
+            assert_eq!(rule.spec[1], crate::swgpanel::subnet_cidr());
+            assert!(rule.spec.windows(3).any(|w| w == ["--tcp-flags", "SYN,RST", "SYN"]));
+            assert!(rule.spec.windows(4).any(|w| w == ["-j", "TCPMSS", "--set-mss", "1240"]));
+        }
+        assert_eq!(TUNNEL_TCP_MSS, (1280 - 20 - 20).to_string());
+    }
 
     #[test]
     fn host_tuning_auto_matches_253_minus_ipv6() {
