@@ -125,6 +125,11 @@ object CsqttConstants {
         // B5h1: a stop the user did not ask for, announced while the app is not in front
         const val STOP_CHANNEL_ID = "csqtt_stops_v1"
         const val STOP_NOTIFICATION_ID = 2
+
+        // B5h2: a background operation the user relies on that failed (a subscription refresh, the D6 hand-over)
+        const val BACKGROUND_CHANNEL_ID = "csqtt_background_v1"
+        const val SUBSCRIPTION_NOTIFICATION_ID = 3
+        const val HANDOVER_NOTIFICATION_ID = 4
     }
 
     object Widget {

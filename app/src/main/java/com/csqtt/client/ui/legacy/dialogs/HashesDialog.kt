@@ -33,7 +33,6 @@ import com.csqtt.client.VkHashValidationStatus
 import com.csqtt.client.ui.legacy.utils.stripVkUrlStatic
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,7 +45,12 @@ fun HashesDialog(
     hash6: String,
     validationResults: Map<String, VkHashValidationStatus>,
     onValidationResultsChange: (Map<String, VkHashValidationStatus>) -> Unit,
-    onCheck: suspend (List<String>) -> Map<String, VkHashValidationStatus>,
+    // B5h2 (U2): the check runs in an app-level owner (VkHashCheck) that stores its results; the dialog renders its state
+    checking: Boolean,
+    checkBusy: Boolean,
+    checkedHashes: List<String>,
+    uncheckedCount: Int,
+    onCheck: (List<String>) -> Unit,
     onAutoSave: ((String, String, String, String, String, String) -> Unit)? = null,
     onSave: (String, String, String, String, String, String) -> Unit,
     onDismiss: () -> Unit,
@@ -66,9 +70,7 @@ fun HashesDialog(
     var removedOwner by remember(removedOwnerHashes) { mutableStateOf(removedOwnerHashes) }
     val fieldFocus = remember { List(6) { FocusRequester() } }
 
-    var isChecking by remember { mutableStateOf(false) }
-    var unavailableCount by remember { mutableIntStateOf(0) }
-    val scope = rememberCoroutineScope()
+    val isChecking = checking
     val context = LocalContext.current
     val hashes = listOf(h1, h2, h3, h4, h5, h6)
 
@@ -89,7 +91,6 @@ fun HashesDialog(
             results = updatedResults
             onValidationResultsChange(updatedResults)
         }
-        unavailableCount = 0
         when (index) {
             0 -> h1 = cleaned
             1 -> h2 = cleaned
@@ -341,19 +342,10 @@ fun HashesDialog(
                     .filter { it.length >= 16 }.distinct()
                 OutlinedButton(
                     onClick = {
-                        isChecking = true
-                        unavailableCount = 0
-                        scope.launch {
-                            val checked = onCheck(activeHashes)
-                            val updatedResults = results + checked
-                            results = updatedResults
-                            onValidationResultsChange(updatedResults)
-                            unavailableCount = activeHashes.size - checked.size
-                            isChecking = false
-                        }
+                        onCheck(activeHashes)
                     },
                     modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
-                    enabled = !isChecking && activeHashes.isNotEmpty(),
+                    enabled = !checkBusy && activeHashes.isNotEmpty(),
                     shape = CsqttShapes.Pill,
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
@@ -365,6 +357,8 @@ fun HashesDialog(
                     )
                 }
 
+                // the last check's note, while the fields hold the hashes it checked
+                val unavailableCount = if (checkedHashes == activeHashes) uncheckedCount else 0
                 if (unavailableCount > 0) {
                     Text(
                         "Не удалось проверить: $unavailableCount. Поля оставлены без статуса.",

@@ -30,6 +30,13 @@ internal object StopCause {
 
     fun startError(message: String?): String = "Ошибка запуска: ${message?.trim()?.takeIf { it.isNotEmpty() } ?: "неизвестная"}"
 
+    /**
+     * H5 (B5h2): a cause can carry the core's own line or an exception's message, and it is stored and announced, so it
+     * is masked as a log line is: secrets, links, call links and the server owner's hashes.
+     */
+    fun masked(cause: String, ownerHashes: List<String>): String =
+        LogRedaction.redact(maskOwnerHashes(withoutLogStickers(cause), ownerHashes))
+
     /** VK calls could not be made: a token VK refused names what to do, a link's token is the owner's to renew. */
     fun vkCallsNotCreated(tokenInvalid: Boolean, tokenFromLink: Boolean): String = when {
         !tokenInvalid -> VK_CALLS_NOT_CREATED

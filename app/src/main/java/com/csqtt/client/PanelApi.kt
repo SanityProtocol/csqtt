@@ -85,15 +85,21 @@ internal object VkPoolHandOver {
 
     /**
      * Sends [panel]'s pool when it differs from what the panel last accepted (always with [force]). Returns the log
-     * line, or null when there was nothing to send. A failure is tried again at the next pool run.
+     * line, or null when there was nothing to send. A failure is tried again at the next pool run. A failure of a try
+     * that is not the [lastTry] (the deploy end tries three times) is only logged; a success is always kept.
      */
-    suspend fun handOver(store: SettingsStore, panel: PoolPanel, force: Boolean = false): Pair<Boolean, String>? = lock.withLock {
+    suspend fun handOver(
+        store: SettingsStore,
+        panel: PoolPanel,
+        force: Boolean = false,
+        lastTry: Boolean = true,
+    ): Pair<Boolean, String>? = lock.withLock {
         val pool = store.vkPool(panel.vps).take(PanelApi.MAX_DEFAULT_HASHES)
         if (pool.isEmpty()) return@withLock null
         val (sent, cert) = store.handOverState(panel.vps)
         if (!force && pool == sent) return@withLock null
         val result = withContext(Dispatchers.IO) { PanelApi.setDefaultHashes(panel, pool, cert) }
-        when (val outcome = result.outcome) {
+        val (ok, line) = when (val outcome = result.outcome) {
             PanelApi.Outcome.Ok -> {
                 store.recordHandOver(panel.vps, pool, result.observed)
                 true to "[OK] Хеши звонков переданы серверу (${pool.size}) ✓"
@@ -108,6 +114,24 @@ internal object VkPoolHandOver {
                 false to "[ERR] Хеши не переданы: сертификат панели сменился (обновите сервер на вкладке установки)"
             is PanelApi.Outcome.Failed ->
                 false to "[ERR] Хеши не переданы: панель не ответила (адрес, порт или секретный путь) · ${outcome.reason}"
+        }
+        if (ok || lastTry) recordResult(store, panel.vps, ok, line)
+        ok to line
+    }
+
+    /**
+     * B5h2 (rule 10): the result, a success too, is kept for «Подключение» (the run's log line is wiped at the tunnel's
+     * start); a new failure is announced while the app is not in front, and a success withdraws it. Masked: the panel's
+     * answer and a network error can carry anything.
+     */
+    private suspend fun recordResult(store: SettingsStore, vps: Int, ok: Boolean, line: String) {
+        val text = LogRedaction.redact(line.removePrefix("[OK] ").removePrefix("[ERR] ").removeSuffix(" ✓"))
+        val id = CsqttConstants.Notifications.HANDOVER_NOTIFICATION_ID
+        val tag = "handover:$vps"
+        if (store.recordHandOverResult(vps, HandOverResult(ok, text, System.currentTimeMillis()))) {
+            BackgroundNotice.post(store.appContext, id, "Хеши звонков не переданы серверу", text, tag)
+        } else if (ok) {
+            BackgroundNotice.cancel(store.appContext, id, tag)
         }
     }
 
@@ -131,7 +155,7 @@ internal object VkPoolHandOver {
         }
         var result: Pair<Boolean, String>? = null
         for (attempt in 1..3) {
-            result = handOver(store, panel, force = true)
+            result = handOver(store, panel, force = true, lastTry = attempt == 3)
             if (result == null || result.first || attempt == 3) break
             delay(5_000)
         }

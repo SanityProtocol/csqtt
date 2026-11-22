@@ -420,7 +420,7 @@ object TunnelManager {
      */
     internal fun recordRunFailure(cause: String, context: Context? = activeContext(), silent: Boolean = false) {
         val fatal = runFatal.get()
-        if (!fatal.record(withoutLogStickers(cause))) return
+        if (!fatal.record(StopCause.masked(cause, ownerHashes))) return
         val recorded = fatal.cause ?: return
         failure.value = recorded
         val appContext = context?.applicationContext ?: return

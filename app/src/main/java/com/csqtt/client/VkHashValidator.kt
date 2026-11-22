@@ -1,7 +1,12 @@
 package com.csqtt.client
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -122,5 +127,43 @@ object VkHashValidator {
             val status = VkHashValidationStatus.fromWire(json.getString("status")) ?: return null
             hash to status
         }.getOrNull()
+    }
+}
+
+/**
+ * B5h2 (U2, APP-PLAN §4.2 rule 8): the VK hash check runs above the screens. Its results are merged into the stored
+ * results of the profile it began on, so closing the dialog, a tab switch or a recreate lose nothing. A process death
+ * mid-check loses that check; what was stored before stays.
+ */
+internal object VkHashCheck {
+    sealed interface State {
+        data object Idle : State
+        data class Running(val profile: Int) : State
+        /** [unchecked]: of the [hashes] checked, those the checker could not reach, left without a status. */
+        data class Done(val profile: Int, val hashes: List<String>, val unchecked: Int) : State
+    }
+
+    private val mutableState = MutableStateFlow<State>(State.Idle)
+    val state: StateFlow<State> = mutableState
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** The check itself; a test puts a fake here. */
+    internal var validator: suspend (Context, List<String>, String, String) -> Map<String, VkHashValidationStatus> =
+        { context, hashes, fingerprint, clientIds -> VkHashValidator.check(context, hashes, fingerprint, clientIds) }
+
+    /** Checks [hashes] for [profile]; false while a check runs. */
+    fun start(context: Context, profile: Int, hashes: List<String>, fingerprint: String, clientIds: String): Boolean {
+        if (profile < 0 || hashes.isEmpty()) return false
+        val app = context.applicationContext
+        synchronized(this) {
+            if (mutableState.value is State.Running) return false
+            mutableState.value = State.Running(profile)
+        }
+        scope.launch {
+            val checked = runCatching { validator(app, hashes, fingerprint, clientIds) }.getOrDefault(emptyMap())
+            runCatching { SettingsStore(app, ProfileScope.Fixed(profile)).mergeVkHashCheckResults(checked) }
+            mutableState.value = State.Done(profile, hashes, hashes.size - checked.size)
+        }
+        return true
     }
 }

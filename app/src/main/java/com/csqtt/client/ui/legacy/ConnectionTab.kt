@@ -63,7 +63,10 @@ import com.csqtt.client.BatterySaver
 import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.HandOverResult
 import com.csqtt.client.ManlCaptchaWebViewManager
+import com.csqtt.client.handOverNoticeLine
+import com.csqtt.client.subscriptionNoticeLine
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.StoredSecretState
@@ -109,6 +112,9 @@ internal fun ConnectionTab(
     val savedVkAccessToken by settingsStore.vkAccessToken.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkAccessToken)
 
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
+    // B5h2 (rule 10): the background operations the user relies on, one line each, not only in «Логи»
+    val subscriptionNotice by settingsStore.subscriptionNotice.collectAsStateWithLifecycle(initialValue = null)
+    val handOverNotice by settingsStore.handOverNotice.collectAsStateWithLifecycle(initialValue = null)
 
     val parsedLink = remember(csqttLink) { parseCsqttLink(csqttLink) }
     val linkHashesRemoved by settingsStore.linkHashesRemoved.collectAsStateWithLifecycle(initialValue = emptySet())
@@ -251,6 +257,8 @@ internal fun ConnectionTab(
                 cooldownActive = cooldownActive,
                 configurationValid = isValid,
                 onToggleTunnel = { toggleTunnel() },
+                subscriptionLine = subscriptionNotice?.let { subscriptionNoticeLine(it) },
+                handOver = handOverNotice,
             )
         }
     }
@@ -262,6 +270,8 @@ private fun TunnelConnectionPanel(
     cooldownActive: Boolean,
     configurationValid: Boolean,
     onToggleTunnel: () -> Unit,
+    subscriptionLine: String? = null,
+    handOver: HandOverResult? = null,
 ) {
     val tunnelStopping = state is ConnectionState.Stopping
     val powerOn = state.powerIsOn
@@ -358,6 +368,14 @@ private fun TunnelConnectionPanel(
 
             NotificationsOffWarning()
 
+            subscriptionLine?.let { OutcomeLine(it, MaterialTheme.colorScheme.error) }
+            handOver?.let {
+                OutcomeLine(
+                    handOverNoticeLine(it),
+                    if (it.ok) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                )
+            }
+
             // «Экономия батареи» in force: said under the status, where the user looks
             val batterySaving by BatterySaver.active.collectAsStateWithLifecycle()
             if (batterySaving && state.powerIsOn) {
@@ -440,6 +458,17 @@ internal fun workersLine(active: Int, target: Int, serverLimit: Int?): String = 
     append("Потоки: ").append(active)
     if (target > 0) append(" / ").append(target)
     if (serverLimit != null) append(" · сервер: ").append(serverLimit)
+}
+
+/** B5h2: one background operation's last outcome (a subscription refresh, the hand-over of the pool to the server). */
+@Composable
+private fun OutcomeLine(text: String, color: Color) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = color,
+        textAlign = TextAlign.Center,
+    )
 }
 
 /** Notifications off: the status and the captcha prompt cannot show (L-29). Checked on each return to the screen. */

@@ -47,7 +47,7 @@ import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DpiSplitMode
 import com.csqtt.client.WorkerCountPolicy
 import com.csqtt.client.VkHashValidationCodec
-import com.csqtt.client.VkHashValidator
+import com.csqtt.client.VkHashCheck
 import com.csqtt.client.shouldConfirmAutoJsMode
 import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.vkAuthModeForHashMode
@@ -506,6 +506,9 @@ internal fun SettingsTabContent(
     val hashesRequiredError = showRequiredFieldErrors && !hashesReadyForTunnel
     val passwordRequiredError = showRequiredFieldErrors && !participantMode && connectionPassword.isBlank()
     if (showHashesDialog) {
+        // B5h2 (U2): the check's state lives above the screens; this profile's last result, while the dialog shows it
+        val hashCheck by VkHashCheck.state.collectAsStateWithLifecycle()
+        val lastHashCheck = (hashCheck as? VkHashCheck.State.Done)?.takeIf { it.profile == activeProfile }
         HashesDialog(
             ownerHashes = if (participantMode) linkHashes else emptyList(),
             removedOwnerHashes = linkHashesRemoved,
@@ -522,8 +525,12 @@ internal fun SettingsTabContent(
                     settingsStore.saveVkHashCheckResults(VkHashValidationCodec.encode(results))
                 }
             },
+            checking = (hashCheck as? VkHashCheck.State.Running)?.profile == activeProfile,
+            checkBusy = hashCheck is VkHashCheck.State.Running,
+            checkedHashes = lastHashCheck?.hashes.orEmpty(),
+            uncheckedCount = lastHashCheck?.unchecked ?: 0,
             onCheck = { hashes ->
-                VkHashValidator.check(context, hashes, activeFingerprint, activeClientIds)
+                VkHashCheck.start(context, activeProfile, hashes, activeFingerprint, activeClientIds)
             },
             onAutoSave = { h1, h2, h3, h4, h5, h6 ->
                 val cleaned1 = stripVkUrlStatic(h1)

@@ -88,7 +88,7 @@ internal object SubscriptionSync {
                     names = meta.certNames.split(',').map(String::trim).filter(String::isNotEmpty).toSet(),
                 )
             }
-        return when (val result = SubscriptionImporter.fetch(normalized, SubscriptionTrust(pinned, record))) {
+        val outcome = when (val result = SubscriptionImporter.fetch(normalized, SubscriptionTrust(pinned, record))) {
             is SubscriptionFetchResult.Success -> {
                 result.cert?.let { store.recordSubscriptionCertificate(normalized, it) }
                 val summary = SubscriptionImporter.importNodes(
@@ -108,6 +108,30 @@ internal object SubscriptionSync {
             }
             is SubscriptionFetchResult.Failure ->
                 SubscriptionRefreshOutcome(false, result.message)
+        }
+        recordOutcome(store, normalized, meta?.title.orEmpty(), outcome)
+        return outcome
+    }
+
+    /**
+     * B5h2 (U3, rule 10): the outcome is kept for «Подключение», not only logged; a new failure is announced while the app
+     * is not in front, and a success withdraws it. Masked: a server's message can carry anything.
+     */
+    private suspend fun recordOutcome(store: SettingsStore, url: String, title: String, outcome: SubscriptionRefreshOutcome) {
+        val error = if (outcome.success) "" else LogRedaction.redact(outcome.message)
+        val skipped = if (outcome.success && outcome.skipped > 0) {
+            LogRedaction.redact(outcome.message.removePrefix("Подписка — "))
+        } else {
+            ""
+        }
+        val context = store.appContext
+        val id = CsqttConstants.Notifications.SUBSCRIPTION_NOTIFICATION_ID
+        // one notice per subscription; its URL may carry an access token, so the tag is a hash of it
+        val tag = "subscription:${url.hashCode()}"
+        if (store.recordSubscriptionOutcome(url, error, skipped)) {
+            BackgroundNotice.post(context, id, "Подписка «${title.ifBlank { "Подписка" }}» не обновилась", error, tag)
+        } else if (outcome.success) {
+            BackgroundNotice.cancel(context, id, tag)
         }
     }
 }

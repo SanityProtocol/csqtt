@@ -164,6 +164,10 @@ internal data class SubscriptionMeta(
     /** How that leaf was shown ([CertKind.stored]) and the names it certifies, comma-joined (review V1). */
     val certKind: String = "",
     val certNames: String = "",
+    /** B5h2 (U3): the last refresh's failure, masked; "" after a success. Its time is [lastAttemptAt]. */
+    val lastError: String = "",
+    /** B5h2 (U3): what the last successful refresh skipped, and why, masked; "" when nothing was. */
+    val lastSkipped: String = "",
 ) {
     fun needsUpdate(now: Long): Boolean {
         if (autoUpdateMinutes <= 0 || url.isBlank()) return false
@@ -195,6 +199,8 @@ private fun decodeSubscriptionMeta(raw: String?): Map<String, SubscriptionMeta> 
             certNotAfter = entry.optLong("certNotAfter", 0L).coerceAtLeast(0L),
             certKind = entry.optString("certKind").trim(),
             certNames = entry.optString("certNames").trim(),
+            lastError = entry.optString("lastError").trim(),
+            lastSkipped = entry.optString("lastSkipped").trim(),
         )
     }
     return result
@@ -219,6 +225,8 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
                     put("certKind", value.certKind)
                     put("certNames", value.certNames)
                 }
+                if (value.lastError.isNotEmpty()) put("lastError", value.lastError)
+                if (value.lastSkipped.isNotEmpty()) put("lastSkipped", value.lastSkipped)
             },
         )
     }
@@ -239,7 +247,7 @@ internal sealed interface ProfileScope {
 class SettingsStore internal constructor(context: Context, private val scope: ProfileScope) {
     constructor(context: Context) : this(context, ProfileScope.Active)
 
-    private val appContext = context.applicationContext
+    internal val appContext: Context = context.applicationContext
     companion object {
         // Every per-profile key, declared once with its type and its group (M-37, M-40). It is filled by the
         // profileString/Int/Boolean/Long calls below, so it stays first in the companion.
@@ -365,6 +373,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         // the pool as the server's panel last accepted it, and the panel's leaf certificate it was trusted with (JSON)
         private val DEPLOY_VK_POOL_SENT = profileString("deploy_vk_pool_sent", VPS)
         private val DEPLOY_PANEL_CERT = profileString("deploy_panel_cert", VPS)
+        // B5h2: the last hand-over's result (HandOverResult JSON), shown on «Подключение»
+        private val DEPLOY_VK_POOL_HANDOVER = profileString("deploy_vk_pool_handover", VPS)
 
 
         private val VK_AUTH_MODE = profileString("vk_auth_mode")
@@ -1025,6 +1035,47 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         internal fun clearHandOver(prefs: MutablePreferences, vps: Int) {
             prefs.remove(getProfileKey(DEPLOY_VK_POOL_SENT, vps))
             prefs.remove(getProfileKey(DEPLOY_PANEL_CERT, vps))
+            prefs.remove(getProfileKey(DEPLOY_VK_POOL_HANDOVER, vps))
+        }
+
+        /**
+         * B5h2: the hand-over's [result] for [vps], kept while the record has its server. True when it is a failure other
+         * than the one already stored: rule 10 announces only a new one.
+         */
+        internal fun writeHandOverResult(prefs: MutablePreferences, vps: Int, result: HandOverResult): Boolean {
+            if (vps !in profileIndices || prefs[getProfileKey(DEPLOY_IP, vps)].isNullOrBlank()) return false
+            val key = getProfileKey(DEPLOY_VK_POOL_HANDOVER, vps)
+            val previous = HandOverResult.decode(prefs[key])
+            prefs[key] = result.encode()
+            return !result.ok && (previous == null || previous.ok || previous.text != result.text)
+        }
+
+        /** B5h2: [profile]'s own server, in «Авто API», with a hand-over on record: its last result. */
+        internal fun handOverNoticeOf(prefs: Preferences, profile: Int): HandOverResult? {
+            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) return null
+            val mode = prefs[getProfileKey(VK_HASH_MODE, profile)]
+            if (mode != "auto" && mode != CsqttConstants.VkAutoHash.MODE_AUTO_API) return null
+            val vps = linkedVps(prefs, profile) ?: return null
+            return HandOverResult.decode(prefs[getProfileKey(DEPLOY_VK_POOL_HANDOVER, vps)])
+        }
+
+        /** B5h2 (U3): the last refresh's outcome of [url]; a success clears the failure. True for a new failure. */
+        internal fun writeSubscriptionOutcome(prefs: MutablePreferences, url: String, error: String, skipped: String): Boolean {
+            val key = url.trim()
+            if (key.isEmpty()) return false
+            val meta = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META]).toMutableMap()
+            val current = meta[key] ?: SubscriptionMeta(url = key)
+            meta[key] = current.copy(lastError = error, lastSkipped = skipped)
+            prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
+            return error.isNotEmpty() && error != current.lastError
+        }
+
+        /** B5h2 (U3): [profile]'s subscription, when its last refresh failed or skipped nodes. */
+        internal fun subscriptionNoticeOf(prefs: Preferences, profile: Int): SubscriptionMeta? {
+            val url = prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim().orEmpty()
+            if (url.isEmpty()) return null
+            return decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])[url]
+                ?.takeIf { it.lastError.isNotEmpty() || it.lastSkipped.isNotEmpty() }
         }
 
         /** M-70: what an import can write into, read in one pass. */
@@ -1850,6 +1901,28 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs -> clearHandOver(prefs, vps) }
     }
 
+    /** B5h2: the hand-over's [result] for [vps]; true for a new failure (rule 10 announces only that). */
+    internal suspend fun recordHandOverResult(vps: Int, result: HandOverResult): Boolean {
+        var newFailure = false
+        dataStore.edit { prefs -> newFailure = writeHandOverResult(prefs, vps, result) }
+        return newFailure
+    }
+
+    /** B5h2: the open profile's own server, in «Авто API», with a hand-over on record: its last result. */
+    internal val handOverNotice: Flow<HandOverResult?> =
+        dataStore.data.map { prefs -> handOverNoticeOf(prefs, selectedProfile(prefs)) }.distinctUntilChanged()
+
+    /** B5h2 (U3): the last refresh's outcome of [url]; true for a new failure. */
+    internal suspend fun recordSubscriptionOutcome(url: String, error: String, skipped: String): Boolean {
+        var newFailure = false
+        dataStore.edit { prefs -> newFailure = writeSubscriptionOutcome(prefs, url, error, skipped) }
+        return newFailure
+    }
+
+    /** B5h2 (U3): the open profile's subscription, when its last refresh failed or skipped nodes. */
+    internal val subscriptionNotice: Flow<SubscriptionMeta?> =
+        dataStore.data.map { prefs -> subscriptionNoticeOf(prefs, selectedProfile(prefs)) }.distinctUntilChanged()
+
     /** S8: true when [profile]'s stored set changed (written only for a link profile). */
     internal suspend fun saveReceivedHashes(profile: Int, hashes: List<String>, sourceLink: String): Boolean {
         var changed = false
@@ -2025,6 +2098,15 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
             prefs[getProfileKey(VK_HASH_CHECK_RESULTS, profile)] = resultsJson
+        }
+    }
+
+    /** B5h2 (U2): a finished check's results, merged into what this store's profile holds when it ends. */
+    internal suspend fun mergeVkHashCheckResults(checked: Map<String, VkHashValidationStatus>) {
+        if (checked.isEmpty()) return
+        dataStore.edit { prefs ->
+            val key = getProfileKey(VK_HASH_CHECK_RESULTS, selectedProfile(prefs))
+            prefs[key] = VkHashValidationCodec.encode(VkHashValidationCodec.decode(prefs[key] ?: "{}") + checked)
         }
     }
 
