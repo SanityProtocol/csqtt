@@ -12,6 +12,8 @@ mod dns;
 #[path = "../shared/dtls.rs"]
 pub mod dtls;
 mod events;
+#[path = "../shared/ip_fragments.rs"]
+mod ip_fragments;
 mod logging;
 mod mss_clamp;
 mod namegen;

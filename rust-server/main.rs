@@ -23,6 +23,8 @@ pub(crate) fn collect_allocator_thread_heap() -> bool {
 mod dataplane;
 #[path = "../shared/dtls.rs"]
 pub mod dtls;
+#[path = "../shared/ip_fragments.rs"]
+mod ip_fragments;
 mod model;
 mod net_setup;
 mod packet;

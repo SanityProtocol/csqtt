@@ -96,8 +96,8 @@ fn flow_key(packet: &[u8]) -> Option<FlowKey> {
             let proto = packet[9];
             let src = [packet[12], packet[13], packet[14], packet[15]];
             let dst = [packet[16], packet[17], packet[18], packet[19]];
-            // Non-initial fragments carry no transport header; key them without
-            // ports so they still follow the same flow.
+            // Non-initial fragments carry no transport header, so they are keyed without ports; select_packet sends
+            // each after its datagram's first piece instead (P1 Bt part 2).
             let fragment_offset = u16::from_be_bytes([packet[6], packet[7]]) & 0x1fff;
             let (sport, dport) = if fragment_offset == 0 {
                 transport_ports(packet, ihl, proto)
@@ -148,6 +148,7 @@ struct ClientRoute {
     cursor: usize,
     flows: HashMap<FlowKey, FlowState>,
     flow_evict_counter: u32,
+    fragments: crate::ip_fragments::FragmentRoutes,
 }
 
 impl ClientRoute {
@@ -184,6 +185,7 @@ impl ClientRoute {
         self.cursor = self.cursor.min(self.endpoints.len().saturating_sub(1));
         self.flows.clear();
         self.flow_evict_counter = 0;
+        self.fragments.clear();
     }
 
     fn unregister(&mut self, registration_id: RegistrationId) -> bool {
@@ -204,6 +206,7 @@ impl ClientRoute {
         self.cursor = self.cursor.min(self.endpoints.len().saturating_sub(1));
         self.flows.clear();
         self.flow_evict_counter = 0;
+        self.fragments.clear();
         self.endpoints.len() != previous_len
     }
 
@@ -276,13 +279,31 @@ impl ClientRoute {
         }
 
         let len_f = packet.len() as f64;
+        // P1 Bt part 2: a later piece of a datagram the internet delivered in pieces follows its first piece's stream
+        let fragment = crate::ip_fragments::ipv4_fragment(packet);
+        if let Some(fragment) = fragment
+            && let Some(idx) = self.fragments.follow(fragment, |idx| idx < count)
+        {
+            self.refill(idx, now);
+            self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
+            return self.endpoints.get(idx).copied();
+        }
+        let idx = self.select_index(now, packet, len_f);
+        if let Some(fragment) = fragment {
+            self.fragments.record(fragment, idx);
+        }
+        self.endpoints.get(idx).copied()
+    }
 
+    /// The stream for a packet by its flow: small UDP pinned, the rest in bursts.
+    fn select_index(&mut self, now: std::time::Instant, packet: &[u8], len_f: f64) -> usize {
+        let count = self.endpoints.len();
         let Some(key) = flow_key(packet) else {
             // Не IP-пакет (или тестовый dummy): сохраняем прежний курсорный
             // водопад, чтобы не менять поведение для служебных пакетов.
             let idx = self.choose_stream(now, len_f);
             self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
-            return self.endpoints.get(idx).copied();
+            return idx;
         };
 
         self.evict_flows(now);
@@ -310,7 +331,7 @@ impl ClientRoute {
                 self.flows.insert(key, state);
                 self.refill(idx, now);
                 self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
-                return self.endpoints.get(idx).copied();
+                return idx;
             }
 
             // Берст закончился или поток исчез: переносим весь flowlet на
@@ -320,7 +341,7 @@ impl ClientRoute {
             state.burst_left = FLOW_BURST_BYTES.saturating_sub(packet.len());
             self.flows.insert(key, state);
             self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
-            return self.endpoints.get(idx).copied();
+            return idx;
         }
 
         let idx = self.choose_stream(now, len_f);
@@ -337,7 +358,7 @@ impl ClientRoute {
             },
         );
         self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
-        self.endpoints.get(idx).copied()
+        idx
     }
 
     fn is_empty(&self) -> bool {
@@ -696,6 +717,38 @@ mod tests {
         }
         let top = per.values().copied().max().unwrap();
         assert!(per.len() == 10 && top < 4000 / 5, "a bulk flow must use every stream: {per:?}");
+    }
+
+    /// A piece of a UDP datagram to the client 10.66.67.2 that the internet cut at 1500: `offset` in 8-byte units.
+    fn udp_piece(id: u16, offset: u16, more: bool, len: usize) -> Vec<u8> {
+        let mut pkt = udp_packet(len, 50000);
+        pkt[4..6].copy_from_slice(&id.to_be_bytes());
+        pkt[6..8].copy_from_slice(&((u16::from(more) << 13) | offset).to_be_bytes());
+        if offset != 0 {
+            pkt[20..24].fill(0x5a); // payload, not ports
+        }
+        pkt
+    }
+
+    #[test]
+    fn downlink_pieces_of_a_datagram_take_one_stream() {
+        // P1 Bt part 2: a 3000-byte UDP answer reaches the client in three pieces on one stream; the port-less later
+        // pieces used to be a flow of their own (the short tail pinned as small UDP) on another stream than their head
+        let mut table = RouteTable::new();
+        for w in 1..=10u16 {
+            assert!(table.register(ip(2), w as _, w as _, w as _, w as _));
+        }
+        let start = std::time::Instant::now();
+        let mut heads = std::collections::HashSet::new();
+        for id in 0..300u16 {
+            let now = start + std::time::Duration::from_micros(u64::from(id) * 700);
+            let head = table.select_packet(2, now, &udp_piece(id, 0, true, 1500)).unwrap().worker_id;
+            let middle = table.select_packet(2, now, &udp_piece(id, 185, true, 1500)).unwrap().worker_id;
+            let tail = table.select_packet(2, now, &udp_piece(id, 370, false, 68)).unwrap().worker_id;
+            assert_eq!((middle, tail), (head, head), "datagram {id}");
+            heads.insert(head);
+        }
+        assert!(heads.len() > 1, "the flow still moves between streams in bursts: {heads:?}");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::{
+    ip_fragments::{Fragment, FragmentRoutes, ipv4_fragment},
     obfs::{ObfsConfig, ObfsState, SessionCipher},
     packet::{PacketBuf, PacketPool},
     stats::Stats,
@@ -254,6 +255,7 @@ pub struct UplinkState {
     pub cursor: usize,
     flows: HashMap<FlowKey, FlowState>,
     flow_evict_counter: u32,
+    fragments: FragmentRoutes,
 }
 
 impl UplinkState {
@@ -274,6 +276,7 @@ impl UplinkState {
             // действительны.
             self.flows.clear();
             self.flow_evict_counter = 0;
+            self.fragments.clear();
         }
 
         for controller in self.rates.iter_mut() {
@@ -422,6 +425,36 @@ impl UplinkState {
         self.flows
             .insert(key, FlowState::new(idx, now, total_len, small_udp));
         self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
+        idx
+    }
+
+    /// The waterfall, except that a later IPv4 fragment goes where its datagram's first piece went (P1 Bt part 2).
+    fn select_for_packet(
+        &mut self,
+        workers: &[WorkerEntry],
+        total_len: usize,
+        packet_len: usize,
+        flow: Option<FlowKey>,
+        fragment: Option<Fragment>,
+        now: std::time::Instant,
+    ) -> usize {
+        let Some(fragment) = fragment else {
+            return self.select_deficit_waterfall(workers, total_len, packet_len, flow, now);
+        };
+        if !fragment.first && workers.len() > 1 {
+            // first: a changed worker set clears the routes along with the flows
+            self.update_tokens(workers.len(), now);
+            if let Some(idx) = self.fragments.follow(fragment, |idx| {
+                workers
+                    .get(idx)
+                    .is_some_and(|worker| worker.channels.allocation.is_sendable())
+            }) {
+                self.tokens[idx] = (self.tokens[idx] - total_len as f64).max(MAX_DEFICIT);
+                return idx;
+            }
+        }
+        let idx = self.select_deficit_waterfall(workers, total_len, packet_len, flow, now);
+        self.fragments.record(fragment, idx);
         idx
     }
 
@@ -1423,17 +1456,19 @@ impl Dispatcher {
 
         let packet_len = packet.len();
         let flow = flow_key(packet.as_slice());
+        let fragment = ipv4_fragment(packet.as_slice());
         let effective_len = packet_len.saturating_add(66);
         let selected_idx = {
             let mut state = match self.uplink_state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            state.select_deficit_waterfall(
+            state.select_for_packet(
                 workers,
                 effective_len,
                 packet_len,
                 flow,
+                fragment,
                 std::time::Instant::now(),
             )
         };
@@ -1471,11 +1506,13 @@ impl Dispatcher {
         }
     }
 
+    /// `ip_fragment`: the packet the core split is itself a kernel IPv4 fragment (a datagram over a 1500 MTU).
     async fn send_fragments_to_workers(
         &self,
         fragments: Vec<PacketBuf>,
         workers: &[WorkerEntry],
         flow: Option<FlowKey>,
+        ip_fragment: Option<Fragment>,
         packet_len: usize,
     ) {
         let count = workers.len();
@@ -1489,11 +1526,12 @@ impl Dispatcher {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            state.select_deficit_waterfall(
+            state.select_for_packet(
                 workers,
                 total_eff,
                 packet_len,
                 flow,
+                ip_fragment,
                 std::time::Instant::now(),
             )
         };
@@ -1546,6 +1584,7 @@ impl Dispatcher {
         } else {
             let packet_len = packet.len();
             let flow = flow_key(packet.as_slice());
+            let ip_fragment = ipv4_fragment(packet.as_slice());
             let expected_frags = packet
                 .len()
                 .div_ceil(crate::wire_protocol::MAX_FRAG_PAYLOAD);
@@ -1565,7 +1604,7 @@ impl Dispatcher {
                 }
             });
             if frags.len() == expected_frags {
-                self.send_fragments_to_workers(frags, &workers, flow, packet_len)
+                self.send_fragments_to_workers(frags, &workers, flow, ip_fragment, packet_len)
                     .await;
             } else {
                 crate::log_error!(

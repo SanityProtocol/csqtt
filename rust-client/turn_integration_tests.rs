@@ -4265,6 +4265,68 @@ async fn test_50_streams_full_capacity_100mbit_profile() {
     shutdown_fifty_stream_rig(rig).await;
 }
 
+/// P1 Bt part 2: at a 1280 MTU the kernel cuts a 1400-byte UDP datagram in two, and only the first piece carries the
+/// ports. The tail used to take a flow of its own (port-less, "small UDP", pinned) on another worker than its head; now a
+/// datagram leaves on one worker, as the core's own split keeps a packet's pieces together — so every stream carries
+/// whole datagrams: an even count of pieces.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn kernel_fragments_of_a_datagram_leave_on_one_worker() {
+    const DATAGRAMS: u16 = 200;
+    fn piece(id: u16, sport: u16, offset: u16, more: bool, len: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        packet[4..6].copy_from_slice(&id.to_be_bytes());
+        packet[6..8].copy_from_slice(&((u16::from(more) << 13) | offset).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 66, 67, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 7]);
+        if offset == 0 {
+            packet[20..22].copy_from_slice(&sport.to_be_bytes());
+            packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        }
+        packet
+    }
+    let rig = start_fifty_stream_rig().await;
+    for id in 0..DATAGRAMS {
+        // each datagram its own flow (another source port), so the first pieces spread over the workers
+        for bytes in [piece(id, 41000 + id, 0, true, 1276), piece(id, 0, 157, false, 172)] {
+            let mut packet = rig.pool.acquire();
+            packet.read_area()[..bytes.len()].copy_from_slice(&bytes);
+            packet.set_read_len(bytes.len()).unwrap();
+            rig.dispatcher.dispatch(packet).await;
+        }
+        // paced (~400 pieces/s), so no worker's outbound queue is full when its tail comes
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let per_stream: Vec<u64> = rig
+        .relay
+        .meters
+        .iter()
+        .map(|m| {
+            m.upstream_packets.load(Ordering::Relaxed)
+                + m.upstream_dropped_packets.load(Ordering::Relaxed)
+        })
+        .collect();
+    assert_eq!(
+        per_stream.iter().sum::<u64>(),
+        2 * u64::from(DATAGRAMS),
+        "every piece reached the relay: {per_stream:?}"
+    );
+    assert!(
+        per_stream.iter().all(|pieces| pieces % 2 == 0),
+        "each worker carried whole datagrams: {per_stream:?}"
+    );
+    assert!(
+        per_stream.iter().filter(|&&pieces| pieces > 0).count() > 5,
+        "the datagrams spread over the workers: {per_stream:?}"
+    );
+    shutdown_fifty_stream_rig(rig).await;
+}
+
 /// M-26: the server's repair round under load. 12 workers are desired and 10 start; the server reports [11, 12] missing
 /// after its 30 s grace while traffic runs through the 10, and the two held workers then come back. The tunnel must carry
 /// the load throughout, the Repair must reach the client and restart none of the live workers, and no session of this
