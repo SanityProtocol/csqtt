@@ -53,6 +53,7 @@ import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.vkAuthModeForHashMode
 import com.csqtt.client.ui.legacy.components.CsqttScreen
 import com.csqtt.client.ui.legacy.components.CsqttSettingRow
+import com.csqtt.client.VpnMtu
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
 import com.csqtt.client.ui.legacy.dialogs.HashesDialog
@@ -69,6 +70,7 @@ import kotlinx.coroutines.flow.map
 import android.widget.Toast
 
 private const val WORKERS_PER_GROUP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
+private const val MTU_CUSTOM_KEY = "custom"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -273,6 +275,15 @@ internal fun SettingsTabContent(
         initialValue = CsqttConstants.Tunnel.DEFAULT_MAX_WORKERS,
     )
     val extraWorkers by settingsStore.extraWorkers.collectAsStateWithLifecycle(initialValue = false)
+    // P1 Bt part 2: the profile's VPN MTU; «Своё значение» picked over a preset keeps its field open
+    val vpnMtu by settingsStore.vpnMtu.collectAsStateWithLifecycle(initialValue = null)
+    var mtuCustomPicked by rememberSaveable(activeProfile) { mutableStateOf(false) }
+    var mtuInput by rememberSaveable(activeProfile) { mutableStateOf("") }
+    // the profile too: two profiles with one MTU emit no new value, while the field's draft starts over
+    LaunchedEffect(vpnMtu, activeProfile) {
+        val stored = vpnMtu ?: return@LaunchedEffect
+        if (VpnMtu.parse(mtuInput) != stored) mtuInput = stored.toString()
+    }
     val selectableMaxWorkers = workersMaximum.toFloat()
     var sniInput by rememberSaveable { mutableStateOf("") }
 
@@ -949,6 +960,50 @@ internal fun SettingsTabContent(
                         checked = extraWorkers,
                         enabled = !tunnelRunning,
                         onCheckedChange = { checked -> scope.launch { settingsStore.saveExtraWorkers(checked) } },
+                    )
+                }
+
+                val shownMtu = vpnMtu ?: CsqttConstants.Vpn.DEFAULT_MTU
+                val mtuCustom = mtuCustomPicked || shownMtu !in VpnMtu.PRESETS
+                CompactDropdownSetting(
+                    title = "MTU",
+                    selectedKey = if (mtuCustom) MTU_CUSTOM_KEY else shownMtu.toString(),
+                    options = VpnMtu.PRESETS.map { it.toString() to it.toString() } + (MTU_CUSTOM_KEY to "Своё значение"),
+                    enabled = !tunnelRunning,
+                    onSelected = { key ->
+                        val preset = key.toIntOrNull()
+                        mtuCustomPicked = preset == null
+                        if (preset != null) scope.launch { settingsStore.saveVpnMtu(preset) }
+                    },
+                )
+                if (mtuCustom) {
+                    OutlinedTextField(
+                        value = mtuInput,
+                        onValueChange = { next ->
+                            mtuInput = next.filter(Char::isDigit).take(4)
+                            // every valid MTU of four digits has an invalid prefix of three, so typing never stores a
+                            // value on the way
+                            VpnMtu.parse(mtuInput)?.takeIf { it != vpnMtu }?.let { mtu ->
+                                scope.launch { settingsStore.saveVpnMtu(mtu) }
+                            }
+                        },
+                        label = {
+                            Text(
+                                "MTU, ${VpnMtu.RANGE.first}–${VpnMtu.RANGE.last}",
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        },
+                        enabled = !tunnelRunning,
+                        isError = VpnMtu.parse(mtuInput) == null,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                        shape = CsqttShapes.Control,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                        ),
                     )
                 }
 

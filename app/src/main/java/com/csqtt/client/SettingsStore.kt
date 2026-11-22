@@ -381,6 +381,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val OBFS_MODE = profileString("obfs_mode")
         private val TURN_TRANSPORT = profileString("turn_transport")
         private val DPI_SPLIT = profileString("dpi_split")
+        // P1 Bt part 2: the VPN interface's MTU (VpnMtu); absent = the default, so a later default reaches old profiles
+        private val VPN_MTU = profileInt("vpn_mtu")
         private val SRTP_MODE = profileString("srtp_mode")
         private val CAPTCHA_MODE = profileString("captcha_mode")
         private val CAPTCHA_SOLVE_METHOD = profileString("captcha_solve_method")
@@ -1465,6 +1467,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
+    /** P1 Bt part 2: the active profile's VPN MTU, as the interface takes it. */
+    val vpnMtu: Flow<Int> = dataStore.data.map { prefs ->
+        VpnMtu.effective(prefs[getProfileKey(VPN_MTU, selectedProfile(prefs))])
+    }
+
     /** Per profile; the core uses it only with the TCP transport. */
     val dpiSplit: Flow<DpiSplitMode> = dataStore.data.map { prefs ->
         val profile = selectedProfile(prefs)
@@ -1614,6 +1621,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             dnsOverride = prefs[getProfileKey(DNS_OVERRIDE, profile)].orEmpty(),
             ipsWhitelist = ipsWhite,
             ips = prefs[getProfileKey(if (ipsWhite) DIRECT_IPS_WHITE else DIRECT_IPS_BLACK, profile)].orEmpty(),
+            mtu = VpnMtu.effective(prefs[getProfileKey(VPN_MTU, profile)]),
         )
     }.distinctUntilChanged()
 
@@ -2635,6 +2643,14 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
+    /** A value outside [VpnMtu.RANGE] is not stored. */
+    suspend fun saveVpnMtu(mtu: Int) {
+        if (mtu !in VpnMtu.RANGE) return
+        dataStore.edit { prefs ->
+            prefs[getProfileKey(VPN_MTU, selectedProfile(prefs))] = mtu
+        }
+    }
+
     suspend fun saveDpiSplit(mode: DpiSplitMode) {
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
@@ -3207,6 +3223,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             tunnel.put("obfs_mode", prefs[getProfileKey(OBFS_MODE, p)] ?: CsqttConstants.Tunnel.DEFAULT_OBFS_MODE)
             tunnel.put("turn_transport", prefs[getProfileKey(TURN_TRANSPORT, p)] ?: CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT)
             tunnel.put("dpi_split", DpiSplitMode.fromStored(prefs[getProfileKey(DPI_SPLIT, p)]).storedValue)
+            // only a value the profile chose: a default is the importing app's own
+            prefs[getProfileKey(VPN_MTU, p)]?.takeIf { it in VpnMtu.RANGE }?.let { tunnel.put("vpn_mtu", it) }
             tunnel.put("srtp_mode", prefs[getProfileKey(SRTP_MODE, p)] ?: CsqttConstants.SrtpMode.DEFAULT)
             tunnel.put("custom_turn_ips", prefs[getProfileKey(CUSTOM_TURN_IPS, p)] ?: "")
             tunnel.put("sni", prefs[getProfileKey(SNI, p)] ?: "")
@@ -3323,6 +3341,9 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     if (tunnel.has("turn_transport")) mutable[getProfileKey(TURN_TRANSPORT, p)] = tunnel.getString("turn_transport")
                     if (tunnel.has("dpi_split")) {
                         mutable[getProfileKey(DPI_SPLIT, p)] = DpiSplitMode.fromStored(tunnel.optString("dpi_split")).storedValue
+                    }
+                    if (tunnel.has("vpn_mtu")) {
+                        tunnel.optInt("vpn_mtu", -1).takeIf { it in VpnMtu.RANGE }?.let { mutable[getProfileKey(VPN_MTU, p)] = it }
                     }
                     if (tunnel.has("srtp_mode")) mutable[getProfileKey(SRTP_MODE, p)] = tunnel.getString("srtp_mode")
                     if (tunnel.has("custom_turn_ips")) mutable[getProfileKey(CUSTOM_TURN_IPS, p)] = tunnel.getString("custom_turn_ips")

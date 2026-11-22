@@ -149,19 +149,17 @@ class TunVpnService : VpnService() {
                 val forceRebuild = intent.getBooleanExtra("force_rebuild", false)
                 val isRoutingReload = intent.getBooleanExtra("is_routing_reload", false)
                 val reason = intent.getStringExtra("reason") ?: "start"
-                val mtu = intent.getIntExtra("mtu", CsqttConstants.Vpn.DEFAULT_MTU)
                 if (!forceRebuild) recoveryAttempts = 0
                 serviceScope.launch {
-                    startVpn(clientIp, dns, forceRebuild, isRoutingReload, reason, mtu)
+                    startVpn(clientIp, dns, forceRebuild, isRoutingReload, reason)
                 }
             }
             "RELOAD_ROUTING" -> {
                 val clientIp = intent.getStringExtra("client_ip") ?: activeClientIp ?: return START_NOT_STICKY
                 val dns = intent.getStringExtra("dns") ?: activeDns ?: return START_NOT_STICKY
                 val reason = intent.getStringExtra("reason") ?: "routing_reload"
-                val mtu = intent.getIntExtra("mtu", CsqttConstants.Vpn.DEFAULT_MTU)
                 serviceScope.launch {
-                    startVpn(clientIp, dns, forceRebuild = true, isRoutingReload = true, reason = reason, mtu = mtu)
+                    startVpn(clientIp, dns, forceRebuild = true, isRoutingReload = true, reason = reason)
                 }
             }
             "STOP" -> {
@@ -183,7 +181,6 @@ class TunVpnService : VpnService() {
         forceRebuild: Boolean,
         isRoutingReload: Boolean = false,
         reason: String = "unknown",
-        mtu: Int = CsqttConstants.Vpn.DEFAULT_MTU,
     ) {
         vpnMutex.withLock {
         try {
@@ -244,7 +241,7 @@ class TunVpnService : VpnService() {
 
             val builder = Builder()
                 .setSession("CSQTT")
-                .setMtu(mtu)
+                .setMtu(plan.mtu)
                 .addAddress(clientIp, 32)
             // IPv4 only, never allowFamily(AF_INET6): Android blocks IPv6 for the tunnelled apps (M-66 / D25)
             plan.routes.forEach { builder.addRoute(it.address, it.length) }
@@ -341,6 +338,9 @@ class TunVpnService : VpnService() {
             }
             if (plan.lanBypass) {
                 TunnelManager.updateLog("vpn_lan_bypass", "[TUN] Локальная сеть — напрямую, мимо туннеля (обход LAN)", 32, level = LogLevel.NET)
+            }
+            if (plan.mtu != CsqttConstants.Vpn.DEFAULT_MTU) {
+                TunnelManager.updateLog("vpn_mtu", "[TUN] MTU ${plan.mtu}", 32, level = LogLevel.NET)
             }
 
             sendTunFd(pfd, previousInterface, plan.serverDnsForLog(dns), isRoutingReload, builtRule = serverRule)

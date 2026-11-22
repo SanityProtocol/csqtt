@@ -191,6 +191,11 @@ object CsqttConstants {
 
     object Vpn {
         const val DEFAULT_MTU = 1500
+        // P1 Bt part 2: the core sends an inner packet of up to 1280 bytes whole and splits a longer one in two
+        const val MTU_NO_SPLIT = 1280
+        // a custom MTU, the operator 2026-11-22: anything IPv4 allows up to the server's TUN (below 1228 QUIC cannot run)
+        const val MIN_MTU = 576
+        const val MAX_MTU = 1500
         const val EMPTY_WHITELIST_MESSAGE = "В режиме БС выберите хотя бы одно приложение"
     }
 

@@ -991,7 +991,6 @@ object TunnelManager {
                 putExtra("dns", dns)
                 putExtra("force_rebuild", forceRebuild || vpnRebuildPending.getAndSet(false))
                 putExtra("reason", reason)
-                putExtra("mtu", CsqttConstants.Vpn.DEFAULT_MTU)
             }
             try {
                 startTunVpnService(ctx, vpnIntent)

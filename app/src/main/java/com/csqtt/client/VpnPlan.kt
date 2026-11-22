@@ -35,7 +35,26 @@ internal data class VpnSettings(
     val dnsOverride: String = "",
     val ipsWhitelist: Boolean = false,
     val ips: String = "",
+    /** P1 Bt part 2: the interface's MTU, [VpnMtu]. */
+    val mtu: Int = CsqttConstants.Vpn.DEFAULT_MTU,
 )
+
+/**
+ * P1 Bt part 2 (the operator, 2026-11-22): the VPN interface's MTU, per profile. 1500 is the default; at 1280 nothing an
+ * app sends is split by the core (the split doubles a packet's exposure to loss); a custom value is any IPv4 MTU up to
+ * the server's 1500.
+ */
+internal object VpnMtu {
+    val PRESETS = listOf(CsqttConstants.Vpn.DEFAULT_MTU, CsqttConstants.Vpn.MTU_NO_SPLIT)
+    val RANGE = CsqttConstants.Vpn.MIN_MTU..CsqttConstants.Vpn.MAX_MTU
+
+    /** What the interface is built with: a stored value in [RANGE], else the default. */
+    fun effective(stored: Int?): Int = stored?.takeIf { it in RANGE } ?: CsqttConstants.Vpn.DEFAULT_MTU
+
+    /** A custom value as typed: digits only, in [RANGE]. */
+    fun parse(text: String): Int? = text.trim().takeIf { it.isNotEmpty() && it.all(Char::isDigit) && it.length <= 5 }
+        ?.toInt()?.takeIf { it in RANGE }
+}
 
 /**
  * Everything the VPN interface is built from (M-59, M-62, M-64, M-66, M-67), decided in one pure function so a test can
@@ -59,6 +78,7 @@ internal data class VpnPlan(
     val dnsOverridden: Boolean = false,
     val dnsOverrideRefused: Boolean = false,
     val lanBypass: Boolean = false,
+    val mtu: Int = CsqttConstants.Vpn.DEFAULT_MTU,
     val failure: String? = null,
 ) {
     /** The server's DNS for the «[SERVER] DNS применён» line — none when the device's DNS replaced it (review F3). */
@@ -182,6 +202,7 @@ internal data class VpnPlan(
                 dnsOverridden = override != null,
                 dnsOverrideRefused = settings.dnsOverride.isNotBlank() && override == null,
                 lanBypass = settings.lanBypass,
+                mtu = VpnMtu.effective(settings.mtu),
                 failure = failure,
             )
             val bypassing = { extra: Set<String> ->

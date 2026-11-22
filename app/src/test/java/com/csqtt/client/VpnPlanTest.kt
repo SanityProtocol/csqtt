@@ -188,6 +188,37 @@ class VpnPlanReuseTest {
         assertNotEquals(plan(base), plan(base, dns = "8.8.8.8"))
         // an app installed since the last build changes the plan
         assertNotEquals(plan(base), plan(base, installed = setOf("com.vk.im")))
+        // P1 Bt part 2: so does the profile's MTU
+        assertNotEquals(plan(base), plan(base.copy(mtu = 1280)))
+    }
+}
+
+/** P1 Bt part 2: the profile's MTU reaches the interface; a value no interface should take is the default. */
+class VpnMtuTest {
+    @Test fun theInterfaceTakesTheProfilesMtu() {
+        assertEquals(1500, plan().mtu)
+        assertEquals(1280, plan(VpnSettings(mtu = 1280)).mtu)
+        assertEquals(1420, plan(VpnSettings(mtu = 1420)).mtu)
+        assertEquals(576, plan(VpnSettings(mtu = 576)).mtu)
+        for (outside in listOf(575, 1501, 9000, 0, -1)) assertEquals("$outside", 1500, plan(VpnSettings(mtu = outside)).mtu)
+    }
+
+    @Test fun aStoredValueOutsideTheRangeIsTheDefault() {
+        assertEquals(1500, VpnMtu.effective(null))
+        assertEquals(1280, VpnMtu.effective(1280))
+        assertEquals(1500, VpnMtu.effective(575))
+        assertEquals(1500, VpnMtu.effective(1501))
+        assertEquals(listOf(1500, 1280), VpnMtu.PRESETS)
+    }
+
+    @Test fun aCustomValueIsDigitsInTheRange() {
+        assertEquals(1400, VpnMtu.parse("1400"))
+        assertEquals(1280, VpnMtu.parse(" 1280 "))
+        assertEquals(576, VpnMtu.parse("576"))
+        assertEquals(1500, VpnMtu.parse("1500"))
+        for (text in listOf("", "575", "1501", "12a", "-1", "+1400", "1 400", "99999999999", "14.0")) {
+            assertNull(text, VpnMtu.parse(text))
+        }
     }
 }
 
