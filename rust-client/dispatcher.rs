@@ -255,7 +255,8 @@ pub struct UplinkState {
     pub cursor: usize,
     flows: HashMap<FlowKey, FlowState>,
     flow_evict_counter: u32,
-    fragments: FragmentRoutes,
+    /// The workers kernel IPv4 fragments follow (not the core's own wire pieces: send_fragments_to_workers)
+    ip_fragment_routes: FragmentRoutes<Option<FlowKey>>,
 }
 
 impl UplinkState {
@@ -276,7 +277,7 @@ impl UplinkState {
             // действительны.
             self.flows.clear();
             self.flow_evict_counter = 0;
-            self.fragments.clear();
+            self.ip_fragment_routes.clear();
         }
 
         for controller in self.rates.iter_mut() {
@@ -442,19 +443,24 @@ impl UplinkState {
             return self.select_deficit_waterfall(workers, total_len, packet_len, flow, now);
         };
         if !fragment.first && workers.len() > 1 {
-            // first: a changed worker set clears the routes along with the flows
+            // first: a changed worker count clears the routes along with the flows
             self.update_tokens(workers.len(), now);
-            if let Some(idx) = self.fragments.follow(fragment, |idx| {
+            if let Some((idx, head_flow)) = self.ip_fragment_routes.follow(fragment, |idx| {
                 workers
                     .get(idx)
                     .is_some_and(|worker| worker.channels.allocation.is_sendable())
             }) {
                 self.tokens[idx] = (self.tokens[idx] - total_len as f64).max(MAX_DEFICIT);
+                // the piece counts in its head's flowlet, which so stays FLOW_BURST_BYTES on one worker (review F1)
+                if let Some(state) = head_flow.and_then(|key| self.flows.get_mut(&key)) {
+                    state.burst_left = state.burst_left.saturating_sub(total_len);
+                    state.window_bytes += total_len;
+                }
                 return idx;
             }
         }
         let idx = self.select_deficit_waterfall(workers, total_len, packet_len, flow, now);
-        self.fragments.record(fragment, idx);
+        self.ip_fragment_routes.record(fragment, idx, flow);
         idx
     }
 

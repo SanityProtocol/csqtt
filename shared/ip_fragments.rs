@@ -4,9 +4,10 @@
 //! a flow key gives a later piece a flow of its own (port-less; a short tail is "small UDP", pinned) on another worker
 //! than its head. The client meets them at its TUN (an MTU of 1280 and an app that sends a larger datagram), the server
 //! on a client's downlink (a datagram the internet delivered in pieces). Each side remembers the worker a datagram's first
-//! piece took and sends the later pieces there, as the core's own split keeps a packet's pieces on one worker. Pieces
-//! come back to back, so a few slots, direct-mapped by the IP ID, cover the datagrams in flight. IPv6 is not covered: its
-//! fragments carry no ports at all, so they share one flow key already.
+//! piece took and sends the later pieces there, as the core's own split keeps a packet's pieces on one worker; with it the
+//! first piece's flow, so a later piece counts in that flow's burst. Pieces come back to back, so a few slots, direct-
+//! mapped by the IP ID, cover the datagrams in flight. IPv6 is not covered: the flow keys read a fragment header's next
+//! header (44) as the protocol and no ports, so every piece between two hosts shares one key already.
 
 const SLOTS: usize = 16;
 
@@ -45,32 +46,38 @@ pub(crate) fn ipv4_fragment(packet: &[u8]) -> Option<Fragment> {
     })
 }
 
-/// The worker each recent datagram's first piece took. A worker index is the caller's; clear the routes whenever the
-/// indices change meaning (a worker set that changed).
-#[derive(Default)]
-pub(crate) struct FragmentRoutes {
-    slots: [Option<(DatagramId, usize)>; SLOTS],
+/// The worker each recent datagram's first piece took, and that piece's flow (`F`, the caller's flow key). A worker index
+/// is the caller's; clear the routes whenever the indices may change meaning.
+pub(crate) struct FragmentRoutes<F> {
+    slots: [Option<(DatagramId, usize, F)>; SLOTS],
 }
 
-impl FragmentRoutes {
+impl<F: Copy> Default for FragmentRoutes<F> {
+    fn default() -> Self {
+        Self { slots: [None; SLOTS] }
+    }
+}
+
+impl<F: Copy> FragmentRoutes<F> {
     fn slot(datagram: &DatagramId) -> usize {
         datagram.id as usize % SLOTS
     }
 
-    /// Remembers a first piece's worker; a later piece records nothing.
-    pub(crate) fn record(&mut self, fragment: Fragment, idx: usize) {
+    /// Remembers a first piece's worker and flow; a later piece records nothing.
+    pub(crate) fn record(&mut self, fragment: Fragment, idx: usize, flow: F) {
         if fragment.first {
-            self.slots[Self::slot(&fragment.datagram)] = Some((fragment.datagram, idx));
+            self.slots[Self::slot(&fragment.datagram)] = Some((fragment.datagram, idx, flow));
         }
     }
 
-    /// The worker a later piece follows: its first piece's, while `usable` says that worker can still take it.
-    pub(crate) fn follow(&self, fragment: Fragment, usable: impl Fn(usize) -> bool) -> Option<usize> {
+    /// The worker a later piece follows and the flow it counts in: its first piece's, while `usable` says that worker can
+    /// still take it.
+    pub(crate) fn follow(&self, fragment: Fragment, usable: impl Fn(usize) -> bool) -> Option<(usize, F)> {
         if fragment.first {
             return None;
         }
         match self.slots[Self::slot(&fragment.datagram)] {
-            Some((datagram, idx)) if datagram == fragment.datagram && usable(idx) => Some(idx),
+            Some((datagram, idx, flow)) if datagram == fragment.datagram && usable(idx) => Some((idx, flow)),
             _ => None,
         }
     }
@@ -129,15 +136,16 @@ mod tests {
 
     #[test]
     fn a_later_piece_follows_its_first_piece_while_that_worker_can_take_it() {
-        let mut routes = FragmentRoutes::default();
+        // the flow is the caller's key: here a number per first piece
+        let mut routes = FragmentRoutes::<u32>::default();
         let all = |_: usize| true;
-        // the first piece is remembered and its tail follows it; a first piece takes the caller's choice, a tail never
-        // records
-        routes.record(fragment(7, 0, true), 3);
-        assert_eq!(routes.follow(fragment(7, 157, false), all), Some(3));
+        // the first piece is remembered with its flow and its tail follows it; a first piece takes the caller's
+        // choice, a tail never records
+        routes.record(fragment(7, 0, true), 3, 70);
+        assert_eq!(routes.follow(fragment(7, 157, false), all), Some((3, 70)));
         assert_eq!(routes.follow(fragment(7, 0, true), all), None);
-        routes.record(fragment(7, 157, false), 9);
-        assert_eq!(routes.follow(fragment(7, 314, false), all), Some(3));
+        routes.record(fragment(7, 157, false), 9, 99);
+        assert_eq!(routes.follow(fragment(7, 314, false), all), Some((3, 70)));
         // a worker that can no longer take it (or is gone) leaves the tail to the caller's choice
         assert_eq!(routes.follow(fragment(7, 157, false), |idx| idx != 3), None);
         // another datagram (no entry, another source, or one that took the slot over) is not followed
@@ -146,15 +154,15 @@ mod tests {
         other_src[12] = 192;
         assert_eq!(routes.follow(ipv4_fragment(&other_src).unwrap(), all), None);
         let later = 7 + SLOTS as u16;
-        routes.record(fragment(later, 0, true), 5);
+        routes.record(fragment(later, 0, true), 5, 50);
         assert_eq!(routes.follow(fragment(7, 157, false), all), None);
-        assert_eq!(routes.follow(fragment(later, 157, false), all), Some(5));
-        // datagrams in flight at once keep their own workers
+        assert_eq!(routes.follow(fragment(later, 157, false), all), Some((5, 50)));
+        // datagrams in flight at once keep their own workers and flows
         for id in 100..100 + SLOTS as u16 {
-            routes.record(fragment(id, 0, true), id as usize);
+            routes.record(fragment(id, 0, true), id as usize, u32::from(id) * 10);
         }
         for id in 100..100 + SLOTS as u16 {
-            assert_eq!(routes.follow(fragment(id, 157, false), all), Some(id as usize));
+            assert_eq!(routes.follow(fragment(id, 157, false), all), Some((id as usize, u32::from(id) * 10)));
         }
         routes.clear();
         assert_eq!(routes.follow(fragment(100, 157, false), all), None);

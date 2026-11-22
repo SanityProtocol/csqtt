@@ -148,7 +148,7 @@ struct ClientRoute {
     cursor: usize,
     flows: HashMap<FlowKey, FlowState>,
     flow_evict_counter: u32,
-    fragments: crate::ip_fragments::FragmentRoutes,
+    ip_fragment_routes: crate::ip_fragments::FragmentRoutes<Option<FlowKey>>,
 }
 
 impl ClientRoute {
@@ -185,7 +185,7 @@ impl ClientRoute {
         self.cursor = self.cursor.min(self.endpoints.len().saturating_sub(1));
         self.flows.clear();
         self.flow_evict_counter = 0;
-        self.fragments.clear();
+        self.ip_fragment_routes.clear();
     }
 
     fn unregister(&mut self, registration_id: RegistrationId) -> bool {
@@ -206,7 +206,7 @@ impl ClientRoute {
         self.cursor = self.cursor.min(self.endpoints.len().saturating_sub(1));
         self.flows.clear();
         self.flow_evict_counter = 0;
-        self.fragments.clear();
+        self.ip_fragment_routes.clear();
         self.endpoints.len() != previous_len
     }
 
@@ -282,15 +282,20 @@ impl ClientRoute {
         // P1 Bt part 2: a later piece of a datagram the internet delivered in pieces follows its first piece's stream
         let fragment = crate::ip_fragments::ipv4_fragment(packet);
         if let Some(fragment) = fragment
-            && let Some(idx) = self.fragments.follow(fragment, |idx| idx < count)
+            && let Some((idx, head_flow)) = self.ip_fragment_routes.follow(fragment, |idx| idx < count)
         {
             self.refill(idx, now);
             self.tokens[idx] = (self.tokens[idx] - len_f).max(MAX_DEFICIT);
+            // the piece counts in its head's flowlet, which so stays FLOW_BURST_BYTES on one stream (review F1)
+            if let Some(state) = head_flow.and_then(|key| self.flows.get_mut(&key)) {
+                state.burst_left = state.burst_left.saturating_sub(packet.len());
+                state.window_bytes += packet.len();
+            }
             return self.endpoints.get(idx).copied();
         }
         let idx = self.select_index(now, packet, len_f);
-        if let Some(fragment) = fragment {
-            self.fragments.record(fragment, idx);
+        if let Some(fragment) = fragment.filter(|fragment| fragment.first) {
+            self.ip_fragment_routes.record(fragment, idx, flow_key(packet));
         }
         self.endpoints.get(idx).copied()
     }
@@ -739,16 +744,20 @@ mod tests {
             assert!(table.register(ip(2), w as _, w as _, w as _, w as _));
         }
         let start = std::time::Instant::now();
-        let mut heads = std::collections::HashSet::new();
+        let mut heads = Vec::new();
         for id in 0..300u16 {
             let now = start + std::time::Duration::from_micros(u64::from(id) * 700);
             let head = table.select_packet(2, now, &udp_piece(id, 0, true, 1500)).unwrap().worker_id;
             let middle = table.select_packet(2, now, &udp_piece(id, 185, true, 1500)).unwrap().worker_id;
             let tail = table.select_packet(2, now, &udp_piece(id, 370, false, 68)).unwrap().worker_id;
             assert_eq!((middle, tail), (head, head), "datagram {id}");
-            heads.insert(head);
+            heads.push(head);
         }
-        assert!(heads.len() > 1, "the flow still moves between streams in bursts: {heads:?}");
+        // the later pieces count in their head's flowlet (review F1): the flow moves on after FLOW_BURST_BYTES of whole
+        // datagrams (3068 B each), not after that many bytes of first pieces alone
+        let runs: Vec<usize> = heads.chunk_by(|a, b| a == b).map(<[u16]>::len).collect();
+        assert!(runs.len() > 10, "the flow still moves between streams in bursts: {runs:?}");
+        assert!(runs.iter().all(|&run| run <= FLOW_BURST_BYTES / 3068 + 1), "a burst of whole datagrams: {runs:?}");
     }
 
     #[test]
