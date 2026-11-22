@@ -185,11 +185,10 @@ internal fun ConnectionTab(
                         99,
                         true,
                     )
-                    Toast.makeText(
-                        context,
+                    context.showRaisedToast(
                         "Android заблокировал запуск VPN. Проверьте ограничения батареи приложения.",
                         Toast.LENGTH_LONG,
-                    ).show()
+                    )
                 }
         }
     }

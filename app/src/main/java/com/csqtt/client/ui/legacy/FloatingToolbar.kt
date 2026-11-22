@@ -34,6 +34,7 @@ import com.csqtt.client.ui.legacy.design.CsqttSizes
 import android.Manifest
 import android.content.pm.PackageManager
 import android.widget.Toast
+import com.csqtt.client.showRaisedToast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -104,7 +105,7 @@ fun FloatingToolbar(
         if (isGranted) {
             showQrScanner = true
         } else {
-            Toast.makeText(context, "Требуется разрешение на камеру для сканирования QR-кода", Toast.LENGTH_SHORT).show()
+            context.showRaisedToast("Требуется разрешение на камеру для сканирования QR-кода", Toast.LENGTH_SHORT)
         }
     }
 
@@ -192,7 +193,7 @@ fun FloatingToolbar(
                     scannedLink = rawLink.trim()
                     true
                 } else {
-                    Toast.makeText(context, "QR-код не содержит ссылку CSQTT", Toast.LENGTH_SHORT).show()
+                    context.showRaisedToast("QR-код не содержит ссылку CSQTT", Toast.LENGTH_SHORT)
                     false
                 }
             }
@@ -282,9 +283,9 @@ fun FloatingToolbar(
                                 scope.launch {
                                     when {
                                         settingsStore.addProfile() == null ->
-                                            Toast.makeText(context, "Все 32 профиля заняты", Toast.LENGTH_SHORT).show()
+                                            context.showRaisedToast("Все 32 профиля заняты", Toast.LENGTH_SHORT)
                                         runName != null ->
-                                            Toast.makeText(context, "Туннель остаётся на «$runName»", Toast.LENGTH_SHORT).show()
+                                            context.showRaisedToast("Туннель остаётся на «$runName»", Toast.LENGTH_SHORT)
                                     }
                                 }
                             } else {
@@ -517,12 +518,10 @@ fun FloatingToolbar(
                             OutlinedButton(
                                 onClick = {
                                     when {
-                                        tunnelRunning || TunnelManager.starting.value -> Toast.makeText(
-                                            context, "Отключите туннель, чтобы удалить профиль", Toast.LENGTH_SHORT,
-                                        ).show()
-                                        isDeploying -> Toast.makeText(
-                                            context, "Дождитесь конца установки", Toast.LENGTH_SHORT,
-                                        ).show()
+                                        tunnelRunning || TunnelManager.starting.value ->
+                                            context.showRaisedToast("Отключите туннель, чтобы удалить профиль", Toast.LENGTH_SHORT)
+                                        isDeploying ->
+                                            context.showRaisedToast("Дождитесь конца установки", Toast.LENGTH_SHORT)
                                         else -> scope.launch {
                                             deleteTakesVps = settingsStore.profileHoldsOnlyLinkToVps(p)
                                             confirmingDelete = true

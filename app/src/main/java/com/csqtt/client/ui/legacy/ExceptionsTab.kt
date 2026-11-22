@@ -99,6 +99,7 @@ import com.csqtt.client.ui.legacy.design.CsqttSpacing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -125,7 +126,17 @@ fun ExceptionsTab(
     val serverRoutingActiveLive by TunnelManager.serverRoutingActive.collectAsStateWithLifecycle(
         initialValue = serverRoutingActive
     )
-    val isServerRouting = serverRoutingActive || serverRoutingActiveLive
+    // B5g: the server's rule is the run's, so it replaces the controls only on the profile the run is on; another profile
+    // opened during the run (an added one) keeps its own. Until the store says which profile is open, as before
+    val openProfile by remember(settingsStore) { settingsStore.selectedProfileIndex.map<Int, Int?> { it } }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val isRunProfile = openProfile.let { it == null || it == TunnelManager.runTargetProfile() }
+    val isServerRouting = (serverRoutingActive || serverRoutingActiveLive) && isRunProfile
+
+    /** B5g: an edit reaches the running VPN only when it is the run's own profile's (the run reads its own). */
+    fun reloadIfRunsHere() {
+        if (openProfile == TunnelManager.runTargetProfile()) TunnelManager.reloadVpn()
+    }
     val activeServerRule by TunnelManager.activeServerRoutingRule.collectAsStateWithLifecycle()
     // M-59: «Все с VPN» overrides both lists and keeps them
     val allApps by settingsStore.appRoutingAll.collectAsStateWithLifecycle(initialValue = false)
@@ -263,7 +274,7 @@ fun ExceptionsTab(
                     currentBlack.sorted().joinToString(","),
                     currentWhite.sorted().joinToString(","),
                 )
-                TunnelManager.reloadVpn()
+                reloadIfRunsHere()
             }
         }
     }
@@ -336,7 +347,7 @@ fun ExceptionsTab(
                 nextWhite.sorted().joinToString(","),
                 mode,
             )
-            if (mode != null) TunnelManager.reloadVpn()
+            if (mode != null) reloadIfRunsHere()
         }
     }
 
@@ -730,7 +741,7 @@ fun ExceptionsTab(
                             onCheckedChange = { enabled ->
                                 appPersistenceScope.launch {
                                     settingsStore.saveAppRoutingAll(enabled)
-                                    TunnelManager.reloadVpn()
+                                    reloadIfRunsHere()
                                 }
                             },
                         )

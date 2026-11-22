@@ -244,7 +244,10 @@ internal fun SettingsTabContent(
     val linkHashesRemoved by settingsStore.linkHashesRemoved.collectAsStateWithLifecycle(initialValue = emptySet())
     val linkVkAccessToken = parsedCsqttLink?.vkAccessToken.orEmpty()
     val serverWorkers by TunnelManager.serverAssignedWorkers.collectAsState()
-    val effectiveServerWorkers = serverWorkers.takeIf { tunnelRunning && it in 3..100 }
+    // B5g: the server's worker count is the run's: another profile opened during the run keeps its own «Потоки»
+    val effectiveServerWorkers = serverWorkers.takeIf {
+        tunnelRunning && it in 3..100 && activeProfile == TunnelManager.runTargetProfile()
+    }
     val linkTokenActive = participantMode && linkVkAccessToken.isNotEmpty() && receivedHashes.isEmpty()
     val effectiveVkAuthMode = if (
         participantMode && linkHashes.isNotEmpty() && vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS

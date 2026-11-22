@@ -573,14 +573,16 @@ object TunnelManager {
     }
 
     private fun recordTunnelDiagnostic(code: String, message: String) {
-        val diagnostic = "$code: ${message.trim()}".take(480)
+        // B5g: it can carry an exception's or the core's text, and it is kept: masked as a stop's cause is
+        val masked = StopCause.masked(message, ownerHashes)
+        val diagnostic = "$code: ${masked.trim()}".take(480)
         lastTunnelDiagnostic.value = diagnostic
         val context = activeContext() ?: return
         scope.launch {
             val store = activeSettingsStore ?: SettingsStore(context, ProfileScope.Run).also {
                 activeSettingsStore = it
             }
-            store.saveTunnelDiagnostic(code, message)
+            store.saveTunnelDiagnostic(code, masked)
         }
     }
 

@@ -34,6 +34,9 @@ internal class CaptchaEpisode {
     var live = false
         private set
     private var notified = false
+    // B5g (the operator, 2026-11-22: "one alert per run is fine"): a captcha for more workers asks every ~2 min while the
+    // run is connected, each ask a new episode; only the run's first notice alerts
+    private var alertedThisRun = false
 
     /** An ask. True when it posts the episode's one notification: the first ask that finds the app not in front. */
     @Synchronized
@@ -56,9 +59,15 @@ internal class CaptchaEpisode {
     @Synchronized
     fun settled(): Boolean = !live && end()
 
+    /** The notice [ask] asked for stays quiet when this run already alerted once; it marks the run as alerted. */
+    @Synchronized
+    fun takeQuiet(): Boolean = alertedThisRun.also { alertedThisRun = true }
+
+    /** The run stops or is replaced: the next run's first notice alerts again. */
     @Synchronized
     fun stop(): Boolean {
         live = false
+        alertedThisRun = false
         return end()
     }
 
@@ -142,7 +151,7 @@ object ManlCaptchaWebViewManager {
     private const val NOTIFICATION_ID = CsqttConstants.Notifications.CAPTCHA_NOTIFICATION_ID
     private const val CHANNEL_ID = CsqttConstants.Notifications.CAPTCHA_CHANNEL_ID
 
-    private fun showCaptchaNotification(context: Context) {
+    private fun showCaptchaNotification(context: Context, quiet: Boolean) {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         val channel = NotificationChannel(
@@ -170,6 +179,7 @@ object ManlCaptchaWebViewManager {
             .setContentIntent(openPendingIntent)
             // a tap opens the screen and leaves the notice up: later asks of the episode post nothing new (review F1)
             .setAutoCancel(false)
+            .setSilent(quiet)
             .addAction(0, "Отменить и выключить", cancelPendingIntent)
             .build()
 
@@ -190,14 +200,14 @@ object ManlCaptchaWebViewManager {
             appContext = app
             val deferred = CompletableDeferred<Result<String>>()
 
-            val notify = synchronized(episode) {
+            val (notify, quiet) = synchronized(episode) {
                 pendingResult.getAndSet(deferred)?.cancel()
                 idleJob?.cancel()
                 idleJob = null
-                episode.ask(appInFront = MainActivity.isForeground || screenStarted).also {
-                    liveAskState.value = redirectUri
-                    neededState.value = true
-                }
+                val notify = episode.ask(appInFront = MainActivity.isForeground || screenStarted)
+                liveAskState.value = redirectUri
+                neededState.value = true
+                notify to (notify && episode.takeQuiet())
             }
             val intent = promptIntent(app)
             pendingIntentToStart = intent
@@ -205,7 +215,7 @@ object ManlCaptchaWebViewManager {
             var solved = false
             try {
                 // inside the try, so a failure here still ends the ask (review H4)
-                if (notify) showCaptchaNotification(app)
+                if (notify) showCaptchaNotification(app, quiet)
                 // an open screen loads this ask itself
                 if (MainActivity.isForeground && !screenStarted) {
                     context.startActivity(intent)

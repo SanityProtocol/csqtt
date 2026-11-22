@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import com.csqtt.client.showRaisedToast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -89,10 +90,10 @@ fun ImportExportDialog(
 
     val executeImportJson: (String) -> Unit = { jsonText ->
         if (jsonText.isBlank()) {
-            Toast.makeText(context, "Конфигурация пуста", Toast.LENGTH_SHORT).show()
+            context.showRaisedToast("Конфигурация пуста", Toast.LENGTH_SHORT)
         } else if (com.csqtt.client.StoreBackup.isBackup(jsonText)) {
             if (tunnelRunning) {
-                Toast.makeText(context, "Отключите туннель, чтобы восстановить копию", Toast.LENGTH_SHORT).show()
+                context.showRaisedToast("Отключите туннель, чтобы восстановить копию", Toast.LENGTH_SHORT)
             } else {
                 pendingRestore = jsonText
             }
@@ -108,13 +109,13 @@ fun ImportExportDialog(
                         includeSettings = includeSettings
                     )
                     if (ok) {
-                        Toast.makeText(context, "Конфигурация успешно импортирована ✓", Toast.LENGTH_LONG).show()
+                        context.showRaisedToast("Конфигурация успешно импортирована ✓", Toast.LENGTH_LONG)
                         onDismissRequest()
                     } else {
-                        Toast.makeText(context, "Ошибка импорта: неверный формат JSON", Toast.LENGTH_SHORT).show()
+                        context.showRaisedToast("Ошибка импорта: неверный формат JSON", Toast.LENGTH_SHORT)
                     }
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Ошибка импорта: ${e.message}", Toast.LENGTH_SHORT).show()
+                    context.showRaisedToast("Ошибка импорта: ${e.message}", Toast.LENGTH_SHORT)
                 } finally {
                     isProcessing = false
                 }
@@ -132,7 +133,7 @@ fun ImportExportDialog(
                     executeImportJson(text)
                 }
             } catch (e: Exception) {
-                Toast.makeText(context, "Не удалось прочитать файл: ${e.message}", Toast.LENGTH_SHORT).show()
+                context.showRaisedToast("Не удалось прочитать файл: ${e.message}", Toast.LENGTH_SHORT)
             }
         }
     }
@@ -261,10 +262,10 @@ fun ImportExportDialog(
                                     try {
                                         val json = exportJson()
                                         if (context.copySensitive("CSQTT config", json)) {
-                                            Toast.makeText(context, "Конфиг скопирован в буфер ✓", Toast.LENGTH_SHORT).show()
+                                            context.showRaisedToast("Конфиг скопирован в буфер ✓", Toast.LENGTH_SHORT)
                                         }
                                     } catch (e: Exception) {
-                                        Toast.makeText(context, "Ошибка экспорта: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        context.showRaisedToast("Ошибка экспорта: ${e.message}", Toast.LENGTH_SHORT)
                                     } finally {
                                         isProcessing = false
                                     }
@@ -301,12 +302,12 @@ fun ImportExportDialog(
                                         val json = exportJson()
                                         val savedPath = saveJsonToDownloads(context, json, if (fullBackup) "csqtt-backup" else "csqtt-config")
                                         if (savedPath != null) {
-                                            Toast.makeText(context, "Сохранено: $savedPath ✓", Toast.LENGTH_LONG).show()
+                                            context.showRaisedToast("Сохранено: $savedPath ✓", Toast.LENGTH_LONG)
                                         } else {
-                                            Toast.makeText(context, "Не удалось сохранить файл", Toast.LENGTH_SHORT).show()
+                                            context.showRaisedToast("Не удалось сохранить файл", Toast.LENGTH_SHORT)
                                         }
                                     } catch (e: Exception) {
-                                        Toast.makeText(context, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        context.showRaisedToast("Ошибка: ${e.message}", Toast.LENGTH_SHORT)
                                     } finally {
                                         isProcessing = false
                                     }
@@ -345,7 +346,7 @@ fun ImportExportDialog(
                                 if (!clip.isNullOrBlank()) {
                                     executeImportJson(clip.trim())
                                 } else {
-                                    Toast.makeText(context, "Буфер обмена пуст", Toast.LENGTH_SHORT).show()
+                                    context.showRaisedToast("Буфер обмена пуст", Toast.LENGTH_SHORT)
                                 }
                             },
                             enabled = !isProcessing && anySection,
@@ -405,10 +406,10 @@ fun ImportExportDialog(
                     isProcessing = true
                     try {
                         if (settingsStore.restoreBackupJson(json)) {
-                            Toast.makeText(context, "Копия восстановлена ✓", Toast.LENGTH_LONG).show()
+                            context.showRaisedToast("Копия восстановлена ✓", Toast.LENGTH_LONG)
                             onDismissRequest()
                         } else {
-                            Toast.makeText(context, "Ошибка: файл не является копией csqtt", Toast.LENGTH_SHORT).show()
+                            context.showRaisedToast("Ошибка: файл не является копией csqtt", Toast.LENGTH_SHORT)
                         }
                     } finally {
                         isProcessing = false
