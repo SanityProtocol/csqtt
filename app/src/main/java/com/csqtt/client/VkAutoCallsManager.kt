@@ -36,11 +36,6 @@ object VkAutoCallsManager {
 
     /** B5e4: calls this app made for one run, with the token they were made with: what ends them. */
     data class CallSet(val calls: List<ActiveCall>, val token: String)
-    private data class PendingLog(val key: String, val message: String, val priority: Int, val isError: Boolean)
-
-    private val pendingLogs = ArrayList<PendingLog>()
-    private val pendingLogsLock = Any()
-
     /** The set the run is on: a stop ends it. A new set replaces it only when the run takes the new one (B5e4). */
     private var runSet: CallSet? = null
 
@@ -86,8 +81,6 @@ object VkAutoCallsManager {
         clearStoredTokenOnInvalid: Boolean = true,
     ): StartAttempt {
         if (token.isBlank()) return StartAttempt(null, tokenInvalid = true)
-
-        synchronized(pendingLogsLock) { pendingLogs.clear() }
 
         val count = callCountForWorkers(workers)
         val hashes = ArrayList<String>(count)
@@ -203,7 +196,6 @@ object VkAutoCallsManager {
         workers: Int,
         tokenStore: SettingsStore,
     ): VkHashPool.Fill {
-        synchronized(pendingLogsLock) { pendingLogs.clear() }
         val target = callCountForWorkers(workers)
         val requestPacer = VkRequestPacer(
             requestDelayForCallCount(target),
@@ -234,17 +226,6 @@ object VkAutoCallsManager {
             )
         }
         return fill
-    }
-
-    fun replayPendingLogs() {
-        val copy = synchronized(pendingLogsLock) {
-            val snapshot = ArrayList(pendingLogs)
-            pendingLogs.clear()
-            snapshot
-        }
-        copy.forEach { entry ->
-            TunnelManager.updateLog(entry.key, entry.message, entry.priority, entry.isError)
-        }
     }
 
     /** The run ends: the set it is on is ended. */
@@ -300,12 +281,9 @@ object VkAutoCallsManager {
         }
     }
 
+    // B5g: the log is no longer cleared at a start, so a line made while the run starts needs no replay after it
     private fun log(key: String, message: String, priority: Int, isError: Boolean) {
-        if (!TunnelManager.isLoggingEnabled) return
         TunnelManager.updateLog(key, message, priority, isError)
-        synchronized(pendingLogsLock) {
-            pendingLogs.add(PendingLog(key, message, priority, isError))
-        }
     }
 
     private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")

@@ -58,7 +58,6 @@ object DeployManager {
             writeError("Автосброс: предыдущий деплой завис >30 мин")
             forceReset()
         }
-        TunnelManager.clearLogs()
         isDeploying.value = true
         deployStartTime = System.currentTimeMillis()
         deployProgress.value = 0f

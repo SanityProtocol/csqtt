@@ -4,11 +4,11 @@ import com.csqtt.client.copySensitive
 import com.csqtt.client.shareLogFile
 import com.csqtt.client.showRaisedToast
 import android.widget.Toast
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,60 +23,42 @@ import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.DeployManager
-import com.csqtt.client.LogEntry
+import com.csqtt.client.LogBook
+import com.csqtt.client.LogText
 import com.csqtt.client.R
-import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.ui.legacy.components.CsqttEmptyState
 import com.csqtt.client.ui.legacy.components.CsqttScreen
-import com.csqtt.client.ui.legacy.components.CsqttSettingRow
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSpacing
 import com.csqtt.client.ui.legacy.design.CsqttTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 
-import androidx.compose.foundation.BorderStroke
+/** B5g: at most this often the tab copies the log while records keep coming; nothing while none do. */
+private const val LOG_VIEW_REFRESH_MS = 250L
 
 @Composable
-fun LogsTab(settingsStore: SettingsStore) {
-    val loggingEnabled by settingsStore.loggingEnabled.collectAsStateWithLifecycle(initialValue = true)
-    val scope = rememberCoroutineScope()
-
+fun LogsTab() {
     CsqttScreen {
-        AppSectionCard(
-            contentPadding = PaddingValues(horizontal = CsqttSpacing.Md, vertical = CsqttSpacing.Xs),
-            verticalArrangement = Arrangement.spacedBy(CsqttSpacing.None),
-        ) {
-            CsqttSettingRow(
-                title = stringResource(R.string.logs_enabled),
-                checked = loggingEnabled,
-                onCheckedChange = { enabled ->
-                    TunnelManager.isLoggingEnabled = enabled
-                    scope.launch {
-                        settingsStore.saveLoggingEnabled(enabled)
-                    }
-                },
-            )
-        }
-
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -93,15 +75,32 @@ fun LogsTab(settingsStore: SettingsStore) {
 @Composable
 private fun LogsTerminal() {
     val context = LocalContext.current
-    val currentLogs = TunnelManager.logs
+    // B5g: the log is read only while this tab is shown and the app is started; the book's version moves on every change,
+    // and a StateFlow keeps only the latest one while the copy below waits, so a burst costs one copy per refresh
+    val book = LogBook.app
+    val currentLogs by remember {
+        book.version.map { book.snapshot() }.onEach { delay(LOG_VIEW_REFRESH_MS) }
+    }.collectAsStateWithLifecycle(initialValue = remember { book.snapshot() })
     val listState = rememberLazyListState()
     val copiedMessage = stringResource(R.string.logs_copied)
     val isDeploying by DeployManager.isDeploying.collectAsStateWithLifecycle()
 
-    LaunchedEffect(currentLogs.size, isDeploying) {
-        if (isDeploying) {
-            val latestDeployIndex = currentLogs.indexOfLast { it.key.startsWith("deploy_") }
-            if (latestDeployIndex >= 0) listState.animateScrollToItem(latestDeployIndex)
+    // follows the newest record unless the user dragged the list up to read; a drag that ends at the bottom follows
+    // again. Only the user's drags decide it: the tab's own scroll to the end never does
+    var follow by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        var dragged = false
+        launch { listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) dragged = true } }
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling && dragged) {
+                dragged = false
+                follow = !listState.canScrollForward
+            }
+        }
+    }
+    LaunchedEffect(currentLogs, isDeploying) {
+        if (currentLogs.isNotEmpty() && (follow || isDeploying) && !listState.isScrollInProgress) {
+            listState.scrollToItem(currentLogs.lastIndex)
         }
     }
 
@@ -125,10 +124,10 @@ private fun LogsTerminal() {
             ) {
                 items(
                     items = currentLogs,
-                    key = { it.key },
-                    contentType = { "log_line" },
+                    key = { it.id },
+                    contentType = { if (it.separator) "log_section" else "log_line" },
                 ) { entry ->
-                    LogLine(entry)
+                    if (entry.separator) LogSection(entry) else LogLine(entry)
                 }
             }
         }
@@ -141,7 +140,7 @@ private fun LogsTerminal() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = { context.shareLogFile(logsText(currentLogs)) },
+                onClick = { context.shareLogFile(LogText.text(currentLogs)) },
                 enabled = currentLogs.isNotEmpty(),
                 modifier = Modifier.size(40.dp)
             ) {
@@ -155,7 +154,7 @@ private fun LogsTerminal() {
 
             IconButton(
                 onClick = {
-                    if (context.copySensitive("CSQTT Logs", logsText(currentLogs))) {
+                    if (context.copySensitive("CSQTT Logs", LogText.text(currentLogs))) {
                         context.showRaisedToast(copiedMessage, Toast.LENGTH_SHORT)
                     }
                 },
@@ -184,6 +183,3 @@ private fun LogsTerminal() {
         }
     }
 }
-
-private fun logsText(entries: List<LogEntry>): String =
-    entries.joinToString("\n") { "${it.message} (x${it.count})" }

@@ -19,14 +19,18 @@ class TunnelLogPolicyTest {
     }
 
     @Test
-    fun inactiveLoggingKeepsOnlyReadyStatsAndErrors() {
-        assertTrue(TunnelLogPolicy.isAllowedWhenInactiveLogging("ready", false, LogLevel.OK))
-        assertTrue(TunnelLogPolicy.isAllowedWhenInactiveLogging("stats", false, LogLevel.NET))
-        assertTrue(TunnelLogPolicy.isAllowedWhenInactiveLogging("turn_error", true, LogLevel.ERR))
-        assertTrue(TunnelLogPolicy.isAllowedWhenInactiveLogging("general_error", true, null))
-        assertFalse(TunnelLogPolicy.isAllowedWhenInactiveLogging("turn_refresh_status", false, LogLevel.LOG))
-        assertFalse(TunnelLogPolicy.isAllowedWhenInactiveLogging("wrap_status", false, LogLevel.OK))
-        assertFalse(TunnelLogPolicy.isAllowedWhenInactiveLogging("vk_js_call_progress", false, LogLevel.OK))
+    fun hidesOnlyStunCodesNotTheDigitsElsewhere() {
+        // M-88: the codes as the core prints them are recovery
+        assertTrue(TunnelLogPolicy.isInternalRecovery("[ВОРКЕР #3] Ошибка: TURN Allocate failed: STUN error 486"))
+        assertTrue(TunnelLogPolicy.isInternalRecovery("turn refresh failed: stun error 437"))
+        // "486" / "437" in a port, a byte count, an address or a word is not
+        assertFalse(TunnelLogPolicy.isInternalRecovery("[СЕТЬ] Подключение к 203.0.113.7:48612"))
+        assertFalse(TunnelLogPolicy.isInternalRecovery("[ВОРКЕР #2] Ошибка: connection refused 10.4.37.1:4370"))
+        assertFalse(TunnelLogPolicy.isInternalRecovery("[СЕТЬ] Активных: 10 · трафик 486,37 МБ"))
+        assertFalse(TunnelLogPolicy.isInternalRecovery("STUN error 4861"))
+        // a stream that went down shows, whatever digits or words it carries
+        assertFalse(TunnelLogPolicy.isInternalRecovery("[TURN][DOWN] Allocation истекает на 10.0.4.37:4370, timeout"))
+        assertTrue(TunnelLogPolicy.isTurnStreamFailure("[TURN][DOWN] Allocation истекает на 10.0.4.37:4370, timeout"))
     }
 
     @Test

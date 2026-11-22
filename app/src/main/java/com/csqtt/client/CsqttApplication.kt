@@ -2,7 +2,6 @@ package com.csqtt.client
 
 import android.app.Application
 import android.content.Context
-import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -28,15 +27,6 @@ class CsqttApplication : Application() {
         // B5h1: the cause of a stop an earlier process recorded is the state again, unless a run began meanwhile
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
             TunnelManager.restoreStoppedCause(runCatching { settingsStore.lastStopCause.first() }.getOrNull())
-        }
-        CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
-            try {
-                settingsStore.loggingEnabled.collect { enabled ->
-                    TunnelManager.isLoggingEnabled = enabled
-                }
-            } catch (e: Exception) {
-                Log.e("CsqttApp", "Не удалось отслеживать флаг логирования: ${e.message}")
-            }
         }
     }
 }

@@ -206,7 +206,6 @@ class TunnelService : Service() {
                         // restart (restoreTunnel) bring it back; every way a start ends saves false (stopTunnel)
                         store.saveTunnelWasRunning(true)
                         applyWifiRules(store.wifiRules.first())
-                        TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                         if (reconcileWifiAutoPause()) {
                             TunnelManager.starting.value = false
                             return@launch
@@ -242,7 +241,6 @@ class TunnelService : Service() {
                         val extraWorkers = !accountAutoJs && store.extraWorkers.first()
                         val maxWorkers = WorkerCountPolicy.defaultMaximum(extraWorkers)
                         val workersPerHash = WorkerCountPolicy.normalize(requestedWorkers, maximum = maxWorkers)
-                        TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                         if (accountAutoJs) {
                             store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_AUTO_JS)
                         } else if (hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) {
@@ -425,8 +423,7 @@ class TunnelService : Service() {
         if (isStopping || autoPausedForWifi || TunnelManager.stopping.value) return
         if (!TunnelManager.running.value && !TunnelManager.starting.value) return
         VkAutoCallsManager.finishActiveCalls()
-        // the new connection's log starts here, so the switch's own lines (its calls, its pool) stay (verify N6)
-        TunnelManager.clearLogs()
+        // B5g: nothing is cleared; restoreTunnel opens the new connection's heading before its calls and pool are logged
         if (!restoreTunnel(switching = true)) stopTunnel()
     }
 
@@ -464,7 +461,6 @@ class TunnelService : Service() {
                 }
                 autoPauseRequested = true
                 applyWifiRules(store.wifiRules.first())
-                TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                 if (reconcileWifiAutoPause()) return@launch
 
                 // a switch resolves the picked profile while the old run still runs: the old run keeps its identity until
@@ -512,7 +508,6 @@ class TunnelService : Service() {
                 val genId = store.reserveConnectionGeneration()
                 val salt = newTunnelSessionId()
                 val requestedVkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
-                TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                 val configuredHashMode = store.vkHashMode.first()
                 val vkAuthMode = when {
                     source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
@@ -916,9 +911,6 @@ class TunnelService : Service() {
         }
         if (!physicalNetworks.hasUsableNetwork()) {
             TunnelManager.suspendForNoNetwork(physicalNetworkPauseReason(isAirplaneModeOn()))
-        }
-        TunnelManager.scope.launch(Dispatchers.Main) {
-            VkAutoCallsManager.replayPendingLogs()
         }
         startStatsUpdater()
     }

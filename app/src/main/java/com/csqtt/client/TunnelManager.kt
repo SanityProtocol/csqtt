@@ -30,7 +30,6 @@ import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.mutableStateListOf
 
 @Immutable
 enum class LogLevel {
@@ -43,28 +42,36 @@ enum class LogLevel {
     ERR,
 }
 
-@Immutable
-data class LogEntry(
-    val key: String,
-    val message: String,
-    val count: Int = 1,
-    val priority: Int = 99, 
-    val isError: Boolean = false,
-    val level: LogLevel? = null,
-)
-
 private val LOG_STICKERS = Regex("[\\p{So}\\p{Sk}\\uFE0F\\u200D]")
 private val EMPTY_LOG_TAG = Regex("\\[\\s*]")
+private val LOG_SPACES = Regex("[^\\S\r\n]+")
 private val LOG_TIMESTAMP_PREFIX = Regex("^\\d{4}/\\d{2}/\\d{2}\\s\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?\\s")
+// the core's captcha lines carry their details in brackets; the log keeps the step
+private val CAPTCHA_DETAILS = Regex("\\s*\\([^)]+\\)\\s*")
+// «ChannelBind активен: канал 0x4001»: the number differs for every worker
+private val TURN_CHANNEL_NUMBER = Regex(":?\\s*канал 0x[0-9A-Fa-f]+", RegexOption.IGNORE_CASE)
+
+/** One set of owner hashes with its patterns: compiled once per set, not for every line (M-88). */
+private class OwnerHashMask(val hashes: List<String>, val patterns: List<Regex>)
+
+@Volatile
+private var ownerHashMask: OwnerHashMask? = null
 
 /**
  * A participant's log never shows the server owner's VK hashes, not even the prefix displayVkHash or the client prints:
  * every piece of one (its first 8 characters and on, with a trailing … or ...) becomes «от владельца».
  */
-internal fun maskOwnerHashes(text: String, ownerHashes: List<String>): String =
-    ownerHashes.map(String::trim).filter { it.length >= 16 }.fold(text) { out, hash ->
-        out.replace(Regex(Regex.escape(hash.take(8)) + "[A-Za-z0-9_-]*(?:…|\\.\\.\\.)?"), "от владельца")
-    }
+internal fun maskOwnerHashes(text: String, ownerHashes: List<String>): String {
+    if (ownerHashes.isEmpty()) return text
+    val mask = ownerHashMask?.takeIf { it.hashes === ownerHashes || it.hashes == ownerHashes }
+        ?: OwnerHashMask(
+            ownerHashes,
+            ownerHashes.map(String::trim).filter { it.length >= 16 }.map { hash ->
+                Regex(Regex.escape(hash.take(8)) + "[A-Za-z0-9_-]*(?:…|\\.\\.\\.)?")
+            },
+        ).also { ownerHashMask = it }
+    return mask.patterns.fold(text) { out, pattern -> out.replace(pattern, "от владельца") }
+}
 
 internal fun displayVkHash(hash: String): String = hash.trim().let { value ->
     if (value.length <= 10) value else value.take(10) + "…"
@@ -92,7 +99,7 @@ internal fun withoutLogStickers(message: String): String = message
         symbol.value.takeIf { it == "✓" || it == "✗" }.orEmpty()
     }
     .replace(EMPTY_LOG_TAG, "")
-    .replace(Regex("[^\\S\r\n]+"), " ")
+    .replace(LOG_SPACES, " ")
     .trim()
 
 /**
@@ -247,24 +254,6 @@ object TunnelManager {
         var silenceArmed = false
     }
 
-    private data class PendingLog(
-        val identity: ProcessIdentity?,
-        val key: String,
-        var message: String,
-        val priority: Int,
-        val isError: Boolean,
-        val level: LogLevel?,
-        var count: Int,
-    )
-
-    private const val LOG_UI_FLUSH_MS = 120L
-    private const val MAX_LOG_ENTRIES = 100
-    private const val MAX_PENDING_LOGS = 128
-    private const val MAX_LOG_MESSAGE_LENGTH = 4_096
-    private val pendingLogLock = Any()
-    private val pendingLogs = LinkedHashMap<String, PendingLog>()
-    private val pendingLogFlushScheduled = AtomicBoolean(false)
-
     @Volatile
     private var wrapAuthTimeoutCount = 0
     private var lastVpnStartAttemptMs = 0L
@@ -286,18 +275,9 @@ object TunnelManager {
     @Volatile
     private var lastAppliedDns: String? = null
 
-    @Volatile
-    var isLoggingEnabled = true
-        set(value) {
-            field = value
-            if (!value) clearLogs()
-        }
-
     val running = MutableStateFlow(false)
     val starting = MutableStateFlow(false)
     val stopping = MutableStateFlow(false)
-    val logs = mutableStateListOf<LogEntry>()
-    val unreadErrorCount = MutableStateFlow(0)
     val config = MutableStateFlow<String?>(null)
     val activeWorkers = MutableStateFlow(0)
     val autoPausedForWifi = MutableStateFlow(false)
@@ -377,6 +357,8 @@ object TunnelManager {
      * attempt (review F3).
      */
     internal fun beginStartRequest(context: Context) {
+        // B5g: the log keeps the last connection; this one starts under its own heading, before its VK calls are made
+        LogBook.app.beginConnection()
         runFatal.set(FirstFatal())
         failure.value = null
         // a new run needs no captcha yet: a need left by the last one ends here (review H1)
@@ -656,7 +638,7 @@ object TunnelManager {
     }
 
     fun clearUnreadErrors() {
-        unreadErrorCount.value = 0
+        LogBook.app.markErrorsRead()
     }
 
     private fun handleTunnelEvent(
@@ -669,6 +651,13 @@ object TunnelManager {
                 nativeProcessPid = event.pid
             }
             is TunnelEventParser.Event.Stats -> {
+                // B5g: a record when the count moves, not every STATS (every 500 ms while bytes move); the traffic
+                // itself is on «Подключение» and in the notification
+                if (activeWorkers.value != event.active) {
+                    val totalMB = (event.bytesUp + event.bytesDown) / (1024.0 * 1024.0)
+                    val msg = "Активных: ${event.active} · трафик %.2f МБ".format(totalMB)
+                    updateProcessLog(identity, "stats", "[СЕТЬ] $msg", 25, false, LogLevel.NET)
+                }
                 activeWorkers.value = event.active
                 if (workerRecoveryPolicy.observe(event.active)) {
                     workerRecoveryJob?.cancel()
@@ -690,11 +679,9 @@ object TunnelManager {
                     event.bytesDown,
                     SystemClock.elapsedRealtime(),
                 )
-                val totalMB = (event.bytesUp + event.bytesDown) / (1024.0 * 1024.0)
-                val msg = "Активных: ${event.active} | Трафик: %.2f МБ".format(totalMB)
-                updateProcessLog(identity, "stats", "[СЕТЬ] $msg", 25, false, LogLevel.NET)
             }
             is TunnelEventParser.Event.ActiveZero -> {
+                if (activeWorkers.value != 0) updateProcessLog(identity, "stats", "[СЕТЬ] Активных: 0", 25, false, LogLevel.NET)
                 activeWorkers.value = 0
                 scheduleWorkerZeroRecovery(identity)
             }
@@ -1187,6 +1174,7 @@ object TunnelManager {
     private var deploySessionId = 0L
 
     fun beginDeployLog(message: String) {
+        LogBook.app.beginDeploy()
         deploySessionId = deploySessionCounter.incrementAndGet()
         deployLineCounter.set(0L)
         addDeployInfoLog(message)
@@ -1252,90 +1240,10 @@ object TunnelManager {
         isError: Boolean,
         level: LogLevel?,
     ) {
+        // M-88: a line of a process that is no longer the run's is dropped, as before
         if (identity != null && !isCurrent(identity)) return
-        if (!isLoggingEnabled && !TunnelLogPolicy.isAllowedWhenInactiveLogging(key, isError, level)) return
         val cleanMessage = LogRedaction.redact(maskOwnerHashes(withoutLogStickers(message), ownerHashes))
-            .take(MAX_LOG_MESSAGE_LENGTH)
-        if (cleanMessage.isEmpty()) return
-        val pendingKey = "${identity?.generation ?: 0L}:$key:$priority:$isError:${level?.name.orEmpty()}"
-        synchronized(pendingLogLock) {
-            val pending = pendingLogs[pendingKey]
-            if (pending == null) {
-                if (pendingLogs.size >= MAX_PENDING_LOGS) {
-                    pendingLogs.remove(pendingLogs.entries.first().key)
-                }
-                pendingLogs[pendingKey] = PendingLog(identity, key, cleanMessage, priority, isError, level, 1)
-            } else {
-                pending.message = cleanMessage
-                pending.count += 1
-            }
-            scheduleLogFlushLocked()
-        }
-    }
-
-    private fun scheduleLogFlushLocked() {
-        if (!pendingLogFlushScheduled.compareAndSet(false, true)) return
-        scope.launch(Dispatchers.Main) {
-            delay(LOG_UI_FLUSH_MS)
-            flushPendingLogs()
-        }
-    }
-
-    private fun flushPendingLogs() {
-        val batch = synchronized(pendingLogLock) {
-            val values = pendingLogs.values.toList()
-            pendingLogs.clear()
-            pendingLogFlushScheduled.set(false)
-            values
-        }
-        batch.forEach(::applyPendingLog)
-    }
-
-    private fun applyPendingLog(pending: PendingLog) {
-        val identity = pending.identity
-        if (identity != null && !isCurrent(identity)) return
-        val index = logs.indexOfFirst { it.key == pending.key }
-        if (pending.isError && index == -1) {
-            unreadErrorCount.value++
-        }
-        if (index != -1) {
-            val entry = logs[index]
-            if (entry.priority == pending.priority) {
-                logs[index] = entry.copy(
-                    count = entry.count + pending.count,
-                    message = pending.message,
-                    isError = pending.isError,
-                    level = pending.level,
-                )
-            } else {
-                logs.removeAt(index)
-                insertSorted(
-                    LogEntry(
-                        pending.key,
-                        pending.message,
-                        entry.count + pending.count,
-                        pending.priority,
-                        pending.isError,
-                        pending.level,
-                    )
-                )
-            }
-        } else {
-            insertSorted(
-                LogEntry(
-                    pending.key,
-                    pending.message,
-                    pending.count,
-                    pending.priority,
-                    pending.isError,
-                    pending.level,
-                )
-            )
-        }
-
-        while (logs.size > MAX_LOG_ENTRIES) {
-            logs.removeAt(0)
-        }
+        LogBook.app.append(key, cleanMessage, priority, isError, level)
     }
 
     private fun isCurrent(identity: ProcessIdentity): Boolean =
@@ -1343,21 +1251,6 @@ object TunnelManager {
             process === identity.process &&
             processGeneration == identity.generation &&
             lifecycleState.accepts(identity.ticket)
-
-    private fun insertSorted(entry: LogEntry) {
-        val comparator = compareBy<LogEntry>({ it.priority }, { if (it.isError) 1 else 0 }, { it.key })
-        var inserted = false
-        for (i in logs.indices) {
-            if (comparator.compare(entry, logs[i]) < 0) {
-                logs.add(i, entry)
-                inserted = true
-                break
-            }
-        }
-        if (!inserted) {
-            logs.add(entry)
-        }
-    }
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
         val command = lifecycleCommand.incrementAndGet()
@@ -1380,7 +1273,8 @@ object TunnelManager {
                 val epoch = if (isSwitching) {
                     lifecycleState.requestRestart() ?: return@withLock
                 } else {
-                    clearLogs()
+                    // B5g: the log is not cleared at a start; beginStartRequest opened this connection's heading
+                    if (!running.value) activeWorkers.value = 0
                     config.value = null
                     wrapAuthTimeoutCount = 0
                     crashRestartStreak = 0
@@ -1729,10 +1623,6 @@ object TunnelManager {
                         lastDiagnostic = lineTrim.take(240)
                     }
 
-                    if (!isLoggingEnabled && !isCritical) {
-                        return@forEachLine
-                    }
-
                     if (TunnelLogPolicy.isInternalRecovery(lineTrim)) {
                         return@forEachLine
                     }
@@ -1814,7 +1704,7 @@ object TunnelManager {
                     when {
                         lineTrim.contains("[КАПЧА] AUTO:") -> {
                             var text = lineTrim.substringAfter("[КАПЧА] AUTO:").trim()
-                            text = text.replace(Regex("\\s*\\([^)]+\\)\\s*"), " ").trim()
+                            text = text.replace(CAPTCHA_DETAILS, " ").trim()
 
                             val isErr = text.contains("ошибка", true) ||
                                 text.contains("timeout", true) ||
@@ -1833,7 +1723,7 @@ object TunnelManager {
 
                         lineTrim.contains("[КАПЧА] RJS:") -> {
                             var text = lineTrim.substringAfter("[КАПЧА] RJS:").trim()
-                            text = text.replace(Regex("\\s*\\([^)]+\\)\\s*"), " ").trim()
+                            text = text.replace(CAPTCHA_DETAILS, " ").trim()
 
                             val stableKey = when {
                                 text.contains("Загрузка") || text.contains("fetch") -> "captcha_rjs_1"
@@ -1849,7 +1739,7 @@ object TunnelManager {
 
                         lineTrim.contains("[КАПЧА] WBV:") -> {
                             var text = lineTrim.substringAfter("[КАПЧА] WBV:").trim()
-                            text = text.replace(Regex("\\s*\\([^)]+\\)\\s*"), " ").trim()
+                            text = text.replace(CAPTCHA_DETAILS, " ").trim()
 
                             val isErr = text.contains("Ошибка")
                             val stableKey = when {
@@ -1922,7 +1812,9 @@ object TunnelManager {
                                 else -> null to 0
                             }
                             if (stableKey != null) {
-                                updateProcessLog(identity, stableKey, "[TURN] $text", priority, turnError, if (turnError) LogLevel.ERR else LogLevel.LOG)
+                                // B5g: every worker's channel says the same, so a round of them folds into one record
+                                val shown = if (turnError) text else text.replace(TURN_CHANNEL_NUMBER, "")
+                                updateProcessLog(identity, stableKey, "[TURN] $shown", priority, turnError, if (turnError) LogLevel.ERR else LogLevel.LOG)
                             }
                         }
                         lineTrim.contains("Рукопожатие...") ->
@@ -2576,14 +2468,9 @@ object TunnelManager {
         }
     }
 
+    /** «Очистить» on «Логи». */
     fun clearLogs() {
-        synchronized(pendingLogLock) {
-            pendingLogs.clear()
-        }
-        unreadErrorCount.value = 0
-        scope.launch(Dispatchers.Main) {
-            logs.clear()
-        }
+        LogBook.app.clear()
         if (!running.value) {
             activeWorkers.value = 0
         }

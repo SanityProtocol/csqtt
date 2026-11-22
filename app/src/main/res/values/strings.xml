@@ -19,7 +19,6 @@
     <string name="action_close">Закрыть</string>
     <string name="quick_settings">Быстрые настройки</string>
 
-    <string name="logs_enabled">Активное логирование</string>
     <string name="logs_empty_title">Событий пока нет</string>
     <string name="logs_copied">Логи скопированы</string>
 

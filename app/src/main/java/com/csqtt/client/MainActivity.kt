@@ -430,7 +430,7 @@ fun MainScreen(
     onFingerprintChange: (String) -> Unit = {},
     onVkAuthRequested: () -> Unit = {},
 ) {
-    val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
+    val unreadErrors by LogBook.app.unreadErrors.collectAsStateWithLifecycle()
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val tunnelAutoPausedForWifi by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
     val view = LocalView.current
@@ -701,7 +701,7 @@ fun MainScreen(
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }
                                 3 -> if (showLogsTab) {
-                                    LogsTab(settingsStore)
+                                    LogsTab()
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
                                 }

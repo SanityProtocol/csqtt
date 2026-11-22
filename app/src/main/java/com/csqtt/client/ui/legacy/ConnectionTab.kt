@@ -171,7 +171,6 @@ internal fun ConnectionTab(
 
     fun startTunnelService() {
         scope.launch {
-            TunnelManager.isLoggingEnabled = settingsStore.loggingEnabled.first()
             val nextGen = System.currentTimeMillis() / 1000L
             val salt = newTunnelSessionId()
             val intent = buildTunnelStartIntent(context, settingsStore, nextGen, salt) ?: run {

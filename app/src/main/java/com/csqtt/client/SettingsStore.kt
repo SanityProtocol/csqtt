@@ -277,7 +277,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         )
         private val ACTIVE_PROFILE = intPreferencesKey("active_profile")
         private val SHOW_SYSTEM_APPS = booleanPreferencesKey("show_system_apps")
-        private val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")
         private val INFO_ACTIONS_EXPANDED = booleanPreferencesKey("info_actions_expanded")
         private val INFO_PROJECT_EXPANDED = booleanPreferencesKey("info_project_expanded")
         private val CSQTT_LINK = profileString("csqtt_link")
@@ -355,7 +354,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val EXCLUDED_APPS = profileString("excluded_apps")
         private val WHITELIST_APPS = profileString("whitelist_apps")
 
-        private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
 
         private val CONNECTION_PASSWORD = profileString("connection_password")
         private val CONNECTION_PASSWORD_ENCRYPTED = profileString("connection_password_encrypted")
@@ -552,7 +550,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 5
+        internal const val STORE_SCHEMA = 6
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -628,6 +626,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
                     prefs.remove(booleanPreferencesKey(slotKeyName("participant_show_logs", profile)))
                 }
+            }
+            if (from < 6) {
+                // 2.6.0, B5g: the log is always recorded, so «Активное логирование» goes; «detailed_logs» was never read
+                prefs.remove(booleanPreferencesKey("logging_enabled"))
+                prefs.remove(booleanPreferencesKey("detailed_logs"))
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
         }
@@ -708,7 +711,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         internal val backupGlobalKeys: Map<String, StoredKind> by lazy {
             listOf(
                 ACTIVE_PROFILE to StoredKind.INT, SHOW_SYSTEM_APPS to StoredKind.BOOLEAN,
-                LOGGING_ENABLED to StoredKind.BOOLEAN, DETAILED_LOGS to StoredKind.BOOLEAN,
                 INFO_ACTIONS_EXPANDED to StoredKind.BOOLEAN, INFO_PROJECT_EXPANDED to StoredKind.BOOLEAN,
                 SUBSCRIPTION_META to StoredKind.STRING, AUTO_JS_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN,
                 TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
@@ -1302,7 +1304,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     /** B5h1: the cause of the last stop the user did not ask for, kept until the next start; "" when none. */
     val lastStopCause: Flow<String> = dataStore.data.map { it[LAST_STOP_CAUSE] ?: "" }
     val showSystemApps: Flow<Boolean> = dataStore.data.map { it[SHOW_SYSTEM_APPS] ?: false }
-    val loggingEnabled: Flow<Boolean> = dataStore.data.map { it[LOGGING_ENABLED] ?: true }
     val infoActionsExpanded: Flow<Boolean> = dataStore.data.map { it[INFO_ACTIONS_EXPANDED] ?: false }
     val infoProjectExpanded: Flow<Boolean> = dataStore.data.map { it[INFO_PROJECT_EXPANDED] ?: false }
     val csqttLink: Flow<String> = dataStore.data.map { prefs ->
@@ -2339,12 +2340,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
-    suspend fun saveLoggingEnabled(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            prefs[LOGGING_ENABLED] = enabled
-        }
-    }
-
     suspend fun saveInfoActionsExpanded(expanded: Boolean) {
         dataStore.edit { prefs ->
             prefs[INFO_ACTIONS_EXPANDED] = expanded
@@ -3288,8 +3283,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             settings.put("selected_fingerprint", prefs[getProfileKey(SELECTED_FINGERPRINT, p)] ?: "chrome")
             settings.put("selected_turn_subnet", prefs[getProfileKey(SELECTED_TURN_SUBNET, p)] ?: "")
             settings.put("turn_subnet_ip_limit", prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] ?: "ALL")
-            settings.put("logging_enabled", prefs[LOGGING_ENABLED] ?: true)
-            settings.put("detailed_logs", prefs[DETAILED_LOGS] ?: false)
             root.put("settings", settings)
         }
 
@@ -3412,8 +3405,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     if (s.has("selected_fingerprint")) mutable[getProfileKey(SELECTED_FINGERPRINT, p)] = s.getString("selected_fingerprint")
                     if (s.has("selected_turn_subnet")) mutable[getProfileKey(SELECTED_TURN_SUBNET, p)] = s.getString("selected_turn_subnet")
                     if (s.has("turn_subnet_ip_limit")) mutable[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] = s.getString("turn_subnet_ip_limit")
-                    if (s.has("logging_enabled")) mutable[LOGGING_ENABLED] = s.getBoolean("logging_enabled")
-                    if (s.has("detailed_logs")) mutable[DETAILED_LOGS] = s.getBoolean("detailed_logs")
                 }
             }
             true

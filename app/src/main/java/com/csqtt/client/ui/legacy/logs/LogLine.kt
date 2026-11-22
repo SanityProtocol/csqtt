@@ -1,11 +1,13 @@
 package com.csqtt.client.ui.legacy
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -23,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.csqtt.client.LogEntry
 import com.csqtt.client.LogLevel
+import com.csqtt.client.LogText
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSpacing
 import com.csqtt.client.ui.legacy.design.CsqttTheme
@@ -89,13 +92,14 @@ private fun parseMessageTag(rawMessage: String, level: LogLevel): Pair<String, S
     return level.name to trimmed
 }
 
+private val ANSI_COLOR = Regex("\u001B\\[([0-9;]+)m")
+
 private fun parseAnsiLogBody(
     text: String,
     defaultColor: Color,
     greenColor: Color,
     redColor: Color,
 ): AnnotatedString {
-    val ansiRegex = Regex("\u001B\\[([0-9;]+)m")
     if (!text.contains("\u001B[")) {
         return AnnotatedString(text)
     }
@@ -103,7 +107,7 @@ private fun parseAnsiLogBody(
     var currentIndex = 0
     var currentColor = defaultColor
 
-    for (match in ansiRegex.findAll(text)) {
+    for (match in ANSI_COLOR.findAll(text)) {
         if (match.range.first > currentIndex) {
             val segment = text.substring(currentIndex, match.range.first)
             builder.pushStyle(SpanStyle(color = currentColor))
@@ -171,6 +175,14 @@ internal fun LogLine(
         horizontalArrangement = Arrangement.spacedBy(CsqttSpacing.Sm),
         verticalAlignment = Alignment.Top,
     ) {
+        // B5g: the log is chronological; each record says when (its last time, for a folded ×N)
+        Text(
+            text = remember(entry.timeMs) { LogText.time(entry.timeMs) },
+            color = terminalColors.terminalMuted,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 22.sp),
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+        )
         Surface(
             shape = CsqttShapes.Pill,
             color = tagColors.background,
@@ -231,5 +243,35 @@ internal fun LogLine(
                 }
             }
         }
+    }
+}
+
+/** B5g: a connection's or a deploy's heading in the log («Подключение #3 · 12:04:11»). */
+@Composable
+internal fun LogSection(
+    entry: LogEntry,
+    modifier: Modifier = Modifier,
+) {
+    val muted = CsqttTheme.extendedColors.terminalMuted
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = CsqttSpacing.Sm, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(CsqttSpacing.Sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = remember(entry.message, entry.timeMs) { "${entry.message} · ${LogText.time(entry.timeMs)}" },
+            color = muted,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(muted.copy(alpha = 0.35f)),
+        )
     }
 }

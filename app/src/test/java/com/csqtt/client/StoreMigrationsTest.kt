@@ -153,4 +153,20 @@ class StoreMigrationsTest {
         assertEquals(true, after["csqtt_link_mode_5"])   // step 3 made it a link profile
         assertEquals(true, after["show_deploy_tab"])      // the role stays the one shown
     }
+
+    @Test
+    fun `step 6 removes the logging switch and the never-read detailed flag, and nothing else`() {
+        val prefs = load(
+            """{"ints": {"store_schema_version": 5, "active_profile": 2},
+               "booleans": {"logging_enabled": false, "detailed_logs": true, "show_logs_tab": true}}""",
+        )
+        val before = asMap(prefs)
+        SettingsStore.migrateStore(prefs)
+        val after = asMap(prefs)
+        assertEquals(setOf("logging_enabled", "detailed_logs", "store_schema_version"), changedKeys(before, after))
+        assertNull(after["logging_enabled"])
+        assertNull(after["detailed_logs"])
+        assertEquals(true, after["show_logs_tab"])
+        assertEquals(SettingsStore.STORE_SCHEMA, after["store_schema_version"])
+    }
 }
