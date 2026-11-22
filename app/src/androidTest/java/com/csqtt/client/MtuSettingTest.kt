@@ -1,5 +1,7 @@
 package com.csqtt.client
 
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
@@ -14,7 +16,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Rule
 import org.junit.Test
@@ -22,7 +26,7 @@ import org.junit.runner.RunWith
 
 /**
  * P1 Bt part 2: the profile's MTU on the classic «Туннель» tab. A preset is stored as picked; «Своё значение» stores a
- * typed value only inside 576–1500; a profile opened with the same custom MTU shows it in the field.
+ * typed value only inside 576–1500; another profile shows its own value, never the last one's draft or choice.
  */
 @RunWith(AndroidJUnit4::class)
 class MtuSettingTest {
@@ -40,6 +44,7 @@ class MtuSettingTest {
 
         private const val SLOT = 14
         private const val OTHER = 15
+        private const val THIRD = 17
         private const val FIELD_LABEL = "MTU, 576–1500"
     }
 
@@ -53,6 +58,7 @@ class MtuSettingTest {
     fun restore() = runBlocking {
         store.deleteProfileFromClassic(SLOT)
         store.deleteProfileFromClassic(OTHER)
+        store.deleteProfileFromClassic(THIRD)
     }
 
     private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
@@ -61,6 +67,9 @@ class MtuSettingTest {
         compose.onAllNodes(hasSetTextAction() and hasText(FIELD_LABEL, substring = true)).fetchSemanticsNodes().isNotEmpty()
 
     private fun field() = compose.onNode(hasSetTextAction() and hasText(FIELD_LABEL, substring = true))
+
+    private fun fieldText(): String? = compose.onAllNodes(hasSetTextAction() and hasText(FIELD_LABEL, substring = true))
+        .fetchSemanticsNodes().firstOrNull()?.config?.getOrNull(SemanticsProperties.EditableText)?.text
 
     private fun stored(profile: Int): Int = runBlocking { SettingsStore(context, ProfileScope.Fixed(profile)).vpnMtu.first() }
 
@@ -80,6 +89,7 @@ class MtuSettingTest {
             // a fresh install's first-run explainer would cover the tab
             store.markPermissionIntroShown()
             store.clearProfile(OTHER)
+            store.clearProfile(THIRD)
             store.clearProfile(SLOT)
             store.saveActiveProfile(SLOT)
             store.saveCsqttLinkMode(false)
@@ -107,17 +117,43 @@ class MtuSettingTest {
             }
             field().performTextReplacement("600")
             compose.waitUntil(5_000) { stored(SLOT) == 600 }
+            // an invalid draft is left in the field: only a profile's own value replaces it (review F1)
+            field().performTextReplacement("60")
+            compose.waitForIdle()
+            assertEquals(600, stored(SLOT))
 
-            // another profile with the same custom MTU opens with it in the field (the field's draft starts over)
+            // another profile with the same custom MTU opens with its own value in the field, not SLOT's draft
             runBlocking {
                 SettingsStore(context, ProfileScope.Fixed(OTHER)).saveVpnMtu(600)
                 store.saveActiveProfile(OTHER)
             }
-            compose.waitUntil(5_000) { fieldShown() }
-            compose.waitUntil(5_000) {
-                runCatching { field().assertTextContains("600") }.isSuccess
+            compose.waitUntil(5_000) { fieldText() == "600" }
+            // a profile at a preset shows it with the field closed: «Своё значение» picked on SLOT stays SLOT's
+            runBlocking {
+                SettingsStore(context, ProfileScope.Fixed(THIRD)).saveVpnMtu(1280)
+                store.saveActiveProfile(THIRD)
             }
-            assertEquals(600, stored(OTHER))
+            compose.waitUntil(5_000) { !fieldShown() && shown("1280") }
+            assertEquals(1280, stored(THIRD))
         }
+    }
+
+    @Test
+    fun anExportCarriesTheProfilesMtuOrNullForTheDefault() = runBlocking {
+        store.clearProfile(SLOT)
+        store.saveActiveProfile(SLOT)
+        suspend fun export() = store.exportConfigJson(true, false, false, false)
+        suspend fun import(json: String) = assertTrue(store.importConfigJson(json, true, false, false, false))
+        val atDefault = export()
+        assertTrue(JSONObject(atDefault).getJSONObject("tunnel").isNull("vpn_mtu"))
+        store.saveVpnMtu(1280)
+        assertEquals(1280, JSONObject(export()).getJSONObject("tunnel").getInt("vpn_mtu"))
+        // a default profile's file brings the profile back to the default (review F2)
+        import(atDefault)
+        assertEquals(1500, stored(SLOT))
+        // a file from before 2.6.0 (no key) leaves the profile's own value
+        store.saveVpnMtu(1280)
+        import(JSONObject(atDefault).apply { getJSONObject("tunnel").remove("vpn_mtu") }.toString())
+        assertEquals(1280, stored(SLOT))
     }
 }

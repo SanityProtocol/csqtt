@@ -3223,8 +3223,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             tunnel.put("obfs_mode", prefs[getProfileKey(OBFS_MODE, p)] ?: CsqttConstants.Tunnel.DEFAULT_OBFS_MODE)
             tunnel.put("turn_transport", prefs[getProfileKey(TURN_TRANSPORT, p)] ?: CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT)
             tunnel.put("dpi_split", DpiSplitMode.fromStored(prefs[getProfileKey(DPI_SPLIT, p)]).storedValue)
-            // only a value the profile chose: a default is the importing app's own
-            prefs[getProfileKey(VPN_MTU, p)]?.takeIf { it in VpnMtu.RANGE }?.let { tunnel.put("vpn_mtu", it) }
+            // a value the profile chose, or null: a default is the importing app's own (review F2)
+            tunnel.put("vpn_mtu", prefs[getProfileKey(VPN_MTU, p)]?.takeIf { it in VpnMtu.RANGE } ?: JSONObject.NULL)
             tunnel.put("srtp_mode", prefs[getProfileKey(SRTP_MODE, p)] ?: CsqttConstants.SrtpMode.DEFAULT)
             tunnel.put("custom_turn_ips", prefs[getProfileKey(CUSTOM_TURN_IPS, p)] ?: "")
             tunnel.put("sni", prefs[getProfileKey(SNI, p)] ?: "")
@@ -3342,8 +3342,13 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     if (tunnel.has("dpi_split")) {
                         mutable[getProfileKey(DPI_SPLIT, p)] = DpiSplitMode.fromStored(tunnel.optString("dpi_split")).storedValue
                     }
+                    // null: the exported profile ran at the default; a file without the key (before 2.6.0) says nothing
                     if (tunnel.has("vpn_mtu")) {
-                        tunnel.optInt("vpn_mtu", -1).takeIf { it in VpnMtu.RANGE }?.let { mutable[getProfileKey(VPN_MTU, p)] = it }
+                        if (tunnel.isNull("vpn_mtu")) {
+                            mutable.remove(getProfileKey(VPN_MTU, p))
+                        } else {
+                            tunnel.optInt("vpn_mtu", -1).takeIf { it in VpnMtu.RANGE }?.let { mutable[getProfileKey(VPN_MTU, p)] = it }
+                        }
                     }
                     if (tunnel.has("srtp_mode")) mutable[getProfileKey(SRTP_MODE, p)] = tunnel.getString("srtp_mode")
                     if (tunnel.has("custom_turn_ips")) mutable[getProfileKey(CUSTOM_TURN_IPS, p)] = tunnel.getString("custom_turn_ips")

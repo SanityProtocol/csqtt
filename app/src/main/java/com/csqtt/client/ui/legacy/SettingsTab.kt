@@ -973,7 +973,8 @@ internal fun SettingsTabContent(
                     onSelected = { key ->
                         val preset = key.toIntOrNull()
                         mtuCustomPicked = preset == null
-                        if (preset != null) scope.launch { settingsStore.saveVpnMtu(preset) }
+                        // the value shown is stored only when it changes: a profile left at the default follows it (review)
+                        if (preset != null && preset != vpnMtu) scope.launch { settingsStore.saveVpnMtu(preset) }
                     },
                 )
                 if (mtuCustom) {
