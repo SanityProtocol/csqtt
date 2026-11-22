@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal object LogTail {
     const val RECORDS = 300
     const val ERROR_GAP_MS = 60_000L
-    /** A stop's own last lines (the core's exit, the VPN's) come just after it. */
+    /** A stop's own last lines (the VPN's, the app's; the core's are dropped once its run ends) come just after it. */
     const val STOP_SETTLE_MS = 2_000L
     private const val FILE = "log-tail.json"
 
@@ -34,7 +34,7 @@ internal object LogTail {
 
     @Volatile
     private var savedVersion = -1L
-    private val savePending = AtomicBoolean(false)
+    private val delayedSavePending = AtomicBoolean(false)
     private val errorGate = ErrorWriteGate(ERROR_GAP_MS)
 
     /** At the process's start: what the last process left goes in front of this one's records. */
@@ -46,12 +46,20 @@ internal object LogTail {
         }
     }
 
-    /** A run stopped, or the app left the screen: written once things settle, if anything changed. */
+    /**
+     * The app left the screen (now), or a run stopped (once its last lines are in): written if anything changed. Only
+     * the delayed requests share one write: a write for now never waits behind a stop's, since the user who stops and
+     * then swipes the app away ends the process within those seconds (review F1).
+     */
     fun requestSave(delayMs: Long = 0L) {
-        if (!savePending.compareAndSet(false, true)) return
+        if (delayMs <= 0L) {
+            TunnelManager.scope.launch(writer) { saveNow() }
+            return
+        }
+        if (!delayedSavePending.compareAndSet(false, true)) return
         TunnelManager.scope.launch(writer) {
             delay(delayMs)
-            savePending.set(false)
+            delayedSavePending.set(false)
             saveNow()
         }
     }

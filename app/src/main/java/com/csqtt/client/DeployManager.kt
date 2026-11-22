@@ -43,7 +43,9 @@ object DeployManager {
         val file = errorsFile ?: return
         try {
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            file.appendText("[$timestamp] $msg\n")
+            // B5g (the log policy; B5c's backlog): this file sits in the app's external files, so it is redacted as
+            // «Логи» is — the deploy's remote output and SSH errors can carry a password or a link
+            file.appendText("[$timestamp] ${LogRedaction.redact(msg)}\n")
 
             if (file.length() > 500_000) {
                 val text = file.readText()
