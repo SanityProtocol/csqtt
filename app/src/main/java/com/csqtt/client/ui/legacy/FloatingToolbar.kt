@@ -334,6 +334,9 @@ fun FloatingToolbar(
                         infoContentDescription = "Как работает автопауза при Wi-Fi",
                     )
 
+                    // B5f2: where the pause acts, and the networks of the two list rules
+                    if (autoPauseOnWifi) WifiRuleControls(settingsStore)
+
                     CompactDropdownSetting(
                         title = BatterySaver.TITLE,
                         selectedKey = batterySaverMode,

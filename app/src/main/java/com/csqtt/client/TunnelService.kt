@@ -11,7 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
-import android.content.pm.ServiceInfo
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -23,6 +23,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
@@ -53,6 +54,8 @@ private const val NETWORK_LOSS_GRACE_MS = 2_000L
 // Network callbacks drive the Wi-Fi auto-pause; this poll is only a safety net. The pause now lasts as long as the
 // phone stays on Wi-Fi (hours), so a 1 s poll woke the app every second for all of it.
 private const val AUTO_PAUSE_WIFI_RECONCILE_MS = 15_000L
+// the lock screen shows this tunnel notice: it never names the network (B5f2, F6)
+private const val WIFI_PAUSE_NOTICE = "Ожидание. Автопауза при Wi-Fi"
 private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
 private const val AWAIT_NETWORK_SHOWN_AFTER_MS = 5_000L
 private const val AWAIT_NETWORK_RESCAN_MS = 15_000L
@@ -118,6 +121,19 @@ class TunnelService : Service() {
     private val autoPauseMutex = Mutex()
     private val wifiNetworkLock = Any()
     private val physicalWifiNetworks = mutableSetOf<Network>()
+    // B5f2: the last readable name of each Wi-Fi network, held only while a list rule is on (under wifiNetworkLock)
+    private val wifiNames = mutableMapOf<Network, String>()
+    // the physical callback carries location info (API 31+) only while a list rule is on (F3)
+    private val networkCallbackLock = Any()
+    private var networkCallbackFlagged = false
+    @Volatile
+    private var wifiRules = WifiRules()
+    // the service has the location type, or needs none (API 26–28) (F4)
+    @Volatile
+    private var locationTypeActive = false
+    // the network the «Запомнить» notice asks about, and every network this run offered (under autoPauseMutex)
+    private var postedOffer: String? = null
+    private val offeredNames = mutableSetOf<String>()
     @Volatile
     private var autoPauseOnWifiEnabled = false
     @Volatile
@@ -141,6 +157,7 @@ class TunnelService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         TunnelManager.activeScope = serviceScope
         createNotificationChannel()
 
@@ -188,7 +205,7 @@ class TunnelService : Service() {
                         // the run is wanted from now on, however long it waits for a network: a kill and the system's
                         // restart (restoreTunnel) bring it back; every way a start ends saves false (stopTunnel)
                         store.saveTunnelWasRunning(true)
-                        autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
+                        applyWifiRules(store.wifiRules.first())
                         TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                         if (reconcileWifiAutoPause()) {
                             TunnelManager.starting.value = false
@@ -386,6 +403,14 @@ class TunnelService : Service() {
                     postTunnelStatus()
                 }
             }
+            ACTION_WIFI_IN_FRONT -> {
+                // a poke that outlived its run created this instance: nothing to do here
+                if (!foregroundStarted || isStopping) {
+                    if (!foregroundStarted) stopSelf(startId)
+                    return START_NOT_STICKY
+                }
+                refreshWifiInFront()
+            }
         }
         return START_STICKY
     }
@@ -438,7 +463,7 @@ class TunnelService : Service() {
                     return@launch
                 }
                 autoPauseRequested = true
-                autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
+                applyWifiRules(store.wifiRules.first())
                 TunnelManager.isLoggingEnabled = store.loggingEnabled.first()
                 if (reconcileWifiAutoPause()) return@launch
 
@@ -869,7 +894,7 @@ class TunnelService : Service() {
     private fun startTunnel(params: TunnelParams, switchTo: TunnelManager.RunIdentity? = null) {
         if (isStopping || !serviceJob.isActive) return
         autoPauseRequested = true
-        if (autoPauseOnWifiEnabled && wifiConnectedForAutoPause()) {
+        if (autoPauseOnWifiEnabled && shouldPauseOnWifi()) {
             serviceScope.launch { reconcileWifiAutoPause() }
             return
         }
@@ -898,7 +923,8 @@ class TunnelService : Service() {
         startStatsUpdater()
     }
 
-    private fun registerPhysicalNetworkCallback() {
+    /** [flagged]: B5f2 (F3) — a list rule is on, so the callback carries the network's name (location info, API 31+). */
+    private fun registerPhysicalNetworkCallback(flagged: Boolean = false) {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 networkLossJob?.cancel()
@@ -927,20 +953,38 @@ class TunnelService : Service() {
                 forgetPhysicalNetwork(network)
             }
         }
-        networkCallback = callback
-        runCatching {
-            connectivityManager.registerNetworkCallback(
-                NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    .build(),
-                callback,
-            )
-        }.onFailure {
-            Log.w("TunnelService", "Unable to register physical network callback", it)
-            networkCallback = null
+        val registered = if (flagged && Build.VERSION.SDK_INT >= 31) locationFlagged(callback) else callback
+        // the new one first, then the old one goes: a network event in between reaches both, and each handler is idempotent
+        synchronized(networkCallbackLock) {
+            // a rules change racing onDestroy, which cancels the job before it unregisters, registers nothing
+            if (!serviceJob.isActive) return
+            val previous = networkCallback
+            runCatching {
+                connectivityManager.registerNetworkCallback(
+                    NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        .build(),
+                    registered,
+                )
+            }.onSuccess {
+                networkCallback = registered
+                networkCallbackFlagged = flagged
+                previous?.let { runCatching { connectivityManager.unregisterNetworkCallback(it) } }
+            }.onFailure {
+                Log.w("TunnelService", "Unable to register physical network callback", it)
+            }
         }
     }
+
+    @RequiresApi(31)
+    private fun locationFlagged(plain: ConnectivityManager.NetworkCallback) =
+        object : ConnectivityManager.NetworkCallback(ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
+            override fun onAvailable(network: Network) = plain.onAvailable(network)
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
+                plain.onCapabilitiesChanged(network, capabilities)
+            override fun onLost(network: Network) = plain.onLost(network)
+        }
 
     private fun rememberPhysicalCandidate(network: Network) {
         synchronized(vkProbeLock) {
@@ -1220,6 +1264,9 @@ class TunnelService : Service() {
             autoPauseMutex.withLock {
                 autoPausedForWifi = false
                 TunnelManager.leaveWifiAutoPause()
+                // B5f2: no run, nothing decided about the Wi-Fi, nothing offered
+                TunnelManager.wifiStatus.value = null
+                syncOfferNotice(null)
                 runCatching {
                     val store = SettingsStore(applicationContext)
                     store.saveTunnelWasRunning(false)
@@ -1260,6 +1307,8 @@ class TunnelService : Service() {
         val wasActive = TunnelManager.running.value || TunnelManager.starting.value || autoPausedForWifi
         autoPausedForWifi = false
         TunnelManager.leaveWifiAutoPause()
+        TunnelManager.wifiStatus.value = null
+        serviceScope.launch { autoPauseMutex.withLock { syncOfferNotice(null) } }
         TunnelManager.starting.value = false
         if (wasActive) {
             VkAutoCallsManager.finishActiveCalls()
@@ -1289,10 +1338,56 @@ class TunnelService : Service() {
     private fun observeAutoPauseOnWifi() {
         autoPauseSettingsJob?.cancel()
         autoPauseSettingsJob = serviceScope.launch {
-            SettingsStore(applicationContext).autoPauseOnWifi.collect { enabled ->
-                autoPauseOnWifiEnabled = enabled
+            SettingsStore(applicationContext).wifiRules.collect { rules ->
+                applyWifiRules(rules)
                 reconcileWifiAutoPause()
             }
+        }
+    }
+
+    /**
+     * B5f2: the switch, the rule and the networks. Names are read only in a list rule: «В любой» and off drop them and the
+     * callback's location info (F2, F3); the location type goes once nothing needs it, and comes only with a start or the
+     * app's poke (F4).
+     */
+    private fun applyWifiRules(rules: WifiRules) {
+        wifiRules = rules
+        autoPauseOnWifiEnabled = rules.enabled
+        if (!rules.needsNames) synchronized(wifiNetworkLock) { wifiNames.clear() }
+        val flagged = synchronized(networkCallbackLock) { networkCallbackFlagged }
+        if (Build.VERSION.SDK_INT >= 31 && rules.needsNames != flagged) registerPhysicalNetworkCallback(rules.needsNames)
+        if (locationTypeActive && !wantLocationType()) {
+            serviceScope.launch(Dispatchers.Main) { reissueForeground() }
+        }
+    }
+
+    // the permission is checked only in a list rule: «В любой» pays nothing for it
+    private fun wantLocationType(): Boolean = wifiRules.needsNames && wantsLocationType(wifiRules, hasFineLocation(this))
+
+    /** F4: a start with the types the rule wants now (the location type added or dropped), keeping its notification. */
+    private fun reissueForeground() {
+        // Android 8 and 9 have no types (nor a while-in-use rule): nothing to change
+        if (Build.VERSION.SDK_INT < 29 || !foregroundStarted || isStopping || !autoPauseRequested) return
+        val notification = if (autoPausedForWifi) createNotification(WIFI_PAUSE_NOTICE) else statusNotification()
+        runCatching { startPersistentForeground(notification) }
+            .onFailure { Log.w("TunnelService", "Unable to change the foreground types", it) }
+    }
+
+    /**
+     * B5f2: the app started this service from the front while a run uses a list rule (MainActivity.onResume). That start
+     * makes a service started in the background (the tile, the widget, a sticky restart) eligible for location; Android 14+
+     * refused it the type then, so it is taken now, once per return. Android gives the network's name now (after a grant,
+     * with location turned on), and the offer's notice is moot.
+     */
+    private fun refreshWifiInFront() {
+        if (isStopping || !autoPauseRequested || !wifiRules.needsNames) return
+        if (!locationTypeActive && wantLocationType()) reissueForeground()
+        serviceScope.launch {
+            val name = connectedWifiName(applicationContext)
+            if (name != null) {
+                synchronized(wifiNetworkLock) { physicalWifiNetworks.singleOrNull()?.let { wifiNames[it] = name } }
+            }
+            reconcileWifiAutoPause()
         }
     }
 
@@ -1398,24 +1493,74 @@ class TunnelService : Service() {
     private suspend fun reconcileWifiAutoPause(): Boolean = runWifiAutoPauseTransition(serviceScope) {
         autoPauseMutex.withLock {
             if (isStopping) return@withLock autoPausedForWifi
+            val onWifi = wifiConnectedForAutoPause()
+            val name = if (onWifi && wifiRules.needsNames) currentWifiName() else null
+            val decision = wifiDecision(wifiRules, onWifi, name)
             when (
                 wifiAutoPauseAction(
                     enabled = autoPauseOnWifiEnabled,
-                    wifiConnected = wifiConnectedForAutoPause(),
+                    // B5f2: the rule's decision — any Wi-Fi in «В любой»; a list rule by the network's check, and never
+                    // on a network whose name Android does not give (M-54)
+                    wifiConnected = decision == WifiDecision.PAUSE,
                     desiredRunning = autoPauseRequested,
                     paused = autoPausedForWifi,
                 )
             ) {
                 WifiAutoPauseAction.PAUSE -> enterWifiAutoPause()
-                WifiAutoPauseAction.RESUME -> resumeFromWifiAutoPause()
+                // on Main, beside a stop: the restore it starts must not undo a stop made meanwhile (B5f1's backlog B2)
+                WifiAutoPauseAction.RESUME -> withContext(Dispatchers.Main) { resumeFromWifiAutoPause() }
                 WifiAutoPauseAction.NONE -> Unit
             }
+            publishWifiStatus(decision, onWifi, name)
             autoPausedForWifi
         }
     }
 
+    /** B5f2 (F6): what the rule decided, for the screens and the notification; the offer's notice follows it. */
+    private fun publishWifiStatus(decision: WifiDecision, onWifi: Boolean, name: String?) {
+        if (!autoPauseRequested || isStopping) {
+            TunnelManager.wifiStatus.value = null
+            syncOfferNotice(null)
+            return
+        }
+        val offer = wifiOffer(wifiRules, onWifi, name)
+        TunnelManager.wifiStatus.value = WifiStatus(
+            rule = if (wifiRules.enabled) wifiRules.rule else WifiRule.ALL,
+            name = name,
+            nameUnknown = decision == WifiDecision.NAME_UNKNOWN,
+            offer = offer,
+        )
+        syncOfferNotice(offer)
+    }
+
+    /**
+     * «Запомнить «<сеть>»?» as a quiet notice: posted while the app is not in front, once per network a run meets; withdrawn
+     * when the offer ends or the app comes to the front (the card asks there). Under autoPauseMutex.
+     */
+    private fun syncOfferNotice(offer: String?) {
+        val inFront = MainActivity.isForeground
+        if (postedOffer != null && (offer != postedOffer || inFront)) {
+            WifiOfferNotice.cancel(applicationContext)
+            postedOffer = null
+        }
+        if (offer == null || postedOffer != null || inFront || !offeredNames.add(offer)) return
+        if (WifiOfferNotice.post(applicationContext, offer, wifiRules.rule)) postedOffer = offer
+    }
+
+    /** B5f2: the rule says pause here. */
+    private fun shouldPauseOnWifi(): Boolean {
+        val onWifi = wifiConnectedForAutoPause()
+        val name = if (onWifi && wifiRules.needsNames) currentWifiName() else null
+        return wifiDecision(wifiRules, onWifi, name) == WifiDecision.PAUSE
+    }
+
+    /** The name of the Wi-Fi the phone is on: one network at a time in practice; a hand-over keeps the old name meanwhile. */
+    private fun currentWifiName(): String? = synchronized(wifiNetworkLock) {
+        physicalWifiNetworks.firstNotNullOfOrNull { wifiNames[it] }
+    }
+
     private suspend fun enterWifiAutoPause() {
-        if (!autoPauseRequested || !autoPauseOnWifiEnabled || !wifiConnectedForAutoPause()) return
+        if (!autoPauseRequested || !autoPauseOnWifiEnabled || !shouldPauseOnWifi()) return
         autoPausedForWifi = true
         updateJob?.cancel()
         updateJob = null
@@ -1439,7 +1584,7 @@ class TunnelService : Service() {
         if (!completed) return
         releaseWakeLock()
         releaseWifiLock()
-        updateNotification("Ожидание. Автопауза при Wi-Fi")
+        updateNotification(WIFI_PAUSE_NOTICE)
         startWifiAutoPauseWatch()
     }
 
@@ -1485,18 +1630,33 @@ class TunnelService : Service() {
 
     private fun updatePhysicalWifiNetwork(network: Network, capabilities: NetworkCapabilities) {
         val physicalWifi = hasPhysicalWifiCapability(capabilities)
+        // B5f2: in a list rule the network's name; the last readable one stays, so a redacted update never flaps it
+        val name = if (physicalWifi && wifiRules.needsNames) readableWifiName(network, capabilities) else null
         synchronized(wifiNetworkLock) {
             if (physicalWifi) {
                 physicalWifiNetworks.add(network)
+                if (name != null) wifiNames[network] = name
             } else {
                 physicalWifiNetworks.remove(network)
+                wifiNames.remove(network)
             }
         }
+    }
+
+    /**
+     * API 31+: the callback's WifiInfo (location info only while a list rule is on). API 26–30 carry none there: Android's
+     * Wi-Fi service, asked only while the network's name is unknown and precise location is granted.
+     */
+    private fun readableWifiName(network: Network, capabilities: NetworkCapabilities): String? {
+        if (Build.VERSION.SDK_INT >= 31) return normalizeWifiSsid((capabilities.transportInfo as? WifiInfo)?.ssid)
+        if (synchronized(wifiNetworkLock) { network in wifiNames }) return null
+        return connectedWifiName(applicationContext)
     }
 
     private fun forgetPhysicalWifiNetwork(network: Network) {
         synchronized(wifiNetworkLock) {
             physicalWifiNetworks.remove(network)
+            wifiNames.remove(network)
         }
     }
 
@@ -1653,7 +1813,7 @@ class TunnelService : Service() {
         if (!foregroundStarted || isStopping || !screenInteractive()) return
         val state = TunnelManager.connectionState.value
         val title = tunnelNotificationTitle(state)
-        val text = if (showsTraffic(state)) formatTraffic(TunnelManager.traffic.value) else ""
+        val text = statusText(state)
         // the state's label goes out at once; the stream count and the figures wait for the 5 s spacing
         if (!notificationThrottle.shouldPost(
                 state = state.label,
@@ -1670,6 +1830,22 @@ class TunnelService : Service() {
                 TUNNEL_NOTIFICATION_ID,
                 createNotification(text, title = title, captcha = state is ConnectionState.CaptchaNeeded),
             )
+    }
+
+    /** The traffic; in a list rule on a Wi-Fi whose name Android does not give, why the pause does not act (B5f2, M-54). */
+    private fun statusText(state: ConnectionState): String = when {
+        state.powerIsOn && TunnelManager.wifiStatus.value?.nameUnknown == true -> WifiCopy.NAME_UNKNOWN
+        showsTraffic(state) -> formatTraffic(TunnelManager.traffic.value)
+        else -> ""
+    }
+
+    private fun statusNotification(): Notification {
+        val state = TunnelManager.connectionState.value
+        return createNotification(
+            statusText(state),
+            title = tunnelNotificationTitle(state),
+            captcha = state is ConnectionState.CaptchaNeeded,
+        )
     }
 
     private fun createNotificationChannel() {
@@ -1751,10 +1927,19 @@ class TunnelService : Service() {
 
     private fun startPersistentForeground(notification: Notification) {
         notification.flags = notification.flags or Notification.FLAG_ONGOING_EVENT or Notification.FLAG_NO_CLEAR or Notification.FLAG_FOREGROUND_SERVICE
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(TUNNEL_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        // B5f2 (F4): the location type only while a list rule wants it; Android 14+ refuses it to a start in the background,
+        // and the app's poke takes it later (refreshWifiInFront)
+        locationTypeActive = if (Build.VERSION.SDK_INT >= 29) {
+            val withLocation = wantLocationType() && runCatching {
+                startForeground(TUNNEL_NOTIFICATION_ID, notification, foregroundTypes(Build.VERSION.SDK_INT, wantLocation = true) ?: 0)
+            }.isSuccess
+            if (!withLocation) {
+                startForeground(TUNNEL_NOTIFICATION_ID, notification, foregroundTypes(Build.VERSION.SDK_INT, wantLocation = false) ?: 0)
+            }
+            withLocation
         } else {
             startForeground(TUNNEL_NOTIFICATION_ID, notification)
+            false
         }
         foregroundStarted = true
     }
@@ -1814,10 +1999,16 @@ class TunnelService : Service() {
             foregroundStarted = false
         }
         serviceJob.cancel()
-        networkCallback?.let { callback ->
-            runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+        synchronized(networkCallbackLock) {
+            networkCallback?.let { callback ->
+                runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+            }
+            networkCallback = null
         }
-        networkCallback = null
+        if (instance === this) instance = null
+        // B5f2: the run's Wi-Fi decision and offer end with it (stopTunnel clears them too; a kill reaches only here)
+        TunnelManager.wifiStatus.value = null
+        if (postedOffer != null) WifiOfferNotice.cancel(applicationContext)
         airplaneModeReceiver?.let { receiver ->
             runCatching { unregisterReceiver(receiver) }
         }
@@ -1825,11 +2016,29 @@ class TunnelService : Service() {
         physicalNetworks.clear()
         synchronized(wifiNetworkLock) {
             physicalWifiNetworks.clear()
+            wifiNames.clear()
         }
         TunnelManager.activeScope = TunnelManager.scope
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        private const val ACTION_WIFI_IN_FRONT = "com.csqtt.client.WIFI_IN_FRONT"
+
+        @Volatile
+        private var instance: TunnelService? = null
+
+        /**
+         * B5f2: MainActivity is in front while a run uses a list rule. The app starts the service itself: only a start from
+         * the app in front makes a service started in the background (the tile, the widget, a sticky restart) eligible for
+         * location, and the service then re-reads the network's name (refreshWifiInFront). «В любой» and no run: nothing.
+         */
+        internal fun onAppInFront(context: Context) {
+            if (instance == null || TunnelManager.wifiStatus.value?.listRule != true) return
+            runCatching { context.startService(Intent(context, TunnelService::class.java).setAction(ACTION_WIFI_IN_FRONT)) }
+        }
+    }
 }
 

@@ -401,6 +401,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         // the one explanation before the first notification and battery prompts was shown (L-29)
         private val PERMISSION_INTRO_SHOWN = booleanPreferencesKey("permission_intro_shown")
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
+        // B5f2: where the auto-pause acts — #19's keys; the networks the user dismissed («Не сейчас») added
+        private val WIFI_RULE = stringPreferencesKey("wifi_network_list_mode")
+        private val WIFI_CHECKED = stringPreferencesKey("wifi_network_list_ssids")
+        private val WIFI_SAVED = stringPreferencesKey("wifi_saved_ssids")
+        private val WIFI_DISMISSED = stringPreferencesKey("wifi_dismissed_ssids")
         private val BATTERY_SAVER_MODE = stringPreferencesKey("battery_saver_mode")
         private val BATTERY_SAVER_PERCENT = intPreferencesKey("battery_saver_percent")
         private val DOMAIN_ROUTING_ENABLED = profileBoolean("domain_routing_enabled")
@@ -722,7 +727,56 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
                 TUNNEL_WAS_RUNNING, TUNNEL_WAS_RUNNING_BOOT, TUNNEL_WAS_RUNNING_UPDATE, PROFILE_EPOCH, VK_ACCOUNTS,
                 UI_OWNER_MODE, LAST_STOP_CAUSE, RUN_PROFILE,
+                // B5f2 (F7): the Wi-Fi rule and the networks' names stay on this phone; a choice to carry them is P3's
+                WIFI_RULE, WIFI_CHECKED, WIFI_SAVED, WIFI_DISMISSED,
             ).mapTo(HashSet()) { it.name }
+        }
+
+        /** B5f2: the Wi-Fi rules as stored. */
+        internal fun readWifiRules(prefs: Preferences): WifiRules {
+            val checked = decodeWifiSsids(prefs[WIFI_CHECKED])
+            return WifiRules(
+                enabled = prefs[AUTO_PAUSE_ON_WIFI] ?: false,
+                rule = WifiRule.fromStored(prefs[WIFI_RULE]),
+                checked = checked,
+                saved = decodeWifiSsids(prefs[WIFI_SAVED]) + checked,
+                dismissed = decodeWifiSsids(prefs[WIFI_DISMISSED]),
+            )
+        }
+
+        /**
+         * «Запомнить»: [name] saved and checked — only under the [rule] the offer was made in, with the switch on, so a
+         * notice from before a change of either changes nothing.
+         */
+        internal fun rememberWifi(prefs: MutablePreferences, name: String, rule: WifiRule): Boolean {
+            val ssid = normalizeWifiSsid(name) ?: return false
+            val current = readWifiRules(prefs)
+            if (!current.enabled || current.rule != rule || !rule.usesNames) return false
+            prefs[WIFI_SAVED] = encodeWifiSsids(current.saved + ssid)
+            prefs[WIFI_CHECKED] = encodeWifiSsids(current.checked + ssid)
+            return true
+        }
+
+        internal fun checkWifi(prefs: MutablePreferences, name: String, checked: Boolean) {
+            val ssid = normalizeWifiSsid(name) ?: return
+            val current = readWifiRules(prefs)
+            prefs[WIFI_SAVED] = encodeWifiSsids(current.saved + ssid)
+            prefs[WIFI_CHECKED] = encodeWifiSsids(if (checked) current.checked + ssid else current.checked - ssid)
+        }
+
+        /** «Удалить»: out of the list, and never offered again (as «Не сейчас»). */
+        internal fun forgetWifi(prefs: MutablePreferences, name: String) {
+            val ssid = normalizeWifiSsid(name) ?: return
+            val current = readWifiRules(prefs)
+            prefs[WIFI_SAVED] = encodeWifiSsids(current.saved - ssid)
+            prefs[WIFI_CHECKED] = encodeWifiSsids(current.checked - ssid)
+            dismissWifi(prefs, ssid)
+        }
+
+        /** «Не сейчас» (or the offer's notice swiped away): never offered again. */
+        internal fun dismissWifi(prefs: MutablePreferences, name: String) {
+            val ssid = normalizeWifiSsid(name) ?: return
+            prefs[WIFI_DISMISSED] = encodeWifiSsids(decodeWifiSsids(prefs[WIFI_DISMISSED]) + ssid)
         }
 
         internal fun slotKeyName(name: String, index: Int): String = if (index == 0) name else "${name}_$index"
@@ -1980,6 +2034,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     val autoPauseOnWifi: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_PAUSE_ON_WIFI] ?: false
     }
+    /** B5f2: the switch, the rule and the networks. */
+    internal val wifiRules: Flow<WifiRules> = dataStore.data.map { readWifiRules(it) }.distinctUntilChanged()
     val batterySaverMode: Flow<String> = dataStore.data.map { it[BATTERY_SAVER_MODE] ?: BatterySaver.DEFAULT_MODE }
     val batterySaverPercent: Flow<Int> = dataStore.data.map { it[BATTERY_SAVER_PERCENT] ?: BatterySaver.DEFAULT_PERCENT }
     suspend fun isBatteryOptimizationPromptHandled(): Boolean =
@@ -2677,6 +2733,29 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs ->
             prefs[AUTO_PAUSE_ON_WIFI] = enabled
         }
+    }
+
+    internal suspend fun saveWifiRule(rule: WifiRule) {
+        dataStore.edit { prefs -> prefs[WIFI_RULE] = rule.stored }
+    }
+
+    /** False when the rule or the switch changed since the offer was made (a stale notice). */
+    internal suspend fun rememberWifiNetwork(name: String, rule: WifiRule): Boolean {
+        var remembered = false
+        dataStore.edit { prefs -> remembered = rememberWifi(prefs, name, rule) }
+        return remembered
+    }
+
+    internal suspend fun checkWifiNetwork(name: String, checked: Boolean) {
+        dataStore.edit { prefs -> checkWifi(prefs, name, checked) }
+    }
+
+    internal suspend fun forgetWifiNetwork(name: String) {
+        dataStore.edit { prefs -> forgetWifi(prefs, name) }
+    }
+
+    internal suspend fun dismissWifiNetwork(name: String) {
+        dataStore.edit { prefs -> dismissWifi(prefs, name) }
     }
 
     suspend fun saveBatterySaverMode(mode: String) {

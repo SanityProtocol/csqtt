@@ -164,6 +164,13 @@ class MainActivity : ComponentActivity() {
         }.getOrDefault(false)
     }
 
+    // B5f2: back in front (a permission dialog and the location settings return here too) while a run uses a list rule,
+    // the service re-reads the Wi-Fi's name; nothing happens for «В любой» or without a run
+    override fun onResume() {
+        super.onResume()
+        TunnelService.onAppInFront(this)
+    }
+
     // The composition is kept while the app is in the background (§4.2 rule 1): Compose pauses recomposition while the
     // activity is stopped, and every flow it shows is collected with the lifecycle, so dropping it saved nothing and
     // lost every open dialog and the flows' loaded values.

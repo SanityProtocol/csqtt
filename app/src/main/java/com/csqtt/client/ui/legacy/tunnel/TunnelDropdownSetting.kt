@@ -40,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 
@@ -87,6 +88,8 @@ internal fun CompactDropdownSetting(
     itemEditable: (String) -> Boolean = { true },
     leadingContent: (@Composable RowScope.() -> Unit)? = null,
     indicatorProvider: ((String) -> ModeIndicator?)? = null,
+    // the value button's width cap: a value longer than a word («Кроме отмеченных») takes more of a short title's row
+    valueMaxWidth: Dp = 135.dp,
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val selectedLabel = options.firstOrNull { it.first == selectedKey }?.second.orEmpty()
@@ -125,7 +128,7 @@ internal fun CompactDropdownSetting(
             }
         }
         leadingContent?.invoke(this)
-        Box(modifier = Modifier.widthIn(min = 90.dp, max = 135.dp)) {
+        Box(modifier = Modifier.widthIn(min = 90.dp, max = valueMaxWidth)) {
             OutlinedButton(
                 onClick = { expanded = true },
                 enabled = enabled,

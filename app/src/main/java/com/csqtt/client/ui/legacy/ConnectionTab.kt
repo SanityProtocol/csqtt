@@ -79,6 +79,8 @@ import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelService
 import com.csqtt.client.VkHashValidationCodec
+import com.csqtt.client.WifiCopy
+import com.csqtt.client.WifiRule
 import com.csqtt.client.newTunnelSessionId
 import com.csqtt.client.showRaisedToast
 import com.csqtt.client.ui.legacy.components.CsqttScreen
@@ -346,6 +348,8 @@ private fun TunnelConnectionPanel(
                 textAlign = TextAlign.Center,
             )
 
+            WifiLines(state)
+
             if (state is ConnectionState.Failed) {
                 Text(
                     text = state.reason,
@@ -495,6 +499,61 @@ private fun BackgroundWorkButton() {
         },
     ) {
         Text("Разрешить работу в фоне", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * B5f2 (F6): what the service decided about the Wi-Fi, shown as it is — the network a list rule paused on; why the pause
+ * does not act, with the fix the app can see; and «Запомнить «<сеть>»?» for a network the list does not know yet.
+ */
+@Composable
+private fun WifiLines(state: ConnectionState) {
+    val status by TunnelManager.wifiStatus.collectAsStateWithLifecycle()
+    val wifi = status ?: return
+    if (state is ConnectionState.PausedOnWifi) {
+        wifi.name?.let { OutcomeLine("Сеть «$it»", MaterialTheme.colorScheme.onSurfaceVariant) }
+    }
+    if (wifi.nameUnknown && state.powerIsOn) {
+        OutcomeLine(WifiCopy.NAME_UNKNOWN, MaterialTheme.colorScheme.tertiary)
+        // a run started in the background needs nothing from the user: the app's return re-reads the name
+        val access = rememberWifiNameAccess()
+        access.fixLabel?.let { label ->
+            TextButton(onClick = access.fix) {
+                Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+    wifi.offer?.let { name -> WifiOfferPrompt(name, wifi.rule) }
+}
+
+@Composable
+private fun WifiOfferPrompt(name: String, rule: WifiRule) {
+    val context = LocalContext.current.applicationContext
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = WifiCopy.offer(name),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = rule.rememberEffect,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        // on the app's scope: the answer is stored even if the screen goes meanwhile (§4.2 rule 8)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { TunnelManager.scope.launch { SettingsStore(context).dismissWifiNetwork(name) } }) {
+                Text("Не сейчас", style = MaterialTheme.typography.labelLarge)
+            }
+            TextButton(onClick = { TunnelManager.scope.launch { SettingsStore(context).rememberWifiNetwork(name, rule) } }) {
+                Text("Запомнить", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 

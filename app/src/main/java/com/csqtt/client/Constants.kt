@@ -130,6 +130,10 @@ object CsqttConstants {
         const val BACKGROUND_CHANNEL_ID = "csqtt_background_v1"
         const val SUBSCRIPTION_NOTIFICATION_ID = 3
         const val HANDOVER_NOTIFICATION_ID = 4
+
+        // B5f2: «Запомнить «<сеть>»?», quietly, while the app is not in front
+        const val WIFI_CHANNEL_ID = "csqtt_wifi_networks_v1"
+        const val WIFI_OFFER_NOTIFICATION_ID = 5
     }
 
     object Widget {

@@ -301,6 +301,8 @@ object TunnelManager {
     val config = MutableStateFlow<String?>(null)
     val activeWorkers = MutableStateFlow(0)
     val autoPausedForWifi = MutableStateFlow(false)
+    /** B5f2: what the service decided about the Wi-Fi the phone is on (F6); null while no run is on. */
+    internal val wifiStatus = MutableStateFlow<WifiStatus?>(null)
     val vpnReady = MutableStateFlow(false)
     val serverRoutingActive = MutableStateFlow(false)
     val activeServerRoutingRule = MutableStateFlow<ServerRoutingRule?>(null)
@@ -508,9 +510,33 @@ object TunnelManager {
         if (!running.value) return
         if (pausedForNoNetwork.resume()) {
             syncNetworkPaused()
-            val identity = processIdentity ?: return
+            val identity = processIdentity ?: run {
+                restartNowIfWaitingForNetwork()
+                return
+            }
             activeScope.launch {
                 writeProcessCommand(identity, "RESUME", "network_resume_command_error")
+            }
+        }
+    }
+
+    /** B5f2: a crash restart scheduled while offline, and the job that waits the longest delay for it. */
+    private class OfflineRestart(val job: Job, val context: Context, val params: TunnelParams, val epoch: Long)
+
+    @Volatile
+    private var offlineRestart: OfflineRestart? = null
+
+    /**
+     * B5f2 (B5e4's backlog): an exit while offline waits the longest delay, so a network that comes back sooner starts the
+     * restart now — if that restart is still the one pending and no process runs.
+     */
+    private fun restartNowIfWaitingForNetwork() {
+        activeScope.launch {
+            startStopMutex.withLock {
+                val pending = offlineRestart ?: return@withLock
+                offlineRestart = null
+                if (restartJob !== pending.job || !pending.job.isActive || process != null) return@withLock
+                scheduleRestartLocked(pending.context, pending.params, pending.epoch, 0L)
             }
         }
     }
@@ -2036,6 +2062,8 @@ object TunnelManager {
                                 (2_000L shl backoffShift).coerceAtMost(CRASH_RESTART_MAX_DELAY_MS)
                             }
                             scheduleRestartLocked(restartContext, restartParams, identity.ticket.epoch, restartDelayMs)
+                            offlineRestart = restartJob?.takeIf { offline }
+                                ?.let { OfflineRestart(it, restartContext, restartParams, identity.ticket.epoch) }
                         } else if (!lifecycleState.isDesiredRunning()) {
                             running.value = false
                         } else {
@@ -2189,7 +2217,10 @@ object TunnelManager {
                 sourceProfile = target
                 activeContext()?.let { ctx -> scope.launch { runCatching { SettingsStore(ctx).saveRunProfile(target) } } }
             }
-            stopLocked(processIdentity, preserveWifiAutoPause = true)
+            // B5f2 (B5e4's backlog B2): the pause ends the run's VK calls, the core's own («Авто ВК») and the app's
+            // («Авто API»), as a stop does; the resume makes new ones. The D6 pool is never the run's set
+            stopLocked(processIdentity, finishVkCalls = true, preserveWifiAutoPause = true)
+            VkAutoCallsManager.finishActiveCalls()
             starting.value = false
             updateLog(
                 "wifi_auto_pause",
