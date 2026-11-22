@@ -18,6 +18,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.csqtt.client.AppUpdates
+import com.csqtt.client.BuildConfig
 import com.csqtt.client.R
 
 import androidx.compose.material.icons.Icons
@@ -362,32 +364,19 @@ fun FloatingToolbar(
                     }
 
                     if (!csqttLinkMode) {
-                        OutlinedButton(
-                            onClick = { showTurnSubnetsDialog = true },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(CsqttSizes.ControlHeight),
-                            shape = CsqttShapes.Pill,
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = Color.Transparent,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                            ),
-                            border = BorderStroke(
-                                1.dp,
-                                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp),
-                        ) {
-                            Text(
-                                text = "Выбор TURN подсетей",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                        SheetAction("Выбор TURN подсетей", onClick = { showTurnSubnetsDialog = true })
                     }
+
+                    // M-91 (B5g): the check on demand; «Инфо», which held it, has had no way in since 2.5.0 (review F1).
+                    // It runs in the app's scope: its answer is a toast, or the update dialog for a newer version
+                    val checkingUpdates by AppUpdates.checking.collectAsStateWithLifecycle()
+                    SheetAction(
+                        text = if (checkingUpdates) "Проверяем обновления…" else "Проверить обновления",
+                        enabled = !checkingUpdates,
+                        onClick = {
+                            AppUpdates.checkNow(context, settingsStore, "v${BuildConfig.VERSION_NAME.removePrefix("v")}")
+                        },
+                    )
                 }
             }
         }
@@ -566,3 +555,34 @@ fun FloatingToolbar(
 }
 
 private const val ADD_PROFILE_KEY = "add"
+
+/** An action at the foot of «Настройки»: the sheet's outlined pill, the width of the sheet. */
+@Composable
+private fun SheetAction(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(CsqttSizes.ControlHeight),
+        shape = CsqttShapes.Pill,
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        ),
+        contentPadding = PaddingValues(horizontal = 16.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}

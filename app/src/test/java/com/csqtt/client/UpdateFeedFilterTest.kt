@@ -89,4 +89,14 @@ class UpdateFeedFilterTest {
         assertNull(parseReleaseFeed("""{"message": "API rate limit exceeded"}"""))
         assertNull(parseReleaseFeed("not json"))
     }
+
+    @Test
+    fun `«Позже» holds that version back for a day, not a newer one`() {
+        val day = 24L * 60L * 60L * 1000L
+        val at = 1_800_000_000_000L
+        assertTrue(AppUpdates.isPostponed("v2.6.1", "v2.6.1", at + day, at + day - 1))
+        assertFalse(AppUpdates.isPostponed("v2.6.1", "v2.6.1", at + day, at + day))
+        assertFalse(AppUpdates.isPostponed("v2.6.2", "v2.6.1", at + day, at + 1))
+        assertFalse(AppUpdates.isPostponed("v2.6.1", "", 0L, at))
+    }
 }

@@ -36,8 +36,7 @@ internal object AppUpdates {
         store.saveUpdateState(checkedAt, latest?.versionTag ?: known.takeIf { result.isFailure }.orEmpty(),
             if (result.isFailure) CHECK_FAILED else "")
         if (latest == null || !isNewerVersion(localVersion, latest.versionTag)) return
-        val postponed = store.updatePostponeVersion.first() == latest.versionTag &&
-            checkedAt < store.updatePostponeUntil.first()
+        val postponed = isPostponed(latest.versionTag, store.updatePostponeVersion.first(), store.updatePostponeUntil.first(), checkedAt)
         Log.i("CSQTT", "Update check: local=$localVersion remote=${latest.versionTag} postponed=$postponed reason=$reason")
         if (!postponed) offer(store, latest, checkedAt)
     }
@@ -66,6 +65,10 @@ internal object AppUpdates {
             }
         }
     }
+
+    /** «Позже» holds that version back for a day; a newer one, or the day's end, brings the dialog again. */
+    internal fun isPostponed(version: String, postponedVersion: String, postponedUntil: Long, now: Long): Boolean =
+        version == postponedVersion && now < postponedUntil
 
     private fun failureMessage(known: String): String {
         val waitMs = updateCooldownRemainingMs()
