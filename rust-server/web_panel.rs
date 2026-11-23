@@ -59,6 +59,9 @@ struct CreateClientRequest {
     local_port: Option<u16>,
     #[serde(default)]
     group_id: Option<String>,
+    /// B6b: devices connected at once; none: the default (create) or the stored value kept (update)
+    #[serde(default)]
+    device_limit: Option<u32>,
 }
 
 fn validate_workers(workers: Option<u32>) -> Result<Option<u32>, &'static str> {
@@ -66,6 +69,13 @@ fn validate_workers(workers: Option<u32>) -> Result<Option<u32>, &'static str> {
         None | Some(0) => Ok(None),
         Some(w) if (3..=100).contains(&w) => Ok(Some(w)),
         _ => Err("workers must be 0 (default) or between 3 and 100"),
+    }
+}
+
+fn validate_device_limit(limit: Option<u32>) -> Result<Option<u32>, &'static str> {
+    match limit {
+        Some(n) if !model::DEVICE_LIMIT_RANGE.contains(&n) => Err("device_limit must be between 1 and 100"),
+        _ => Ok(limit),
     }
 }
 
@@ -326,6 +336,9 @@ struct ClientInfo {
     sub_uuid: String,
     #[serde(default)]
     workers: Option<u32>,
+    /// B6b: a password's device limit; none for the owner's main password, which has no limit
+    #[serde(default)]
+    device_limit: Option<u32>,
 }
 
 fn url_encode(input: &str) -> String {
@@ -1597,6 +1610,7 @@ async fn clients_get(
                 ),
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
+                device_limit: Some(entry.device_limit()),
             }
         })
         .collect();
@@ -1636,6 +1650,7 @@ async fn clients_get(
             link: make_main_link(&host, main_peer_port, &db),
             sub_uuid: db.main_sub_uuid.clone(),
             workers: db.main_workers,
+            device_limit: None,
         });
     }
 
@@ -1710,6 +1725,7 @@ async fn group_clients_get(
                 link: make_entry_link(&host, client_peer_port, password, entry, &db),
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
+                device_limit: Some(entry.device_limit()),
             }
         })
         .collect();
@@ -1778,6 +1794,10 @@ async fn clients_create(
     let group_id = request.group_id.unwrap_or_default();
     let validated_workers = match validate_workers(request.workers) {
         Ok(w) => w,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let device_limit = match validate_device_limit(request.device_limit) {
+        Ok(limit) => limit,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
     };
 
@@ -1859,6 +1879,7 @@ async fn clients_create(
                 routing_rule_id: String::new(),
                 sub_uuid: sub_uuid.clone(),
                 workers: validated_workers,
+                device_limit,
             },
         );
         let link = make_client_link(
@@ -1913,6 +1934,10 @@ async fn client_update(
     }
     let validated_workers = match validate_workers(request.workers) {
         Ok(w) => w,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let device_limit = match validate_device_limit(request.device_limit) {
+        Ok(limit) => limit,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
     };
 
@@ -1988,6 +2013,10 @@ async fn client_update(
                 entry.group_id = g_id.clone();
             }
             entry.workers = validated_workers;
+            // B6b: lowering the limit cuts nobody; it holds for the next device that connects
+            if device_limit.is_some() {
+                entry.device_limit = device_limit;
+            }
             state.app.db_persistence.submit(db.clone())
         }
     };
@@ -2097,6 +2126,7 @@ async fn client_get(
             link: make_main_link(&host, main_peer_port, &db),
             sub_uuid: db.main_sub_uuid.clone(),
             workers: db.main_workers,
+            device_limit: None,
         };
         return Json(info).into_response();
     }
@@ -2138,6 +2168,7 @@ async fn client_get(
             ),
             sub_uuid: entry.sub_uuid.clone(),
             workers: entry.workers,
+            device_limit: Some(entry.device_limit()),
         };
         return Json(info).into_response();
     }
@@ -2567,6 +2598,8 @@ struct ExportClientEntry {
     workers: Option<u32>,
     #[serde(default)]
     ip: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_limit: Option<u32>,
 }
 
 async fn api_export_get(State(state): State<WebState>) -> impl IntoResponse {
@@ -2592,6 +2625,7 @@ async fn api_export_get(State(state): State<WebState>) -> impl IntoResponse {
             sub_uuid: entry.sub_uuid.clone(),
             workers: entry.workers,
             ip: entry.ip.clone(),
+            device_limit: entry.device_limit,
         })
         .collect();
     let export = ServerExportData {
@@ -2681,6 +2715,7 @@ async fn api_import_post(
                             routing_rule_id: c.routing_rule_id,
                             sub_uuid,
                             workers: c.workers.filter(|&w| (3..=100).contains(&w)),
+                            device_limit: c.device_limit.filter(|limit| model::DEVICE_LIMIT_RANGE.contains(limit)),
                         },
                     );
                     added_clients += 1;
@@ -3760,6 +3795,7 @@ async fn group_admin_client_create(
         routing_rule_id: String::new(),
         sub_uuid: sub_uuid.clone(),
         workers: validated_workers,
+        device_limit: None,
     };
     db.passwords.insert(pass.clone(), entry);
     let snapshot = db.clone();
@@ -9475,6 +9511,10 @@ const PANEL_HTML: &str = r##"
             <label for="new_workers">Число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
             <input type="number" id="new_workers" min="0" max="100" value="0" placeholder="0 (Клиентские)">
         </div>
+        <div class="input-group">
+            <label for="new_device_limit">Подключений одновременно (1-100 устройств на этот ключ)</label>
+            <input type="number" id="new_device_limit" min="1" max="100" value="3">
+        </div>
 
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('newDlg').close()">Отмена</button>
@@ -9519,6 +9559,11 @@ const PANEL_HTML: &str = r##"
         <div class="input-group">
             <label for="edit_workers">Число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
             <input type="number" id="edit_workers" min="0" max="100" value="0" placeholder="0 (Клиентские)">
+        </div>
+
+        <div class="input-group" id="edit_device_limit_group">
+            <label for="edit_device_limit">Подключений одновременно (1-100 устройств на этот ключ)</label>
+            <input type="number" id="edit_device_limit" min="1" max="100" value="3">
         </div>
 
         <!-- Info Section -->
@@ -12239,6 +12284,7 @@ const PANEL_HTML: &str = r##"
             document.getElementById('days').value = '30';
             const workersInput = document.getElementById('new_workers');
             if (workersInput) workersInput.value = '0';
+            document.getElementById('new_device_limit').value = '3';
             const groupNotice = document.getElementById('newDlgGroupNotice');
             const groupNameSpan = document.getElementById('newDlgGroupName');
             const groupIdInput = document.getElementById('newDlgGroupId');
@@ -12266,6 +12312,7 @@ const PANEL_HTML: &str = r##"
                     name = generateUniqueClientName(scopeClients.map(c => c.name));
                 }
                 const workersVal = parseInt(document.getElementById('new_workers')?.value || '0', 10) || 0;
+                const deviceLimit = parseInt(document.getElementById('new_device_limit').value, 10);
                 let r = await api("/api/clients", {
                     method: "POST",
                     body: JSON.stringify({
@@ -12273,7 +12320,8 @@ const PANEL_HTML: &str = r##"
                         group_id: targetGid,
                         days: +document.getElementById('days').value,
                         hash: "",
-                        workers: workersVal
+                        workers: workersVal,
+                        ...(Number.isInteger(deviceLimit) ? { device_limit: deviceLimit } : {})
                     })
                 });
 
@@ -12315,6 +12363,9 @@ const PANEL_HTML: &str = r##"
                 editWorkers.value = c.workers || 0;
                 editWorkers.disabled = isMain;
             }
+            // the owner's main key has no device limit: the list sends it none (the name check above misses «Владелец»)
+            document.getElementById('edit_device_limit').value = c.device_limit || 3;
+            document.getElementById('edit_device_limit_group').style.display = c.device_limit == null ? 'none' : '';
 
             document.getElementById('edit_ip_info').textContent = c.ip || '—';
             document.getElementById('edit_traffic_info').textContent = `↑ ${size(c.up)} / ↓ ${size(c.down)}`;
@@ -12374,6 +12425,8 @@ const PANEL_HTML: &str = r##"
 
             try {
                 const targetGid = document.getElementById('edit_group') ? document.getElementById('edit_group').value : "";
+                const deviceLimit = activeClient.device_limit == null
+                    ? NaN : parseInt(document.getElementById('edit_device_limit').value, 10);
                 let name = document.getElementById('edit_name').value.trim();
                 if (!name) {
                     const scopeClients = (window.clientsData || []).filter(c => (c.group_id || '') === targetGid && c.password !== activeClient.password);
@@ -12389,7 +12442,8 @@ const PANEL_HTML: &str = r##"
                         vk_token: Boolean(activeClient.vk_token),
                         peer_port: activeClient.peer_port || window.serverDefaultPeerPort || 46000,
                         local_port: activeClient.local_port || 0,
-                        workers: parseInt(document.getElementById('edit_workers')?.value || '0', 10) || 0
+                        workers: parseInt(document.getElementById('edit_workers')?.value || '0', 10) || 0,
+                        ...(Number.isInteger(deviceLimit) ? { device_limit: deviceLimit } : {})
                     })
                 });
 
@@ -13409,6 +13463,15 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
         let legacy_link = format!("csqtt://{legacy_b64}");
         assert!(decrypt_csqtt_link(&legacy_link).is_none());
+    }
+
+    #[test]
+    fn a_device_limit_is_one_to_a_hundred_and_none_keeps_the_stored_one() {
+        assert_eq!(super::validate_device_limit(None), Ok(None));
+        assert_eq!(super::validate_device_limit(Some(1)), Ok(Some(1)));
+        assert_eq!(super::validate_device_limit(Some(100)), Ok(Some(100)));
+        assert!(super::validate_device_limit(Some(0)).is_err());
+        assert!(super::validate_device_limit(Some(101)).is_err());
     }
 
     #[test]

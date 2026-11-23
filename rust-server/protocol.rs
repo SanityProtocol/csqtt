@@ -790,6 +790,8 @@ pub struct Session {
     pub desired_stream_count: AtomicU64,
     pub tunnel_ip: std::sync::Mutex<Option<[u8; 4]>>,
     pub last_seen: AtomicU64,
+    /// B6b: when (wall seconds) the client last sent a packet — a keepalive at least every 10 s while it runs
+    pub last_inbound: AtomicU64,
     pub up_bytes: AtomicU64,
     pub down_bytes: AtomicU64,
     pub created_at: u64,
@@ -824,6 +826,7 @@ impl Session {
             desired_stream_count: AtomicU64::new(0),
             tunnel_ip: std::sync::Mutex::new(None),
             last_seen: AtomicU64::new(wall_now),
+            last_inbound: AtomicU64::new(wall_now),
             up_bytes: AtomicU64::new(0),
             down_bytes: AtomicU64::new(0),
             created_at: wall_now,
@@ -3549,6 +3552,11 @@ impl DataplaneLogic for ProtocolEngine {
             for (slot, session) in self.sessions.iter_mut() {
                 session.publish_counters(global_up, global_down, wall_now, debug_enabled);
                 let idle_ms = monotonic_ms.saturating_sub(session.last_inbound_ms);
+                session
+                    .cold
+                    .public
+                    .last_inbound
+                    .store(wall_now.saturating_sub(idle_ms / 1_000), Ordering::Relaxed);
                 if (session.registration_id.is_none() && idle_ms >= SESSION_SETUP_IDLE_MS)
                     || (session.registration_id.is_some() && idle_ms >= SESSION_AUTH_IDLE_MS)
                 {
@@ -4957,6 +4965,180 @@ fn choose_device_ip(
     }
 }
 
+/// B6b: a device stays connected while its client sends anything: a keepalive goes out every 10 s, so 180 s without a
+/// packet means the client is gone (a stop without DISCONNECT, a killed app, a phone off) and its slot may be taken.
+const DEVICE_LIVE_SECS: u64 = 180;
+
+/// B6b: what a GETCONF of a device meets at its password's limit.
+#[derive(Debug, PartialEq, Eq)]
+enum Admission {
+    Admit,
+    /// admitted once these silent devices, stalest first, have given way
+    Evict(Vec<DeviceKey>),
+    /// `DENIED:device_limit`
+    Refuse,
+}
+
+/// B6b: one of a password's devices with an admitted session (one that holds an address), and its latest packet.
+#[derive(Debug, Clone, Copy)]
+struct Occupant {
+    device: DeviceKey,
+    last_inbound: u64,
+}
+
+/// B6b, the rule: the legacy device (an old app) is never refused; a device that holds a slot keeps it; a new device
+/// fits while fewer than `limit` hold one — every new-app device that has an admitted session, the legacy device only
+/// while it carries; else silent new-app devices give way, stalest first, as many as make room; else it is refused.
+/// Lowering a limit cuts nobody: it holds for the next device.
+fn decide_admission(device: DeviceKey, limit: u32, occupants: &[Occupant], now: u64) -> Admission {
+    if device == DeviceKey::Legacy || occupants.iter().any(|occupant| occupant.device == device) {
+        return Admission::Admit;
+    }
+    let silent = |occupant: &&Occupant| now.saturating_sub(occupant.last_inbound) >= DEVICE_LIVE_SECS;
+    let held = occupants
+        .iter()
+        .filter(|occupant| occupant.device != DeviceKey::Legacy || !silent(occupant))
+        .count();
+    let limit = limit.max(1) as usize;
+    if held < limit {
+        return Admission::Admit;
+    }
+    let mut give_way = occupants
+        .iter()
+        .filter(|occupant| occupant.device != DeviceKey::Legacy && silent(occupant))
+        .collect::<Vec<_>>();
+    let needed = held + 1 - limit;
+    if give_way.len() < needed {
+        return Admission::Refuse;
+    }
+    give_way.sort_by_key(|occupant| occupant.last_inbound);
+    Admission::Evict(give_way.into_iter().take(needed).map(|occupant| occupant.device).collect())
+}
+
+/// B6b: the password's devices with an admitted session, besides `session_id`'s.
+fn password_occupants(app: &Arc<App>, password: &str, session_id: u64) -> Vec<Occupant> {
+    let mut occupants: Vec<Occupant> = Vec::new();
+    for entry in app.sessions.iter() {
+        let session = entry.value();
+        if session.id == session_id
+            || session.password != password
+            || lock_unpoison(&session.tunnel_ip).is_none()
+        {
+            continue;
+        }
+        let last_inbound = session.last_inbound.load(Ordering::Relaxed);
+        match occupants.iter_mut().find(|occupant| occupant.device == session.device) {
+            Some(occupant) => occupant.last_inbound = occupant.last_inbound.max(last_inbound),
+            None => occupants.push(Occupant {
+                device: session.device,
+                last_inbound,
+            }),
+        }
+    }
+    occupants
+}
+
+/// B6b: whether a GETCONF of `password`'s `device` is admitted; the owner's main password has no limit.
+fn device_admission(
+    app: &Arc<App>,
+    db: &Database,
+    access: &CredentialAccess,
+    password: &str,
+    device: DeviceKey,
+    session_id: u64,
+    now: u64,
+) -> Admission {
+    let limit = match access {
+        CredentialAccess::Main => return Admission::Admit,
+        CredentialAccess::Slot(key) => db
+            .passwords
+            .get(key)
+            .map_or(crate::model::DEFAULT_DEVICE_LIMIT, crate::model::PasswordEntry::device_limit),
+    };
+    if device == DeviceKey::Legacy {
+        return Admission::Admit;
+    }
+    decide_admission(device, limit, &password_occupants(app, password, session_id), now)
+}
+
+/// B6b: the password's own address: the row's, `.2` for the owner.
+fn own_address(db: &Database, access: &CredentialAccess) -> Option<[u8; 4]> {
+    match access {
+        CredentialAccess::Main => crate::tun_device::parse_ipv4(&crate::model::owner_tunnel_ip()),
+        CredentialAccess::Slot(key) => db
+            .passwords
+            .get(key)
+            .and_then(|entry| crate::tun_device::parse_ipv4(&entry.ip)),
+    }
+}
+
+/// B6b: a silent device gives way: its sessions end as a stop would end them (its address is free once they are gone).
+fn evict_device(app: &Arc<App>, password: &str, device: DeviceKey, why: &str) {
+    let candidates = app
+        .sessions
+        .iter()
+        .filter(|entry| entry.value().password == password && entry.value().device == device)
+        .map(|entry| entry.value().id)
+        .collect::<Vec<_>>();
+    for session_id in candidates {
+        let _ = command(app, ProtocolCommand::DropSession { session_id });
+        if let Some((_, removed)) = app
+            .sessions
+            .remove_if(&session_id, |_, current| current.id == session_id)
+        {
+            removed.cancel_token.cancel();
+        }
+    }
+    log_event(
+        app,
+        "INFO",
+        "SESSION",
+        &format!(
+            "Device{} of password {} gave way after {DEVICE_LIVE_SECS} s without a packet: {why}",
+            device.log_tag().replacen(" dev=", " ", 1),
+            crate::model::secret_tag(password)
+        ),
+    );
+}
+
+/// B6b: the pool is full: the stalest silent device, of any password, holding an address no other row records (a second
+/// or later device's), or this password's `own` (a silent old run of the same phone: an app updated from 2.5 is a new
+/// device beside its old run's legacy sessions), so that a device that carries gets an address before one that vanished
+/// keeps it.
+fn stalest_silent_extra_device(
+    app: &Arc<App>,
+    db: &Database,
+    own: Option<[u8; 4]>,
+    now: u64,
+) -> Option<(String, DeviceKey)> {
+    let mut recorded = db
+        .passwords
+        .values()
+        .filter_map(|entry| crate::tun_device::parse_ipv4(&entry.ip))
+        .collect::<std::collections::HashSet<_>>();
+    recorded.extend(crate::tun_device::parse_ipv4(&crate::model::owner_tunnel_ip()));
+    if let Some(own) = own {
+        recorded.remove(&own);
+    }
+    let mut devices: std::collections::HashMap<(String, DeviceKey), (u64, bool)> = std::collections::HashMap::new();
+    for entry in app.sessions.iter() {
+        let session = entry.value();
+        let Some(ip) = *lock_unpoison(&session.tunnel_ip) else {
+            continue;
+        };
+        let seen = devices
+            .entry((session.password.clone(), session.device))
+            .or_insert((0, false));
+        seen.0 = seen.0.max(session.last_inbound.load(Ordering::Relaxed));
+        seen.1 |= !recorded.contains(&ip);
+    }
+    devices
+        .into_iter()
+        .filter(|(_, (last_inbound, extra))| *extra && now.saturating_sub(*last_inbound) >= DEVICE_LIVE_SECS)
+        .min_by_key(|(_, (last_inbound, _))| *last_inbound)
+        .map(|(owner, _)| owner)
+}
+
 async fn handle_getconf(
     app: &Arc<App>,
     writer: &ControlWriter<'_>,
@@ -5221,6 +5403,18 @@ async fn handle_getconf(
             access
         };
         let authorization_rejected = access.is_err();
+        // B6b: a device beyond the password's limit is refused unless silent devices give way, before anything is
+        // admitted or addressed (the epoch lock serialises the password's GETCONFs, so two newcomers never share a slot)
+        let admission = match &access {
+            Ok(access) => device_admission(app, &db, access, password, device, session.id, now().max(0) as u64),
+            Err(_) => Admission::Admit,
+        };
+        if let Admission::Evict(silent) = &admission {
+            for gone in silent {
+                evict_device(app, password, *gone, "the password's device limit");
+                epoch.forget(*gone);
+            }
+        }
         let mut tunnel_ip = None;
         let mut routing_rule = None;
         let mut link_hashes = Vec::new();
@@ -5228,6 +5422,10 @@ async fn handle_getconf(
             Err(response) => {
                 reject_session = true;
                 response.to_owned()
+            }
+            Ok(_) if admission == Admission::Refuse => {
+                reject_session = true;
+                "DENIED:device_limit".to_owned()
             }
             Ok(access) => match epoch.admit(device, generation_id, session_salt) {
                 PasswordEpochDecision::Current | PasswordEpochDecision::Replaced => {
@@ -5243,7 +5441,7 @@ async fn handle_getconf(
                     // only where devices are told apart: under --desired every client is its password's legacy device on
                     // its row's address, and a remembered one could outlive a row the panel removed and added again
                     let remembered = devices_enabled().then(|| epoch.address_of(device)).flatten();
-                    let ip_str = device_tunnel_ip(
+                    let mut ip_str = device_tunnel_ip(
                         app,
                         &mut db,
                         &access,
@@ -5253,6 +5451,31 @@ async fn handle_getconf(
                         session.id,
                         &mut changed,
                     );
+                    // B6b: the pool is full: the stalest silent device holding an address this password may take gives
+                    // it up, and the choice runs again
+                    if ip_str.is_empty()
+                        && let Some((holder, gone)) = stalest_silent_extra_device(
+                            app,
+                            &db,
+                            own_address(&db, &access),
+                            now().max(0) as u64,
+                        )
+                    {
+                        evict_device(app, &holder, gone, "the address pool is full");
+                        if holder == password {
+                            epoch.forget(gone);
+                        }
+                        ip_str = device_tunnel_ip(
+                            app,
+                            &mut db,
+                            &access,
+                            password,
+                            device,
+                            remembered,
+                            session.id,
+                            &mut changed,
+                        );
+                    }
                     if let Some(ip) = crate::tun_device::parse_ipv4(&ip_str) {
                         *lock_unpoison(&session.tunnel_ip) = Some(ip);
                         epoch.remember(device, ip);
@@ -6506,6 +6729,34 @@ mod tests {
         let other = session(&mut engine, 5, DeviceKey::Id(3), "run-c");
         assert!(engine.activate_tunnel(other, [10, 66, 67, 4], 5, 1, 1));
         assert!(engine.by_id.contains_key(&legacy) && engine.by_id.contains_key(&other));
+    }
+
+    #[test]
+    fn the_device_limit_as_a_table() {
+        let (a, b, c, d) = (DeviceKey::Id(1), DeviceKey::Id(2), DeviceKey::Id(3), DeviceKey::Id(4));
+        let now = 10_000;
+        let live = |device| Occupant { device, last_inbound: now - 5 };
+        let silent = |device, secs: u64| Occupant { device, last_inbound: now - secs };
+        let admit = |device, limit, occupants: &[Occupant]| decide_admission(device, limit, occupants, now);
+        // under the limit
+        assert_eq!(admit(d, 3, &[live(a), live(b)]), Admission::Admit);
+        // at it while everyone carries: refused
+        assert_eq!(admit(d, 3, &[live(a), live(b), live(c)]), Admission::Refuse);
+        // a device that holds a slot keeps it, also over a limit lowered since
+        assert_eq!(admit(a, 1, &[live(a), live(b), live(c)]), Admission::Admit);
+        // 180 s without a packet: silent; the stalest gives way first, and only as many as make room
+        assert_eq!(admit(d, 3, &[live(a), silent(b, 200), silent(c, 400)]), Admission::Evict(vec![c]));
+        assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 179)]), Admission::Refuse);
+        assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 180)]), Admission::Evict(vec![c]));
+        // the legacy device (an old app): never refused, past the limit too; it holds a slot only while it carries, and
+        // it never gives way
+        assert_eq!(admit(L, 1, &[live(a), live(b)]), Admission::Admit);
+        assert_eq!(admit(d, 3, &[live(a), live(b), live(L)]), Admission::Refuse);
+        assert_eq!(admit(d, 3, &[live(a), live(b), silent(L, 600)]), Admission::Admit);
+        assert_eq!(admit(d, 3, &[live(a), silent(b, 300), live(L)]), Admission::Evict(vec![b]));
+        // a limit lowered below the devices holding a slot: the silent ones give way if they make room, or nobody does
+        assert_eq!(admit(d, 2, &[silent(a, 300), silent(b, 500), live(c)]), Admission::Evict(vec![b, a]));
+        assert_eq!(admit(d, 1, &[silent(a, 300), silent(b, 500), live(c)]), Admission::Refuse);
     }
 
     #[test]

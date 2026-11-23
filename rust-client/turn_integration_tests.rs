@@ -1148,12 +1148,24 @@ async fn relay_bound_turn_channel_to_peer_with_fault(
                         relay.send_to(payload, peer).await.unwrap();
                         continue;
                     }
-                    let control = assert_authenticated_request(wire, REFRESH_REQUEST);
-                    assert_eq!(attribute_u32(&control, ATTR_LIFETIME), 0);
-                    relay
-                        .send_to(&refresh_zero_success(control.transaction()), client)
-                        .await
-                        .unwrap();
+                    // B6b: a run that outlives an allocation's first minutes refreshes its permission, channel and
+                    // allocation; the run's end deallocates (a Refresh with lifetime 0)
+                    let method = StunMessage::decode(wire).unwrap().method();
+                    let control = assert_authenticated_request(wire, method);
+                    let reply = match method {
+                        REFRESH_REQUEST => {
+                            let lifetime = attribute_u32(&control, ATTR_LIFETIME);
+                            let mut response = MessageBuilder::new(REFRESH_SUCCESS, control.transaction());
+                            response.attribute(ATTR_LIFETIME, &lifetime.to_be_bytes());
+                            response.finish_authenticated(&long_term_key())
+                        }
+                        CREATE_PERMISSION_REQUEST => {
+                            empty_authenticated_success(CREATE_PERMISSION_SUCCESS, control.transaction())
+                        }
+                        CHANNEL_BIND_REQUEST => empty_authenticated_success(CHANNEL_BIND_SUCCESS, control.transaction()),
+                        other => panic!("unexpected TURN request {other:#06x} from the client"),
+                    };
+                    relay.send_to(&reply, client).await.unwrap();
                 } else if source == peer {
                     if fault.drop_peer_packet() {
                         continue;
@@ -2311,6 +2323,11 @@ async fn running_client_receives_hot_dns_configuration_without_reconnect() {
 
 /// Posts `body` to the panel's /api/settings as the e2e web user; returns the response body.
 fn post_e2e_settings(web_url: &str, body: &str) -> String {
+    e2e_api(web_url, "/api/settings", body).unwrap_or_else(|error| panic!("CSQTT settings update failed: {error}"))
+}
+
+/// One POST to the panel API, logged in as the e2e user: the reply, or curl's error.
+fn e2e_api(web_url: &str, path: &str, body: &str) -> Result<String, String> {
     let login = std::process::Command::new("curl")
         .args([
             "-kfsS",
@@ -2331,24 +2348,30 @@ fn post_e2e_settings(web_url: &str, body: &str) -> String {
             let (name, value) = line.split_once(':')?;
             name.eq_ignore_ascii_case("set-cookie").then_some(value.trim().split(';').next()?.trim())
         })
-        .filter(|value| value.starts_with("csqtt_session="))
-        .expect("CSQTT panel login did not return csqtt_session")
+        // csqtt_session, or <instance>_session for a named instance (ci/e2e-server.sh's standalone e2edev)
+        .filter(|value| value.split('=').next().is_some_and(|name| name.ends_with("_session")))
+        .expect("CSQTT panel login did not return a session cookie")
         .to_owned();
-    let update = std::process::Command::new("curl")
+    let call = std::process::Command::new("curl")
         .args([
-            "-kfsS",
+            "-ksS",
+            "--fail-with-body",
             "-H",
             &format!("cookie: {session_cookie}"),
             "-H",
             "content-type: application/json",
             "-d",
             body,
-            &format!("{web_url}/api/settings"),
+            &format!("{web_url}{path}"),
         ])
         .output()
-        .expect("could not invoke curl for CSQTT settings");
-    assert!(update.status.success(), "CSQTT settings update failed: {}", String::from_utf8_lossy(&update.stderr));
-    String::from_utf8_lossy(&update.stdout).into_owned()
+        .expect("could not invoke curl for the CSQTT panel API");
+    let reply = String::from_utf8_lossy(&call.stdout).into_owned();
+    if call.status.success() {
+        Ok(reply)
+    } else {
+        Err(format!("{reply} {}", String::from_utf8_lossy(&call.stderr)))
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4576,8 +4599,71 @@ struct E2eDevice {
     address: std::net::Ipv4Addr,
 }
 
+/// A device's run that has not answered yet: its TUNCONF arrives on `config_rx`, or its session ends refused.
+struct E2eLaunch {
+    dispatcher: Arc<Dispatcher>,
+    cancel: CancellationToken,
+    relay_stop: CancellationToken,
+    session: tokio::task::JoinHandle<anyhow::Result<bool>>,
+    relay_task: tokio::task::JoinHandle<()>,
+    ready: oneshot::Receiver<()>,
+    config_rx: tokio::sync::mpsc::Receiver<String>,
+}
+
 impl E2eDevice {
     async fn up(peer: SocketAddr, password: &str, device_id: Option<&str>, generation: u64, salt: &str) -> Self {
+        let mut launch = Self::launch(peer, password, device_id, generation, salt).await;
+        let tunconf = tokio::time::timeout(Duration::from_secs(20), launch.config_rx.recv())
+            .await
+            .expect("no TUNCONF within 20 s")
+            .expect("the session ended before its TUNCONF");
+        let address = tunconf
+            .strip_prefix("TUNCONF:")
+            .and_then(|value| value.split(':').next())
+            .and_then(|ip| ip.parse().ok())
+            .unwrap_or_else(|| panic!("no address in {tunconf}"));
+        for _ in 0..50 {
+            if launch.dispatcher.active_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Self {
+            dispatcher: launch.dispatcher,
+            cancel: launch.cancel,
+            relay_stop: launch.relay_stop,
+            session: launch.session,
+            relay_task: launch.relay_task,
+            _ready: launch.ready,
+            address,
+        }
+    }
+
+    /// B6b: a device the server refuses: its run ends with the refusal and never gets a TUNCONF; the error it ends with.
+    async fn refused(peer: SocketAddr, password: &str, device_id: &str, generation: u64, salt: &str) -> String {
+        let mut launch = Self::launch(peer, password, Some(device_id), generation, salt).await;
+        let ended = tokio::time::timeout(Duration::from_secs(15), &mut launch.session)
+            .await
+            .expect("the refused device's run did not end")
+            .expect("the refused device's session panicked");
+        assert!(launch.config_rx.try_recv().is_err(), "a refused device got a TUNCONF");
+        launch.cancel.cancel();
+        launch.dispatcher.shutdown().await;
+        launch.relay_stop.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(3), launch.relay_task).await;
+        ended.expect_err("the device was admitted").to_string()
+    }
+
+    /// B6b: a phone that dies: nothing more reaches the server, not even a DISCONNECT.
+    async fn vanish(self) {
+        self.relay_stop.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(3), self.relay_task).await;
+        self.session.abort();
+        self.cancel.cancel();
+        self.dispatcher.shutdown().await;
+    }
+
+    async fn launch(peer: SocketAddr, password: &str, device_id: Option<&str>, generation: u64, salt: &str) -> E2eLaunch {
         let relay = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
         let endpoint = format!("turn:127.0.0.1:{}?transport=udp", relay.local_addr().unwrap().port());
         let relay_stop = CancellationToken::new();
@@ -4597,7 +4683,7 @@ impl E2eDevice {
         )
         .await
         .unwrap();
-        let (config_tx, mut config_rx) = tokio::sync::mpsc::channel(1);
+        let (config_tx, config_rx) = tokio::sync::mpsc::channel(1);
         let (ready_tx, ready) = oneshot::channel();
         let session = tokio::spawn(run_session(
             SessionConfig {
@@ -4647,29 +4733,14 @@ impl E2eDevice {
                 configured_workers: 0,
             },
         ));
-        let tunconf = tokio::time::timeout(Duration::from_secs(20), config_rx.recv())
-            .await
-            .expect("no TUNCONF within 20 s")
-            .expect("the session ended before its TUNCONF");
-        let address = tunconf
-            .strip_prefix("TUNCONF:")
-            .and_then(|value| value.split(':').next())
-            .and_then(|ip| ip.parse().ok())
-            .unwrap_or_else(|| panic!("no address in {tunconf}"));
-        for _ in 0..50 {
-            if dispatcher.active_count() > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        Self {
+        E2eLaunch {
             dispatcher,
             cancel,
             relay_stop,
             session,
             relay_task,
-            _ready: ready,
-            address,
+            ready,
+            config_rx,
         }
     }
 
@@ -4824,6 +4895,98 @@ async fn devices_a_server_run_by_swg_panel_keeps_one_device_per_password() {
     assert_eq!(b.address, a.address);
     assert!(b.alive().await, "the second device carries nothing");
     assert!(!a.alive().await, "two devices of one password carry on a --desired server");
+    for device in [a, b] {
+        device.stop().await;
+    }
+}
+
+/// B6b: the standalone server's panel (ci/e2e-server.sh), where the owner sets a password's device limit.
+fn e2e_dev_web() -> String {
+    std::env::var("CSQTT_E2E_DEV_WEB").expect("CSQTT_E2E_DEV_WEB is required (ci/e2e-server.sh up prints DEV_WEB)")
+}
+
+/// B6b: a password of the standalone server with this device limit: created, or set again on a server a run before made it.
+fn e2e_limited_password(password: &str, limit: u32) {
+    let web = e2e_dev_web();
+    let body = format!(r#"{{"name":"{password}","days":0,"password":"{password}","device_limit":{limit}}}"#);
+    if e2e_api(&web, "/api/clients", &body).is_err() {
+        e2e_set_device_limit(password, Some(limit));
+    }
+}
+
+/// B6b: an update through the panel API, as its edit dialog saves one; `None` sends no device_limit (keeps the stored one).
+fn e2e_set_device_limit(password: &str, limit: Option<u32>) {
+    let limit = limit.map_or_else(String::new, |limit| format!(r#","device_limit":{limit}"#));
+    e2e_api(&e2e_dev_web(), &format!("/api/clients/{password}"), &format!(r#"{{"name":"{password}","days":0{limit}}}"#))
+        .unwrap_or_else(|error| panic!("could not update {password}: {error}"));
+}
+
+/// B6b, case 2: at the password's limit (3 by default) a fourth device is refused with its own reason, which stops the
+/// run; an old app still gets in, past the limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server, CSQTT_E2E_DEV_PEER and CSQTT_E2E_DEV_WEB"]
+async fn devices_a_fourth_device_is_refused_and_an_old_app_still_gets_in() {
+    let peer = e2e_dev_peer();
+    let password = "e2e-dev-limit-three-2026";
+    e2e_limited_password(password, 3);
+    let a = E2eDevice::up(peer, password, Some(E2E_DEVICE_A), 601, "devices-limit-a").await;
+    let b = E2eDevice::up(peer, password, Some(E2E_DEVICE_B), 602, "devices-limit-b").await;
+    let c = E2eDevice::up(peer, password, Some(E2E_DEVICE_C), 603, "devices-limit-c").await;
+    let refusal = E2eDevice::refused(peer, password, "0000000000000000000000000000000d", 604, "devices-limit-d").await;
+    assert!(
+        refusal.contains("FATAL_AUTH") && refusal.contains("лимит устройств"),
+        "the fourth device ended with {refusal}"
+    );
+    let old = E2eDevice::up(peer, password, None, 605, "devices-limit-old").await;
+    for (name, device) in [("a", &a), ("b", &b), ("c", &c), ("old", &old)] {
+        assert!(device.alive().await, "device {name} carries nothing");
+    }
+    for device in [a, b, c, old] {
+        device.stop().await;
+    }
+}
+
+/// B6b, case 6: a device that stops sending (a phone that dies, no DISCONNECT) keeps its slot for 180 s, then gives it to
+/// the next device; the devices that carry are untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server, CSQTT_E2E_DEV_PEER and CSQTT_E2E_DEV_WEB"]
+async fn devices_a_silent_device_gives_its_slot_after_three_minutes() {
+    let peer = e2e_dev_peer();
+    let password = "e2e-dev-limit-two-2026";
+    e2e_limited_password(password, 2);
+    let a = E2eDevice::up(peer, password, Some(E2E_DEVICE_A), 701, "devices-silent-a").await;
+    let b = E2eDevice::up(peer, password, Some(E2E_DEVICE_B), 702, "devices-silent-b").await;
+    b.vanish().await;
+    let refusal = E2eDevice::refused(peer, password, E2E_DEVICE_C, 703, "devices-silent-c1").await;
+    assert!(refusal.contains("лимит устройств"), "a slot freed before 180 s of silence: {refusal}");
+    // a keeps sending (a keepalive every 10 s), b sends nothing; past 180 s b's slot is the next device's
+    tokio::time::sleep(Duration::from_secs(190)).await;
+    let c = E2eDevice::up(peer, password, Some(E2E_DEVICE_C), 704, "devices-silent-c2").await;
+    assert!(c.alive().await, "the device in b's slot carries nothing");
+    assert!(a.alive().await, "the device that kept sending lost its slot");
+    for device in [a, c] {
+        device.stop().await;
+    }
+}
+
+/// B6b, case 7: the owner sets the limit through the panel API: 1 admits one device; raising it admits the next;
+/// lowering it again cuts nobody; an update that leaves the field out keeps the limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server, CSQTT_E2E_DEV_PEER and CSQTT_E2E_DEV_WEB"]
+async fn devices_the_limit_follows_the_panel() {
+    let peer = e2e_dev_peer();
+    let password = "e2e-dev-limit-panel-2026";
+    e2e_limited_password(password, 1);
+    let a = E2eDevice::up(peer, password, Some(E2E_DEVICE_A), 801, "devices-panel-a").await;
+    let refusal = E2eDevice::refused(peer, password, E2E_DEVICE_B, 802, "devices-panel-b1").await;
+    assert!(refusal.contains("лимит устройств"), "{refusal}");
+    e2e_set_device_limit(password, Some(2));
+    let b = E2eDevice::up(peer, password, Some(E2E_DEVICE_B), 803, "devices-panel-b2").await;
+    e2e_set_device_limit(password, Some(1));
+    assert!(a.alive().await && b.alive().await, "lowering the limit cut a device");
+    e2e_set_device_limit(password, None);
+    let refusal = E2eDevice::refused(peer, password, E2E_DEVICE_C, 804, "devices-panel-c").await;
+    assert!(refusal.contains("лимит устройств"), "an update without the field changed the limit: {refusal}");
     for device in [a, b] {
         device.stop().await;
     }

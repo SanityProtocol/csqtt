@@ -179,6 +179,24 @@ pub struct PasswordEntry {
     pub sub_uuid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u32>,
+    /// B6b: how many of the password's devices may be connected at once (1–100); none stored = DEFAULT_DEVICE_LIMIT, so
+    /// every password a server had before B6 gets 3. A server run by swg-panel (`--desired`) counts no devices (P4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_limit: Option<u32>,
+}
+
+/// B6b: a password's device limit when none is stored (the operator, 2026-11-23: a new peer starts at 3).
+pub const DEFAULT_DEVICE_LIMIT: u32 = 3;
+/// B6b: the range an owner may set.
+pub const DEVICE_LIMIT_RANGE: std::ops::RangeInclusive<u32> = 1..=100;
+
+impl PasswordEntry {
+    /// B6b: the password's device limit, the default when none (or none in range) is stored.
+    pub fn device_limit(&self) -> u32 {
+        self.device_limit
+            .filter(|limit| DEVICE_LIMIT_RANGE.contains(limit))
+            .unwrap_or(DEFAULT_DEVICE_LIMIT)
+    }
 }
 
 pub const DEFAULT_LOCAL_PROXY_PORT: u16 = 45000;
@@ -975,7 +993,8 @@ CREATE TABLE IF NOT EXISTS passwords (
     group_id       TEXT    NOT NULL DEFAULT '',
     routing_rule_id TEXT   NOT NULL DEFAULT '',
     sub_uuid       TEXT    NOT NULL DEFAULT '',
-    workers        INTEGER
+    workers        INTEGER,
+    device_limit   INTEGER
 );
 CREATE TABLE IF NOT EXISTS local_proxy_profiles (
     id         TEXT PRIMARY KEY,
@@ -1222,6 +1241,13 @@ fn ensure_password_columns(connection: &Connection) -> Result<()> {
             .execute("ALTER TABLE passwords ADD COLUMN workers INTEGER", [])
             .context("add workers column")?;
     }
+    // B6b: NULL = the default limit, so a store from before B6 gives its passwords 3 (never named device_id: swg-noded
+    // takes a store with that column for 2.1's)
+    if !columns.iter().any(|column| column == "device_limit") {
+        connection
+            .execute("ALTER TABLE passwords ADD COLUMN device_limit INTEGER", [])
+            .context("add device_limit column")?;
+    }
     Ok(())
 }
 
@@ -1408,8 +1434,8 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                 "INSERT INTO passwords (
                     password, ip, expires_at, down_bytes, up_bytes,
                     vk_hash, ports, is_deactivated, name, vk_hashes, vk_token_enabled,
-                    dtls_port, wg_port, local_port, group_id, routing_rule_id, sub_uuid, workers
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    dtls_port, wg_port, local_port, group_id, routing_rule_id, sub_uuid, workers, device_limit
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ON CONFLICT(password) DO UPDATE SET
                     ip = excluded.ip,
                     expires_at = excluded.expires_at,
@@ -1427,7 +1453,8 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     group_id = excluded.group_id,
                     routing_rule_id = excluded.routing_rule_id,
                     sub_uuid = excluded.sub_uuid,
-                    workers = excluded.workers",
+                    workers = excluded.workers,
+                    device_limit = excluded.device_limit",
             )
             .context("prepare passwords insert")?;
         for (password, entry) in &db.passwords {
@@ -1451,6 +1478,7 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     entry.routing_rule_id,
                     entry.sub_uuid,
                     entry.workers.map(|w| w as i64),
+                    entry.device_limit.map(i64::from),
                 ])
                 .with_context(|| format!("write password {}", secret_tag(password)))?;
         }
@@ -1565,7 +1593,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
             .prepare(
                 "SELECT password, ip, expires_at, down_bytes, up_bytes,
                         vk_hash, ports, is_deactivated, name, vk_hashes, vk_token_enabled,
-                        dtls_port, wg_port, local_port, group_id, routing_rule_id, sub_uuid, workers
+                        dtls_port, wg_port, local_port, group_id, routing_rule_id, sub_uuid, workers, device_limit
                  FROM passwords",
             )
             .context("prepare passwords select")?;
@@ -1579,6 +1607,12 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                 .ok()
                 .flatten()
                 .and_then(|w| (3..=100).contains(&w).then_some(w as u32));
+            let device_limit: Option<u32> = row
+                .get::<_, Option<i64>>(18)
+                .ok()
+                .flatten()
+                .and_then(|limit| u32::try_from(limit).ok())
+                .filter(|limit| DEVICE_LIMIT_RANGE.contains(limit));
             let entry = PasswordEntry {
                 ip,
                 expires_at: row.get(2).context("read password expires_at")?,
@@ -1603,6 +1637,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                 routing_rule_id: row.get(15).unwrap_or_default(),
                 sub_uuid,
                 workers,
+                device_limit,
             };
             db.passwords.insert(password, entry);
         }
@@ -2755,6 +2790,33 @@ mod tests {
         persistence.wait(final_revision).await.unwrap();
         let restored = load_database(&directory).unwrap();
         assert_eq!(restored.main_up_bytes, 4096);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn a_password_keeps_its_device_limit_and_one_without_gets_three() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("csqtt-device-limit-test-{unique}"));
+        let persistence = DatabasePersistence::new(directory.clone()).unwrap();
+        let mut db = Database::default();
+        let with = |limit| PasswordEntry { device_limit: limit, ..PasswordEntry::default() };
+        db.passwords.insert("limited".into(), with(Some(7)));
+        db.passwords.insert("default".into(), with(None));
+        let revision = persistence.submit(db);
+        persistence.wait(revision).await.unwrap();
+        let restored = load_database(&directory).unwrap();
+        assert_eq!(restored.passwords["limited"].device_limit, Some(7));
+        assert_eq!(restored.passwords["limited"].device_limit(), 7);
+        // none stored — every password a server had before B6 — is the default 3
+        assert_eq!(restored.passwords["default"].device_limit, None);
+        assert_eq!(restored.passwords["default"].device_limit(), super::DEFAULT_DEVICE_LIMIT);
+        // a value out of range never limits a password to 0 or 1000
+        assert_eq!(with(Some(0)).device_limit(), 3);
+        assert_eq!(with(Some(101)).device_limit(), 3);
+        assert_eq!(with(Some(100)).device_limit(), 100);
         let _ = std::fs::remove_dir_all(directory);
     }
 
