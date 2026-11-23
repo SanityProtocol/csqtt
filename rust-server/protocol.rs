@@ -5240,7 +5240,9 @@ async fn handle_getconf(
                         .store(u64::from(effective_desired_count), Ordering::Release);
                     // B6: the address before the purge, while the device's older run still shows the one it had; it is
                     // the session's at once, so the next choice — under this same lock — sees it taken
-                    let remembered = epoch.address_of(device);
+                    // only where devices are told apart: under --desired every client is its password's legacy device on
+                    // its row's address, and a remembered one could outlive a row the panel removed and added again
+                    let remembered = devices_enabled().then(|| epoch.address_of(device)).flatten();
                     let ip_str = device_tunnel_ip(
                         app,
                         &mut db,
