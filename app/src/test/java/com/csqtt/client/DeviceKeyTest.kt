@@ -49,11 +49,22 @@ class DeviceKeyTest {
     fun `the key stays on this phone`() {
         assertTrue("device_key" in SettingsStore.notBackedUpGlobalKeys)
         assertFalse("device_key" in SettingsStore.backupGlobalKeys.keys)
+        // a backup leaves it out, and a restore leaves this phone's in place, even over a file that carries one
+        val key = "000102030405060708090a0b0c0d0e0f"
+        val phone = mutablePreferencesOf(stored to key)
+        val json = StoreBackup.encode(phone, serverSecrets = true, decrypt = { it }, exportedAt = 1L)
+        assertFalse(json.contains(key))
+        val planted = org.json.JSONObject(json).also { root ->
+            (root.optJSONObject("settings") ?: org.json.JSONObject().also { root.put("settings", it) })
+                .put("device_key", "f".repeat(32))
+        }.toString()
+        StoreBackup.restore(phone, planted, { it }, { it })
+        assertEquals(key, phone[stored])
     }
 
     @Test
-    fun `the device limit stops the run with its own cause`() {
-        // the core's fatal event, and a worker's copy of the refusal in the log, which the app also reads
+    fun `the device limit's refusal maps to its own cause`() {
+        // the core's fatal event, and the workers' copies of the refusal in the log, which the app also reads
         assertEquals(StopCause.DEVICE_LIMIT, StopCause.deviceLimit("FATAL_AUTH: достигнут лимит устройств для этого пароля"))
         assertEquals(
             StopCause.DEVICE_LIMIT,
@@ -61,7 +72,15 @@ class DeviceKeyTest {
                 "[ВОРКЕР #3] Ошибка подключения, изолированный повтор через 2s: AUTH_RETRY: достигнут лимит устройств для этого пароля",
             ),
         )
+        assertEquals(
+            StopCause.DEVICE_LIMIT,
+            StopCause.deviceLimit(
+                "[ВОРКЕР #4] Нефатальная ошибка разбора TUNCONF: FATAL_AUTH: достигнут лимит устройств для этого пароля, продолжаем ожидание",
+            ),
+        )
         assertNull(StopCause.deviceLimit("FATAL_AUTH: неверный пароль подключения"))
         assertNull(StopCause.deviceLimit("доступ отклонён сервером (server_busy)"))
+        // the cause is stored and announced masked, as every cause is: nothing in it is taken for a secret
+        assertEquals(StopCause.DEVICE_LIMIT, StopCause.masked(StopCause.DEVICE_LIMIT, listOf("H".repeat(20))))
     }
 }
