@@ -114,6 +114,8 @@ pub struct RuntimeParams {
     pub salt: Arc<str>,
     pub local_port: Arc<str>,
     pub password: Arc<str>,
+    /// B6: the device id every worker's GETCONF carries (`protocol::device_id`)
+    pub device_id: Option<Arc<str>>,
     pub workers: Arc<AtomicUsize>,
     pub configured_workers: usize,
 }
@@ -844,6 +846,7 @@ async fn worker_loop(
             srtp_mode: context.params.srtp_mode,
             local_port: context.params.local_port.clone(),
             password: context.params.password.clone(),
+            device_id: context.params.device_id.clone(),
             generation: context.params.generation,
             salt: context.params.salt.clone(),
             mode: context.params.mode,

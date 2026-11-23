@@ -84,6 +84,8 @@ pub struct SessionConfig {
     pub dpi_split: crate::dpi_split::DpiSplit,
     pub local_port: Arc<str>,
     pub password: Arc<str>,
+    /// B6: this install's id for the password on this server (`protocol::device_id`); `None` sends no `dev=`
+    pub device_id: Option<Arc<str>>,
     pub generation: u64,
     pub turn_endpoint_cursor: usize,
     pub salt: Arc<str>,
@@ -122,6 +124,7 @@ fn build_registration_payload(config: &SessionConfig) -> Bytes {
         &config.salt,
         config.id,
         Some(config.configured_workers.max(1)),
+        config.device_id.as_deref(),
     ))
 }
 
@@ -1763,6 +1766,7 @@ mod tests {
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from("9000"),
             password: Arc::from("pass1234"),
+            device_id: None,
             generation: 0,
             turn_endpoint_cursor: 0,
             salt: Arc::from(""),
@@ -1792,6 +1796,7 @@ mod tests {
             srtp_mode: SrtpMode::Auto,
             local_port: Arc::from("9000"),
             password: Arc::from("pass1234"),
+            device_id: None,
             generation: 7,
             turn_endpoint_cursor: 0,
             salt: Arc::from("generation-id"),
@@ -2554,7 +2559,7 @@ mod tests {
     #[test]
     fn config_request_announces_h1() {
         // the capability is field 6, after the six fields every 2.5 server reads (fields 0-5)
-        let request = crate::protocol::config_request("9000", "pw", 7, "salt", 1, None);
+        let request = crate::protocol::config_request("9000", "pw", 7, "salt", 1, None, None);
         let fields: Vec<&str> = request.strip_prefix("GETCONF:").unwrap().split('|').collect();
         assert_eq!(fields.len(), 7);
         assert_eq!(fields[6], "caps=h1");

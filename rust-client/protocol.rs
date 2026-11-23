@@ -23,6 +23,23 @@ pub struct StreamRepairCommand {
 /// What this client announces in GETCONF (the server's ClientCaps): `h1` = it reads `HASHES:`.
 pub const CLIENT_CAPS: &str = "h1";
 
+/// B6 (D21): the app's install key, 16 bytes as 32 hex digits, in the environment only (an argument would show in
+/// /proc/<pid>/cmdline).
+pub const DEVICE_KEY_ENV: &str = "CSQTT_DEVICE_KEY";
+
+/// B6: this install's device id on one server: the first 16 bytes of HMAC-SHA256(install key, "csqtt-device-v1|" +
+/// password), as 32 lowercase hex digits. One install keeps its id for a password; two servers never see the same id;
+/// the key itself never leaves the device. A key that is not 32 hex digits gives no id: the client then sends no
+/// `dev=` and the server counts it as the password's one legacy device, as an old app.
+pub fn device_id(key_hex: &str, password: &str) -> Option<String> {
+    let key = hex::decode(key_hex.trim()).ok().filter(|key| key.len() == 16)?;
+    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &key);
+    let mut context = aws_lc_rs::hmac::Context::with_key(&key);
+    context.update(b"csqtt-device-v1|");
+    context.update(password.as_bytes());
+    Some(hex::encode(&context.sign().as_ref()[..16]))
+}
+
 pub fn config_request(
     local_port: &str,
     password: &str,
@@ -30,10 +47,15 @@ pub fn config_request(
     salt: &str,
     worker_id: usize,
     desired_count: Option<usize>,
+    device_id: Option<&str>,
 ) -> String {
     let desired_count = desired_count.map_or_else(String::new, |value| value.to_string());
-    // `caps=h1`: this client reads HASHES: (S8). A stock 2.5 server reads fields 0-5 only, so it never sees it.
-    format!("GETCONF:{local_port}|{password}|{generation_id}|{salt}|{worker_id}|{desired_count}|caps={CLIENT_CAPS}")
+    let device = device_id.map_or_else(String::new, |id| format!("|dev={id}"));
+    // `caps=h1`: this client reads HASHES: (S8); `dev=`: its device id (B6). A stock 2.5 server reads fields 0-5 only,
+    // so it never sees either.
+    format!(
+        "GETCONF:{local_port}|{password}|{generation_id}|{salt}|{worker_id}|{desired_count}|caps={CLIENT_CAPS}{device}"
+    )
 }
 
 pub fn parse_config_response(response: &[u8]) -> Result<ConfigResponse> {
@@ -46,6 +68,8 @@ pub fn parse_config_response(response: &[u8]) -> Result<ConfigResponse> {
             "wrong_password" => bail!("FATAL_AUTH: неверный пароль подключения"),
             "expired" => bail!("FATAL_AUTH: срок действия пароля истёк"),
             "deactivated" => bail!("FATAL_AUTH: аккаунт деактивирован"),
+            // B6: the password's devices are at its limit, and none of them has been silent long enough to free a slot
+            "device_limit" => bail!("FATAL_AUTH: достигнут лимит устройств для этого пароля"),
             "protocol_mismatch" => bail!(
                 "FATAL_PROTOCOL: клиент и сервер используют разные версии протокола; выполните деплой из этой версии приложения"
             ),
@@ -166,11 +190,58 @@ mod tests {
 
     #[test]
     fn request_matches_go_contract() {
-        let req1 = config_request("9000", "pass1234567890ab", 7, "salt", 4, None);
+        let req1 = config_request("9000", "pass1234567890ab", 7, "salt", 4, None, None);
         assert_eq!(req1, "GETCONF:9000|pass1234567890ab|7|salt|4||caps=h1");
 
-        let req2 = config_request("9000", "pass1234567890ab", 7, "salt", 4, Some(36));
+        let req2 = config_request("9000", "pass1234567890ab", 7, "salt", 4, Some(36), None);
         assert_eq!(req2, "GETCONF:9000|pass1234567890ab|7|salt|4|36|caps=h1");
+    }
+
+    #[test]
+    fn device_id_is_the_hmac_of_the_install_key_and_the_password() {
+        // reference values: Python's hmac.new(key, b"csqtt-device-v1|" + password, sha256).digest()[:16].hex()
+        let key = "000102030405060708090a0b0c0d0e0f";
+        assert_eq!(
+            device_id(key, "pw").as_deref(),
+            Some("3491150b7870d83656cfb30a122e662e")
+        );
+        assert_eq!(
+            device_id(key, "e2e-local-password-20260830").as_deref(),
+            Some("7fc7bca3cafcaeaefbc4875cad8ef8e9")
+        );
+        assert_eq!(
+            device_id("FFEEDDCCBBAA99887766554433221100", "pw").as_deref(),
+            Some("1c87f7d4624d1a65ed3d91c4732d55ce")
+        );
+        assert_eq!(device_id(&format!(" {key}\n"), "pw"), device_id(key, "pw"));
+    }
+
+    #[test]
+    fn a_key_that_is_not_16_bytes_of_hex_gives_no_device_id() {
+        for key in [
+            "",
+            "000102030405060708090a0b0c0d0e",
+            "000102030405060708090a0b0c0d0e0f10",
+            "000102030405060708090a0b0c0d0e0",
+            "000102030405060708090a0b0c0d0e0g",
+            "AAECAwQFBgcICQoLDA0ODw==",
+        ] {
+            assert_eq!(device_id(key, "pw"), None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn the_device_id_rides_after_the_caps_field() {
+        let id = device_id("000102030405060708090a0b0c0d0e0f", "pw").unwrap();
+        assert_eq!(
+            config_request("9000", "pw", 7, "salt", 1, Some(10), Some(&id)),
+            "GETCONF:9000|pw|7|salt|1|10|caps=h1|dev=3491150b7870d83656cfb30a122e662e"
+        );
+        // fields 0-5 are what a stock 2.5 server reads: the same with an id as without one
+        let with = config_request("9000", "pw", 7, "salt", 1, Some(10), Some(&id));
+        let without = config_request("9000", "pw", 7, "salt", 1, Some(10), None);
+        let first_six = |request: &str| request.split('|').take(6).collect::<Vec<_>>().join("|");
+        assert_eq!(first_six(&with), first_six(&without));
     }
 
     #[test]
@@ -282,6 +353,7 @@ mod tests {
             b"DENIED:wrong_password".as_slice(),
             b"DENIED:expired".as_slice(),
             b"DENIED:deactivated".as_slice(),
+            b"DENIED:device_limit".as_slice(),
         ] {
             assert!(
                 parse_config_response(response)
@@ -303,8 +375,19 @@ mod tests {
     }
 
     #[test]
+    fn the_device_limit_stops_the_run_with_its_own_text() {
+        let error = parse_config_response(b"DENIED:device_limit")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "FATAL_AUTH: достигнут лимит устройств для этого пароля"
+        );
+    }
+
+    #[test]
     fn test_two_stage_handshake_requests_and_responses() {
-        let req1 = config_request("45000", "pass123", 789, "salt99", 1, None);
+        let req1 = config_request("45000", "pass123", 789, "salt99", 1, None, None);
         assert_eq!(req1, "GETCONF:45000|pass123|789|salt99|1||caps=h1");
 
         let req2 = workers_request("pass123", 25);

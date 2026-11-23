@@ -257,6 +257,15 @@ async fn run(arguments: Arguments) -> Result<i32> {
     if password.is_empty() {
         bail!("[КЛИЕНТ] Нужен пароль в переменной CSQTT_PASSWORD");
     }
+    // B6: the device id comes from the app's install key; a client without one (an old app, csq-socks) is the
+    // password's one legacy device on the server
+    let device_key = std::env::var(crate::protocol::DEVICE_KEY_ENV).unwrap_or_default();
+    let device_id = crate::protocol::device_id(&device_key, &password);
+    if device_id.is_none() && !device_key.trim().is_empty() {
+        crate::log_error!(
+            "[КЛИЕНТ] Ключ устройства не разобран (нужны 32 шестнадцатеричных знака): подключаемся без id устройства"
+        );
+    }
     let mut stdin = spawn_stdin_reader();
     let peer = resolve_peer(&arguments.peer).await?;
     let mode = ObfsMode::parse(&arguments.obfs)?;
@@ -414,6 +423,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
         salt: Arc::from(arguments.salt.as_str()),
         local_port: local_port.clone(),
         password: Arc::from(password.as_str()),
+        device_id: device_id.map(Arc::from),
         workers: params_workers,
         configured_workers: workers,
     });
@@ -939,6 +949,10 @@ fn print_configuration(
         crate::log_error!("[КЛИЕНТ] Обход DPI: только для TCP, при UDP не применяется");
     }
     crate::log_error!("[WRAP] WRAP Ключ вычислен ✓");
+    match params.device_id.as_deref() {
+        Some(id) => crate::log_error!("[КЛИЕНТ] Id устройства: {}…", &id[..8]),
+        None => crate::log_error!("[КЛИЕНТ] Id устройства: нет"),
+    }
     crate::log_error!("[КЛИЕНТ] Captcha: {captcha}");
     if arguments.domain_routing {
         crate::log_error!(
