@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -445,6 +446,8 @@ private fun TunnelUptimeText(tunnelRunning: Boolean) {
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
         },
+        // its own layer: each second's tick invalidates this text alone, not the card around it (the B5g A/B, the operator)
+        modifier = Modifier.graphicsLayer(),
     )
 }
 
@@ -492,6 +495,8 @@ private fun TunnelLiveFigures() {
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
+            // its own layer, as the uptime's: while bytes move it changes on every STATS, every 500 ms
+            modifier = Modifier.graphicsLayer(),
         )
     }
     Text(
