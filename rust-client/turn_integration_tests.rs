@@ -4788,6 +4788,27 @@ async fn devices_a_stop_ends_only_the_stopping_device() {
     }
 }
 
+/// B6 (review F2): a device's next run after a stop takes its address again while it is free — an in-run restart (a
+/// network swap) stops the old core before the new one connects, and an unchanged address keeps the phone's VPN
+/// interface and its connections — even when a lower address has come free meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server and CSQTT_E2E_DEV_PEER"]
+async fn devices_a_device_keeps_its_address_across_a_stop() {
+    let peer = e2e_dev_peer();
+    let a = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_A), 451, "devices-keep-a").await;
+    let b = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_B), 452, "devices-keep-b").await;
+    let c = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_C), 453, "devices-keep-c1").await;
+    let c_address = c.address;
+    b.stop().await;
+    c.stop().await;
+    let c2 = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_C), 454, "devices-keep-c2").await;
+    assert_eq!(c2.address, c_address, "the device's next run moved to the address b freed");
+    assert!(c2.alive().await, "the device's next run carries nothing");
+    for device in [a, c2] {
+        device.stop().await;
+    }
+}
+
 /// B6, case 8 (and 9, run against the shipped 2.5.3 core): a server run by swg-panel (`--desired`) — like any 2.5 server —
 /// keeps one device per password: a second device takes the password's one address and replaces the first, as before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

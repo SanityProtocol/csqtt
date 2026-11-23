@@ -632,6 +632,10 @@ impl PasswordEpochSlot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PasswordEpochState {
     devices: Vec<(DeviceKey, u64, String)>,
+    /// B6: the address each device had last. An in-run restart stops the old core (DISCONNECT) before the new one
+    /// connects, so the next run finds no session of its device: it takes this address again while it is free, and
+    /// the phone keeps its VPN interface and its connections. Kept across a stop; gone with the password's slot.
+    addresses: Vec<(DeviceKey, [u8; 4])>,
 }
 
 impl PasswordEpochState {
@@ -658,9 +662,22 @@ impl PasswordEpochState {
         })
     }
 
-    /// B6: the device stopped (DISCONNECT): its run is no longer current
+    /// B6: the device stopped (DISCONNECT): its run is no longer current (its address stays remembered)
     fn forget(&mut self, device: DeviceKey) {
         self.devices.retain(|(known, ..)| *known != device);
+    }
+
+    fn address_of(&self, device: DeviceKey) -> Option<[u8; 4]> {
+        self.addresses
+            .iter()
+            .find_map(|(known, address)| (*known == device).then_some(*address))
+    }
+
+    fn remember(&mut self, device: DeviceKey, address: [u8; 4]) {
+        match self.addresses.iter_mut().find(|(known, _)| *known == device) {
+            Some((_, known_address)) => *known_address = address,
+            None => self.addresses.push((device, address)),
+        }
     }
 }
 
@@ -4878,15 +4895,18 @@ pub fn held_addresses(app: &Arc<App>) -> std::collections::HashSet<[u8; 4]> {
 }
 
 /// B6: the tunnel address of a session of `password`'s `device`, chosen under the db write lock (`db`): the one the device
-/// already has; else the password's own — the row's, `.2` for the owner — unless another device of the password holds
-/// it; else the lowest pool address no row has and no live session holds. Empty when none is left (NOCONF). A password's
-/// only device, the legacy one above all, gets the password's own address, as before B6.
+/// already has; else the one it had last (`remembered`) while no session holds it and no other row records it; else
+/// the password's own — the row's, `.2` for the owner — unless another device of the password holds it; else the lowest
+/// pool address no row has and no live session holds. Empty when none is left (NOCONF). A password's only device, the
+/// legacy one above all, gets the password's own address, as before B6.
+#[allow(clippy::too_many_arguments)]
 fn device_tunnel_ip(
     app: &Arc<App>,
     db: &mut Database,
     access: &CredentialAccess,
     password: &str,
     device: DeviceKey,
+    remembered: Option<[u8; 4]>,
     session_id: u64,
     changed: &mut bool,
 ) -> String {
@@ -4909,10 +4929,19 @@ fn device_tunnel_ip(
             entry.ip.clone()
         }
     };
-    choose_device_ip(device_ip, own, &held, || get_next_ip(db, &held))
+    let own_ip = crate::tun_device::parse_ipv4(&own);
+    let remembered = remembered.filter(|address| {
+        !held.contains(address)
+            && (own_ip == Some(*address)
+                || !db.passwords.values().any(|entry| {
+                    crate::tun_device::parse_ipv4(&entry.ip) == Some(*address)
+                }))
+    });
+    choose_device_ip(device_ip.or(remembered), own, &held, || get_next_ip(db, &held))
 }
 
-/// B6: `device_ip` when the device has one; else the password's `own` unless another device holds it; else `next_free`.
+/// B6: `device_ip` when the device has one (live, or remembered and free); else the password's `own` unless another
+/// device holds it; else `next_free`.
 fn choose_device_ip(
     device_ip: Option<[u8; 4]>,
     own: String,
@@ -5211,10 +5240,20 @@ async fn handle_getconf(
                         .store(u64::from(effective_desired_count), Ordering::Release);
                     // B6: the address before the purge, while the device's older run still shows the one it had; it is
                     // the session's at once, so the next choice — under this same lock — sees it taken
-                    let ip_str =
-                        device_tunnel_ip(app, &mut db, &access, password, device, session.id, &mut changed);
+                    let remembered = epoch.address_of(device);
+                    let ip_str = device_tunnel_ip(
+                        app,
+                        &mut db,
+                        &access,
+                        password,
+                        device,
+                        remembered,
+                        session.id,
+                        &mut changed,
+                    );
                     if let Some(ip) = crate::tun_device::parse_ipv4(&ip_str) {
                         *lock_unpoison(&session.tunnel_ip) = Some(ip);
+                        epoch.remember(device, ip);
                     }
                     purge_stale_password_sessions(
                         app,
@@ -6373,8 +6412,13 @@ mod tests {
         // one device's run never authorises another's DISCONNECT
         assert!(!state.matches(b, 8, "salt-a2"));
         // a stop forgets that device alone
+        state.remember(a, [10, 66, 67, 7]);
+        state.remember(a, [10, 66, 67, 8]);
         state.forget(a);
         assert!(!state.matches(a, 8, "salt-a2") && state.matches(b, 7, "salt-b") && state.matches(L, 7, "salt-l"));
+        // ...and keeps its last address for its next run (review F2: an in-run restart stops the old core first)
+        assert_eq!(state.address_of(a), Some([10, 66, 67, 8]));
+        assert_eq!(state.address_of(b), None);
     }
 
     #[test]

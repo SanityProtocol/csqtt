@@ -1722,7 +1722,9 @@ async fn swgpanel_reconcile_desired(app: &Arc<App>, path: &std::path::Path) {
                 }
                 None => {
                     // as the stock web panel's client_create: the address and the subscription id are given here
-                    let ip = model::get_next_ip(&db, &protocol::held_addresses(app)).unwrap_or_default();
+                    // --desired: one device per password, each session on its own row's address, so the rows alone
+                    // decide, as before B6 (a peer deleted and another added in one update: the freed address at once)
+                    let ip = model::get_next_ip(&db, &Default::default()).unwrap_or_default();
                     db.passwords.insert(
                         (*pw).to_owned(),
                         model::PasswordEntry {
