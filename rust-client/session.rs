@@ -1812,6 +1812,15 @@ mod tests {
             build_registration_payload(&config).as_ref(),
             b"GETCONF:9000|pass1234|7|generation-id|1|18|caps=h1"
         );
+        // B6: a run with a device id puts it on every GETCONF the session sends
+        let config = SessionConfig {
+            device_id: Some(Arc::from("3491150b7870d83656cfb30a122e662e")),
+            ..config
+        };
+        assert_eq!(
+            build_registration_payload(&config).as_ref(),
+            b"GETCONF:9000|pass1234|7|generation-id|1|18|caps=h1|dev=3491150b7870d83656cfb30a122e662e"
+        );
     }
 
     #[tokio::test]

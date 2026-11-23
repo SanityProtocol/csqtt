@@ -28,8 +28,8 @@ pub const CLIENT_CAPS: &str = "h1";
 pub const DEVICE_KEY_ENV: &str = "CSQTT_DEVICE_KEY";
 
 /// B6: this install's device id on one server: the first 16 bytes of HMAC-SHA256(install key, "csqtt-device-v1|" +
-/// password), as 32 lowercase hex digits. One install keeps its id for a password; two servers never see the same id;
-/// the key itself never leaves the device. A key that is not 32 hex digits gives no id: the client then sends no
+/// password), as 32 lowercase hex digits. One install keeps its id for a password; servers with different passwords
+/// never see the same id; the key itself never leaves the device. A key that is not 32 hex digits gives no id: the client then sends no
 /// `dev=` and the server counts it as the password's one legacy device, as an old app.
 pub fn device_id(key_hex: &str, password: &str) -> Option<String> {
     let key = hex::decode(key_hex.trim()).ok().filter(|key| key.len() == 16)?;
