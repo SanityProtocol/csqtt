@@ -437,18 +437,20 @@ private fun TunnelUptimeText(tunnelRunning: Boolean) {
     }
     val seconds = mark.frozenSeconds
         ?: mark.startedAtMs.takeIf { it > 0L }?.let { (now - it).coerceAtLeast(0L) / 1_000L }
-    Text(
-        text = formatTunnelUptime(seconds),
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.SemiBold,
-        color = if (tunnelRunning) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
-        },
-        // its own layer: each second's tick invalidates this text alone, not the card around it (the B5g A/B, the operator)
-        modifier = Modifier.graphicsLayer(),
-    )
+    // a layer of its own on a box as wide as the card (the B5g A/B, the operator): each second's tick re-records this text
+    // alone, not the card around it — a width change too (a font with proportional digits), since the box never moves
+    Box(Modifier.fillMaxWidth().graphicsLayer(), contentAlignment = Alignment.TopCenter) {
+        Text(
+            text = formatTunnelUptime(seconds),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = if (tunnelRunning) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
+            },
+        )
+    }
 }
 
 /** M-86 (B5g): the tunnel's own ping, on demand (TunnelManager.probe); its answer stays until the run ends. */
@@ -490,14 +492,15 @@ private fun TunnelLiveFigures() {
     val serverLimit by TunnelManager.serverAssignedWorkers.collectAsStateWithLifecycle()
     val trafficText = formatTraffic(traffic)
     if (trafficText.isNotEmpty()) {
-        Text(
-            text = trafficText,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            // its own layer, as the uptime's: while bytes move it changes on every STATS, every 500 ms
-            modifier = Modifier.graphicsLayer(),
-        )
+        // as the uptime's: while bytes move it changes on every STATS (every 500 ms), its width with the figures
+        Box(Modifier.fillMaxWidth().graphicsLayer(), contentAlignment = Alignment.TopCenter) {
+            Text(
+                text = trafficText,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
     Text(
         text = workersLine(active, target, serverLimit),
