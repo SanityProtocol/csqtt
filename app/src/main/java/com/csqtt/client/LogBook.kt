@@ -74,15 +74,17 @@ internal class LogBook(
 
     /**
      * B5g: the records an earlier process left (LogTail) go in front of this one's, under «Перезапуск приложения»; they
-     * count as read. The newest are kept when they all do not fit.
+     * count as read. The newest are kept when they all do not fit. A process that recorded nothing left its own heading
+     * last: this one's takes its place, so opening the app again and again adds no row of headings (the device check).
      */
     fun restore(earlier: List<LogEntry>) {
-        if (earlier.isEmpty()) return
+        val kept = earlier.dropLastWhile { it.separator && it.message == RESTART_LABEL }
+        if (kept.isEmpty()) return
         val now = clock()
         synchronized(lock) {
             val current = records.toList()
             records.clear()
-            earlier.forEach { records.addLast(it.copy(id = nextId++)) }
+            kept.forEach { records.addLast(it.copy(id = nextId++)) }
             records.addLast(LogEntry(nextId++, now, SECTION_KEY, RESTART_LABEL, separator = true))
             current.forEach(records::addLast)
             while (records.size > capacity) records.removeFirst()

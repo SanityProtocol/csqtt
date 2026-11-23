@@ -75,6 +75,36 @@ class LogTailTest {
     }
 
     @Test
+    fun `opening the app again and again, recording nothing, leaves one heading`() {
+        // the device check (2026-11-23): each process life that recorded nothing added its own heading
+        var file = LogTail.encode(listOf(entry(1, "old one"), entry(2, "old two", error = true)))
+        var now = 10_000L
+        repeat(3) {
+            val book = LogBook(capacity = 10, clock = { now })
+            book.restore(LogTail.decode(file))
+            file = LogTail.encode(book.snapshot()) // the app leaves the screen: the tail is written
+            now += 60_000
+        }
+        val back = LogTail.decode(file)
+        assertEquals(listOf("old one", "old two", LogBook.RESTART_LABEL), back.map { it.message })
+        assertEquals(130_000L, back.last().timeMs) // the newest start's time
+        // a file of headings alone gives nothing to restore
+        val book = LogBook(capacity = 10, clock = { now })
+        val version = book.version.value
+        book.restore(
+            listOf(entry(3, LogBook.RESTART_LABEL, separator = true), entry(4, LogBook.RESTART_LABEL, separator = true)),
+        )
+        assertTrue(book.snapshot().isEmpty())
+        assertEquals(version, book.version.value)
+        // a heading with records after it stays where it is
+        book.restore(listOf(entry(5, "older"), entry(6, LogBook.RESTART_LABEL, separator = true), entry(7, "later")))
+        assertEquals(
+            listOf("older", LogBook.RESTART_LABEL, "later", LogBook.RESTART_LABEL),
+            book.snapshot().map { it.message },
+        )
+    }
+
+    @Test
     fun `an error writes at once, then at most once a minute, later errors sharing one write`() {
         val gate = ErrorWriteGate(60_000)
         assertEquals(0L, gate.claim(1_000))
