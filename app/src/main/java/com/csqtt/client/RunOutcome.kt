@@ -27,6 +27,15 @@ internal object StopCause {
     const val NO_HASHES_OR_TOKEN = "Нет VK-хешей и VK-токена"
     const val FOREGROUND_REFUSED = "Android не дал запустить туннель в фоне"
     const val VPN_REVOKED = "VPN отключён Android или другим приложением: включите снова"
+    /** B6: the server refused this phone: the password's other devices fill its limit, none silent long enough to give way. */
+    const val DEVICE_LIMIT = "Достигнут лимит устройств для этого пароля. Отключите VPN на другом устройстве, подождите " +
+        "несколько минут, если оно уже выключено, или попросите владельца поднять лимит"
+
+    /**
+     * B6: [coreLine] as the device limit's cause when it is the core's refusal for it («FATAL_AUTH: достигнут лимит
+     * устройств для этого пароля», its fatal event, or a worker's AUTH_RETRY copy of it in the log); null for any other.
+     */
+    fun deviceLimit(coreLine: String): String? = DEVICE_LIMIT.takeIf { coreLine.contains("лимит устройств") }
 
     fun startError(message: String?): String = "Ошибка запуска: ${message?.trim()?.takeIf { it.isNotEmpty() } ?: "неизвестная"}"
 

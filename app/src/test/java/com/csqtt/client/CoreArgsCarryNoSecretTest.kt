@@ -42,6 +42,10 @@ class CoreArgsCarryNoSecretTest {
         assertEquals(hashes.joinToString(","), env["CSQTT_VK_HASHES"])
         assertEquals(emptyMap<String, String>(), coreSecretEnv("", emptyList()))
         assertEquals(setOf("CSQTT_VK_HASHES"), coreSecretEnv("", hashes).keys)
+        // B6: the install's device key too; none given, none set (the core then sends no device id)
+        val key = "000102030405060708090a0b0c0d0e0f"
+        assertEquals(key, coreSecretEnv(password, hashes, key)["CSQTT_DEVICE_KEY"])
+        assertFalse("CSQTT_DEVICE_KEY" in coreSecretEnv(password, hashes).keys)
     }
 
     @Test

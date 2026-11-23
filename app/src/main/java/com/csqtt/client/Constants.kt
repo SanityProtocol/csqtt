@@ -37,6 +37,8 @@ object CsqttConstants {
         const val PROCESS_ENV_EVENTS = "CSQTT_EVENTS"
         // the VK hashes reach the core in its environment, never in argv (M-172)
         const val VK_HASHES_ENV = "CSQTT_VK_HASHES"
+        // B6: this install's device key, the same way (the core sends an id derived from it, never the key)
+        const val DEVICE_KEY_ENV = "CSQTT_DEVICE_KEY"
 
         const val DEFAULT_FINGERPRINT = "firefox"
         const val DEFAULT_CLIENT_IDS = "8202606,6287487"

@@ -156,10 +156,11 @@ internal fun coreBaseCommand(
     add(params.captchaMode)
 }
 
-/** The core's secrets, for its environment (the core reads CSQTT_PASSWORD and CSQTT_VK_HASHES). */
-internal fun coreSecretEnv(password: String, hashes: List<String>): Map<String, String> = buildMap {
+/** The core's secrets, for its environment (the core reads CSQTT_PASSWORD, CSQTT_VK_HASHES and, B6, CSQTT_DEVICE_KEY). */
+internal fun coreSecretEnv(password: String, hashes: List<String>, deviceKey: String = ""): Map<String, String> = buildMap {
     if (password.isNotEmpty()) put("CSQTT_PASSWORD", password)
     if (hashes.isNotEmpty()) put(CsqttConstants.Tunnel.VK_HASHES_ENV, hashes.joinToString(","))
+    if (deviceKey.isNotEmpty()) put(CsqttConstants.Tunnel.DEVICE_KEY_ENV, deviceKey)
 }
 
 object TunnelManager {
@@ -824,7 +825,7 @@ object TunnelManager {
             }
             is TunnelEventParser.Event.Error -> {
                 if (event.fatal) {
-                    handleCriticalError(event.message, identity)
+                    handleCriticalError(StopCause.deviceLimit(event.message) ?: event.message, identity)
                 } else {
                     updateProcessLog(identity, "event_error_${event.code}", event.message, 99, true)
                 }
@@ -1340,6 +1341,7 @@ object TunnelManager {
                 restartJob = null
                 if (isSwitching) terminateProcessLocked(processIdentity)
                 if (isSwitching) currentParams = params
+                loadDeviceKey(appContext)
                 startProcessLocked(appContext, params, epoch)
             }
         }
@@ -1395,6 +1397,7 @@ object TunnelManager {
                 trafficTracker.reset()
                 traffic.value = null
                 val epoch = if (replacing) lifecycleState.requestRestart() ?: return@withLock else lifecycleState.requestStart()
+                loadDeviceKey(appContext)
                 startProcessLocked(appContext, params, epoch)
                 // `running` does not change on a switch, so nothing else ends the `starting` its restore began
                 starting.value = false
@@ -1411,6 +1414,15 @@ object TunnelManager {
         stopping.value = false
         starting.value = false
         activeWorkers.value = 0
+    }
+
+    // B6: this install's device key, read once a process at its first start (a key that cannot be read leaves the core
+    // without one, as an old app: the server's one legacy slot for the password)
+    @Volatile
+    private var deviceKey: String = ""
+
+    private suspend fun loadDeviceKey(context: Context) {
+        if (deviceKey.isEmpty()) deviceKey = runCatching { SettingsStore(context).deviceKey() }.getOrDefault("")
     }
 
     private fun startProcessLocked(context: Context, params: TunnelParams, epoch: Long) {
@@ -1516,7 +1528,7 @@ object TunnelManager {
         pb.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
         pb.environment()[CsqttConstants.Tunnel.PROCESS_ENV_EVENTS] = "1"
         pb.environment()["RAYON_NUM_THREADS"] = "2"
-        pb.environment().putAll(coreSecretEnv(params.connectionPassword, hashList))
+        pb.environment().putAll(coreSecretEnv(params.connectionPassword, hashList, deviceKey))
 
         val ticket = lifecycleState.reserveProcess(epoch, process == null)
         if (ticket == null) {
@@ -1702,7 +1714,7 @@ object TunnelManager {
                             lineTrim.contains("деактивирован") -> "Аккаунт деактивирован"
                             else -> "Ошибка авторизации"
                         }
-                        handleCriticalError("\uD83D\uDD12 $reason. Воркеры остановлены.", identity)
+                        handleCriticalError(StopCause.deviceLimit(lineTrim) ?: "\uD83D\uDD12 $reason. Воркеры остановлены.", identity)
                         return@forEachLine
                     }
 

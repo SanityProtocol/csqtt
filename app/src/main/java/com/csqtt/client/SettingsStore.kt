@@ -459,6 +459,14 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val LAST_STOP_CAUSE = stringPreferencesKey("last_stop_cause")
         // the profile the tunnel runs on, from its start (or the switch onto it) to its stop (this device's state)
         private val RUN_PROFILE = intPreferencesKey("run_profile")
+        // B6: this install's key, from which the core derives its device id for each password (made once, kept for the
+        // install's life). Never exported and in no backup: a copy restored on another phone would take this one's slot
+        private val DEVICE_KEY = stringPreferencesKey("device_key")
+        private val DEVICE_KEY_FORMAT = Regex("[0-9a-f]{32}")
+
+        /** B6: the stored device key, or a new one stored in its place when there is none (or not a key). */
+        internal fun installDeviceKey(prefs: MutablePreferences, fresh: () -> String = { newTunnelSessionId() }): String =
+            prefs[DEVICE_KEY]?.takeIf { DEVICE_KEY_FORMAT.matches(it) } ?: fresh().also { prefs[DEVICE_KEY] = it }
 
         /** The profile [scope] reads and writes in [prefs] (a Run scope with no run is the active profile). */
         internal fun selectedProfileOf(prefs: Preferences, scope: ProfileScope): Int = when (scope) {
@@ -730,7 +738,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
                 TUNNEL_WAS_RUNNING, TUNNEL_WAS_RUNNING_BOOT, TUNNEL_WAS_RUNNING_UPDATE, PROFILE_EPOCH, VK_ACCOUNTS,
-                UI_OWNER_MODE, LAST_STOP_CAUSE, RUN_PROFILE,
+                UI_OWNER_MODE, LAST_STOP_CAUSE, RUN_PROFILE, DEVICE_KEY,
                 // B5f2 (F7): the Wi-Fi rule and the networks' names stay on this phone; a choice to carry them is P3's
                 WIFI_RULE, WIFI_CHECKED, WIFI_SAVED, WIFI_DISMISSED,
             ).mapTo(HashSet()) { it.name }
@@ -2228,6 +2236,13 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 (normalized to VkHashValidationStatus.Invalid)
             prefs[key] = VkHashValidationCodec.encode(results)
         }
+    }
+
+    /** B6: this install's device key for the core (CSQTT_DEVICE_KEY), made at its first use. */
+    suspend fun deviceKey(): String {
+        var key = ""
+        dataStore.edit { prefs -> key = installDeviceKey(prefs) }
+        return key
     }
 
     suspend fun reserveConnectionGeneration(
