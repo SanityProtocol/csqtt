@@ -1838,7 +1838,7 @@ async fn clients_create(
             now().saturating_add(request.days.saturating_mul(86400))
         };
         let sub_uuid = model::random_uuid_v4();
-        let ip = model::get_next_ip(&db).unwrap_or_default();
+        let ip = model::get_next_ip(&db, &crate::protocol::held_addresses(&state.app)).unwrap_or_default();
         db.passwords.insert(
             password.clone(),
             PasswordEntry {
@@ -2639,6 +2639,7 @@ async fn api_import_post(
     let revision = {
         let mut db = state.app.db.write().await;
         if do_clients {
+            let held = crate::protocol::held_addresses(&state.app);
             for c in export.clients {
                 if !db.passwords.contains_key(&c.password) {
                     let sub_uuid = if c.sub_uuid.trim().is_empty() {
@@ -2646,7 +2647,7 @@ async fn api_import_post(
                     } else {
                         c.sub_uuid
                     };
-                    let ip = model::import_ip(&db, &c.ip);
+                    let ip = model::import_ip(&db, &c.ip, &held);
                     let client_name = if c.name.trim().is_empty()
                         || model::is_client_name_taken(
                             model::existing_client_names_in_scope(&db, &c.group_id, None),
@@ -3740,7 +3741,7 @@ async fn group_admin_client_create(
         0
     };
     let sub_uuid = model::random_uuid_v4();
-    let ip = model::get_next_ip(&db).unwrap_or_default();
+    let ip = model::get_next_ip(&db, &crate::protocol::held_addresses(&state.app)).unwrap_or_default();
     let entry = model::PasswordEntry {
         ip,
         expires_at,
@@ -13503,6 +13504,7 @@ mod tests {
             1,
             addr,
             "pass_a",
+            crate::protocol::DeviceKey::Legacy,
             1,
             "salt1",
             false,
@@ -13514,7 +13516,17 @@ mod tests {
         assert_eq!(count_active_sessions(&sessions, "pass_a"), 1);
         assert_eq!(count_active_sessions(&sessions, "pass_b"), 0);
 
-        let s_owner = Session::new(2, addr, "owner_pass", 2, "salt2", false, debug_flag, 100);
+        let s_owner = Session::new(
+            2,
+            addr,
+            "owner_pass",
+            crate::protocol::DeviceKey::Legacy,
+            2,
+            "salt2",
+            false,
+            debug_flag,
+            100,
+        );
         sessions.insert(2, s_owner);
 
         assert_eq!(count_active_sessions(&sessions, "owner_pass"), 1);

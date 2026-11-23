@@ -4549,3 +4549,261 @@ async fn repair_round_under_load_restores_missing_workers() {
     }
     dispatcher.shutdown().await;
 }
+
+/// B6: the standalone server ci/e2e-server.sh starts beside the `--desired` one; it tells a password's devices apart.
+fn e2e_dev_peer() -> SocketAddr {
+    std::env::var("CSQTT_E2E_DEV_PEER")
+        .expect("CSQTT_E2E_DEV_PEER is required (ci/e2e-server.sh up prints DEV_PEER)")
+        .parse()
+        .expect("CSQTT_E2E_DEV_PEER must be an IP:port socket address")
+}
+
+/// the standalone server's main password (ci/e2e-server.sh)
+const E2E_DEV_PASSWORD: &str = "e2e-dev-main-password-2026";
+const E2E_DEVICE_A: &str = "0000000000000000000000000000000a";
+const E2E_DEVICE_B: &str = "0000000000000000000000000000000b";
+const E2E_DEVICE_C: &str = "0000000000000000000000000000000c";
+
+/// B6: one device's run against a real server — one worker over its own mock TURN relay and dispatcher, with the given
+/// device id; none is an old app, the password's legacy device.
+struct E2eDevice {
+    dispatcher: Arc<Dispatcher>,
+    cancel: CancellationToken,
+    relay_stop: CancellationToken,
+    session: tokio::task::JoinHandle<anyhow::Result<bool>>,
+    relay_task: tokio::task::JoinHandle<()>,
+    _ready: oneshot::Receiver<()>,
+    address: std::net::Ipv4Addr,
+}
+
+impl E2eDevice {
+    async fn up(peer: SocketAddr, password: &str, device_id: Option<&str>, generation: u64, salt: &str) -> Self {
+        let relay = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
+        let endpoint = format!("turn:127.0.0.1:{}?transport=udp", relay.local_addr().unwrap().port());
+        let relay_stop = CancellationToken::new();
+        let relay_task = tokio::spawn(relay_bound_turn_channel_to_peer(relay, peer, relay_stop.clone()));
+        let cancel = CancellationToken::new();
+        let pool = PacketPool::new(96);
+        let stats = Arc::new(Stats::default());
+        let wrap_key = derive_wrap_key(password).unwrap();
+        let (dispatcher, local_port) = Dispatcher::start(
+            "127.0.0.1:0",
+            None,
+            pool.clone(),
+            stats.clone(),
+            wrap_key,
+            crate::obfs::ObfsMode::Audio,
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        let (config_tx, mut config_rx) = tokio::sync::mpsc::channel(1);
+        let (ready_tx, ready) = oneshot::channel();
+        let session = tokio::spawn(run_session(
+            SessionConfig {
+                id: 1,
+                peer,
+                turn_host: None,
+                turn_port: None,
+                turn_transport: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
+                srtp_mode: SrtpMode::Auto,
+                local_port: Arc::from(local_port),
+                password: Arc::from(password),
+                device_id: device_id.map(Arc::from),
+                generation,
+                turn_endpoint_cursor: 0,
+                salt: Arc::from(salt),
+                mode: ObfsMode::Audio,
+                wrap_key,
+                client_wrap_key: wrap_key,
+                get_config: true,
+                server_stream_repair: Arc::new(AtomicBool::new(false)),
+                repair: RepairState::new(1),
+                configured_workers: 1,
+            },
+            TurnCredentials {
+                username: Arc::from(USERNAME),
+                password: Arc::from(PASSWORD),
+                server_addresses: vec![Arc::from(endpoint)].into(),
+            },
+            SessionRuntime {
+                dispatcher: dispatcher.clone(),
+                pool,
+                stats,
+                events: Events::new(false),
+                config_tx,
+                config_delivery: Some(ConfigDeliveryState {
+                    sent: Arc::new(AtomicBool::new(false)),
+                    in_flight: Arc::new(AtomicBool::new(true)),
+                }),
+                cancel: cancel.clone(),
+                shutdown: Arc::new(ShutdownCoordinator::new()),
+                ready_tx: Some(ready_tx),
+                allocation_started: None,
+                allocation_ready: None,
+                scale_notify: None,
+                target_workers: None,
+                configured_workers: 0,
+            },
+        ));
+        let tunconf = tokio::time::timeout(Duration::from_secs(20), config_rx.recv())
+            .await
+            .expect("no TUNCONF within 20 s")
+            .expect("the session ended before its TUNCONF");
+        let address = tunconf
+            .strip_prefix("TUNCONF:")
+            .and_then(|value| value.split(':').next())
+            .and_then(|ip| ip.parse().ok())
+            .unwrap_or_else(|| panic!("no address in {tunconf}"));
+        for _ in 0..50 {
+            if dispatcher.active_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Self {
+            dispatcher,
+            cancel,
+            relay_stop,
+            session,
+            relay_task,
+            _ready: ready,
+            address,
+        }
+    }
+
+    /// Whether the tunnel carries: a SYN from this device's address to a closed port of the server's gateway, whose own
+    /// kernel answers RST (M-86's PROBE) — only through the sessions the server routes this address to.
+    async fn alive(&self) -> bool {
+        let [a, b, c, _] = self.address.octets();
+        let answer = crate::probe::run_line(&self.dispatcher, &format!("{}|{a}.{b}.{c}.1|9", self.address)).await;
+        answer["result"] == "rst"
+    }
+
+    /// The user's stop: the session sends DISCONNECT, as the app's core does.
+    async fn stop(self) {
+        self.cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(8), self.session).await;
+        self.dispatcher.shutdown().await;
+        self.relay_stop.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(3), self.relay_task).await;
+    }
+}
+
+/// B6, case 1: three devices of one password on a standalone server — three addresses, all carrying at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server and CSQTT_E2E_DEV_PEER"]
+async fn devices_three_ids_have_three_addresses_at_once() {
+    let peer = e2e_dev_peer();
+    let a = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_A), 101, "devices-three-a").await;
+    let b = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_B), 102, "devices-three-b").await;
+    let c = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_C), 103, "devices-three-c").await;
+    let addresses = [a.address, b.address, c.address];
+    assert_eq!(
+        addresses.iter().collect::<std::collections::HashSet<_>>().len(),
+        3,
+        "{addresses:?}"
+    );
+    for (name, device) in [("a", &a), ("b", &b), ("c", &c)] {
+        assert!(device.alive().await, "device {name} carries nothing");
+    }
+    for device in [a, b, c] {
+        device.stop().await;
+    }
+}
+
+/// B6, case 3: an old app (no device id) is one device beside the new ones; a second old app is that same legacy device,
+/// so it replaces the first, as before B6, and nobody else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server and CSQTT_E2E_DEV_PEER"]
+async fn devices_an_old_app_is_one_device_beside_the_new_ones() {
+    let peer = e2e_dev_peer();
+    let a = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_A), 201, "devices-old-a").await;
+    let b = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_B), 202, "devices-old-b").await;
+    let c = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_C), 203, "devices-old-c").await;
+    let old = E2eDevice::up(peer, E2E_DEV_PASSWORD, None, 204, "devices-old-1").await;
+    let addresses = [a.address, b.address, c.address, old.address];
+    assert_eq!(
+        addresses.iter().collect::<std::collections::HashSet<_>>().len(),
+        4,
+        "{addresses:?}"
+    );
+    for (name, device) in [("a", &a), ("b", &b), ("c", &c), ("old", &old)] {
+        assert!(device.alive().await, "device {name} carries nothing");
+    }
+    let old2 = E2eDevice::up(peer, E2E_DEV_PASSWORD, None, 205, "devices-old-2").await;
+    assert_eq!(old2.address, old.address);
+    assert!(old2.alive().await, "the second old app carries nothing");
+    assert!(!old.alive().await, "the first old app still carries: two legacy devices on one password");
+    for (name, device) in [("a", &a), ("b", &b), ("c", &c)] {
+        assert!(device.alive().await, "the old app's replacement cut device {name}");
+    }
+    for device in [a, b, c, old, old2] {
+        device.stop().await;
+    }
+}
+
+/// B6, case 4: a device's new run (every in-run core restart has a new generation and salt) replaces its own sessions
+/// only, and keeps its address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server and CSQTT_E2E_DEV_PEER"]
+async fn devices_a_new_run_of_one_device_replaces_only_its_own() {
+    let peer = e2e_dev_peer();
+    let a1 = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_A), 301, "devices-run-a1").await;
+    let b = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_B), 302, "devices-run-b").await;
+    let a2 = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_A), 303, "devices-run-a2").await;
+    assert_eq!(a2.address, a1.address, "the device's new run moved to another address");
+    assert!(a2.alive().await, "the new run carries nothing");
+    assert!(!a1.alive().await, "the old run still carries");
+    assert!(b.alive().await, "the other device's run was cut");
+    for device in [a1, b, a2] {
+        device.stop().await;
+    }
+}
+
+/// B6, case 5: a stop (DISCONNECT) ends the stopping device's sessions only; an old app's stop ends the legacy device's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires ci/e2e-server.sh's standalone server and CSQTT_E2E_DEV_PEER"]
+async fn devices_a_stop_ends_only_the_stopping_device() {
+    let peer = e2e_dev_peer();
+    let a = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_A), 401, "devices-stop-a").await;
+    let b = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_B), 402, "devices-stop-b").await;
+    let old = E2eDevice::up(peer, E2E_DEV_PASSWORD, None, 403, "devices-stop-old").await;
+    for (name, device) in [("a", &a), ("b", &b), ("old", &old)] {
+        assert!(device.alive().await, "device {name} carries nothing");
+    }
+    let a_address = a.address;
+    a.stop().await;
+    assert!(b.alive().await, "a's stop cut b");
+    assert!(old.alive().await, "a's stop cut the old app");
+    // a's sessions are gone: its address is free for the next device
+    let c = E2eDevice::up(peer, E2E_DEV_PASSWORD, Some(E2E_DEVICE_C), 404, "devices-stop-c").await;
+    assert_eq!(c.address, a_address, "a's address is still held after its stop");
+    old.stop().await;
+    assert!(b.alive().await, "the old app's stop cut b");
+    assert!(c.alive().await, "the old app's stop cut c");
+    for device in [b, c] {
+        device.stop().await;
+    }
+}
+
+/// B6, case 8 (and 9, run against the shipped 2.5.3 core): a server run by swg-panel (`--desired`) — like any 2.5 server —
+/// keeps one device per password: a second device takes the password's one address and replaces the first, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a separately started CSQTT WSL server and CSQTT_E2E_PEER"]
+async fn devices_a_server_run_by_swg_panel_keeps_one_device_per_password() {
+    let peer: SocketAddr = std::env::var("CSQTT_E2E_PEER")
+        .expect("CSQTT_E2E_PEER is required")
+        .parse()
+        .expect("CSQTT_E2E_PEER must be an IP:port socket address");
+    let password = "e2e-local-password-20260830";
+    let a = E2eDevice::up(peer, password, Some(E2E_DEVICE_A), 501, "devices-desired-a").await;
+    let b = E2eDevice::up(peer, password, Some(E2E_DEVICE_B), 502, "devices-desired-b").await;
+    assert_eq!(b.address, a.address);
+    assert!(b.alive().await, "the second device carries nothing");
+    assert!(!a.alive().await, "two devices of one password carry on a --desired server");
+    for device in [a, b] {
+        device.stop().await;
+    }
+}

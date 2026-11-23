@@ -468,7 +468,8 @@ impl Database {
             if !ip_in_pool(&entry.ip) {
                 let foreign = !entry.ip.is_empty();
                 entry.ip.clear();
-                if let Some(next_ip) = get_next_ip(self) {
+                // at load: no session is live yet
+                if let Some(next_ip) = get_next_ip(self, &std::collections::HashSet::new()) {
                     entry.ip = next_ip;
                     repairs.push(if foreign {
                         format!("password tag={tag} ip outside this server's subnet reassigned")
@@ -896,21 +897,29 @@ pub fn ip_in_pool(ip: &str) -> bool {
 // The address an IMPORTED client gets: its own only when it is in this server's pool and no client already has it —
 // an export merged into a server with clients (or two clients of one export on one address) gave two clients one
 // tunnel address, and each broke the other's traffic. Clients are inserted one by one, so earlier ones in the same
-// import count as taken.
-pub fn import_ip(db: &Database, ip: &str) -> String {
-    if ip_in_pool(ip) && !db.passwords.values().any(|entry| entry.ip == ip) {
+// import count as taken. `held`: the addresses live sessions hold (B6: a password's other devices hold pool addresses no
+// row records).
+pub fn import_ip(db: &Database, ip: &str, held: &std::collections::HashSet<[u8; 4]>) -> String {
+    if ip_in_pool(ip)
+        && !db.passwords.values().any(|entry| entry.ip == ip)
+        && crate::tun_device::parse_ipv4(ip).is_none_or(|addr| !held.contains(&addr))
+    {
         return ip.to_owned();
     }
-    get_next_ip(db).unwrap_or_default()
+    get_next_ip(db, held).unwrap_or_default()
 }
 
-pub fn get_next_ip(db: &Database) -> Option<String> {
+/// The lowest pool address no row has and none of `held` (the live sessions' addresses, B6).
+pub fn get_next_ip(db: &Database, held: &std::collections::HashSet<[u8; 4]>) -> Option<String> {
     let mut buf = String::with_capacity(16);
     for i in 3..=250u8 {
         buf.clear();
         use std::fmt::Write;
         // swg-panel: pool base follows the instance's --tun-addr /24 (stock: 10.66.67).
         let p = crate::swgpanel::subnet_prefix();
+        if held.contains(&[p[0], p[1], p[2], i]) {
+            continue;
+        }
         let _ = write!(buf, "{}.{}.{}.{i}", p[0], p[1], p[2]);
         let is_used = db.passwords.values().any(|d| d.ip == buf);
         if !is_used {
@@ -2064,14 +2073,20 @@ mod tests {
         let mut db = Database::default();
         let entry = |ip: &str| PasswordEntry { ip: ip.to_owned(), ..Default::default() };
         db.passwords.insert("existing".into(), entry("10.66.67.3"));
+        let none = std::collections::HashSet::new();
         // a free in-pool address is kept
-        assert_eq!(super::import_ip(&db, "10.66.67.40"), "10.66.67.40");
+        assert_eq!(super::import_ip(&db, "10.66.67.40", &none), "10.66.67.40");
         // a taken one, or one from another subnet, gets the next free address
-        assert_eq!(super::import_ip(&db, "10.66.67.3"), "10.66.67.4");
-        assert_eq!(super::import_ip(&db, "10.66.68.9"), "10.66.67.4");
+        assert_eq!(super::import_ip(&db, "10.66.67.3", &none), "10.66.67.4");
+        assert_eq!(super::import_ip(&db, "10.66.68.9", &none), "10.66.67.4");
         // an earlier client of the same import counts as taken
         db.passwords.insert("imported-1".into(), entry("10.66.67.4"));
-        assert_eq!(super::import_ip(&db, "10.66.67.4"), "10.66.67.5");
+        assert_eq!(super::import_ip(&db, "10.66.67.4", &none), "10.66.67.5");
+        // B6: so does an address a live session holds — a password's second device holds one no row records
+        let held = std::collections::HashSet::from([[10, 66, 67, 5], [10, 66, 67, 40]]);
+        assert_eq!(super::import_ip(&db, "10.66.67.40", &held), "10.66.67.6");
+        assert_eq!(super::get_next_ip(&db, &held).as_deref(), Some("10.66.67.6"));
+        assert_eq!(super::get_next_ip(&db, &none).as_deref(), Some("10.66.67.5"));
     }
 
     #[test]

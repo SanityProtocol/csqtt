@@ -166,9 +166,11 @@ jobs:
           set -a; . "$RUNNER_TEMP/e2e/env"; set +a
           rc=0
           CSQTT_E2E_PEER=$PEER CSQTT_E2E_WEB=$WEB CSQTT_E2E_SERVER_LOG=$LOG CSQTT_E2E_MIN_MBIT=64 CSQTT_E2E_MIN_STREAM_KBIT=800 \
-            recipe/ci/test.sh src e2e || rc=$?
-          # the wrong-password case ends in a timeout either way; the server must still be running after every case
+            CSQTT_E2E_DEV_PEER=$DEV_PEER CSQTT_E2E_DEV_WEB=$DEV_WEB recipe/ci/test.sh src e2e || rc=$?
+          # the wrong-password case ends in a timeout either way; both servers must still be running after every case
           sudo kill -0 "$PID" || { echo "the server process $PID is gone"; rc=1; }
-          [ "$rc" = 0 ] || { echo "--- server log (tail)"; sudo tail -60 "$RUNNER_TEMP/e2e/server.log"; }
+          sudo kill -0 "$DEV_PID" || { echo "the standalone server process $DEV_PID is gone"; rc=1; }
+          [ "$rc" = 0 ] || { echo "--- server log (tail)"; sudo tail -60 "$RUNNER_TEMP/e2e/server.log";
+                             echo "--- standalone server log (tail)"; sudo tail -60 "$RUNNER_TEMP/e2e/server-dev.log"; }
           sudo recipe/ci/e2e-server.sh down "$RUNNER_TEMP/e2e"
           exit "$rc"

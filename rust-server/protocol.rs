@@ -627,32 +627,40 @@ impl PasswordEpochSlot {
     }
 }
 
+/// A password's current runs: one per device (B6), each its generation and salt. A device's new run replaces only its
+/// own entry; a password with only the legacy device has the one entry every password had before B6.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PasswordEpochState {
-    generation_id: u64,
-    session_salt: String,
+    devices: Vec<(DeviceKey, u64, String)>,
 }
 
 impl PasswordEpochState {
-    pub fn new(generation_id: u64, session_salt: String) -> Self {
-        Self {
-            generation_id,
-            session_salt,
+    fn admit(&mut self, device: DeviceKey, generation_id: u64, session_salt: &str) -> PasswordEpochDecision {
+        match self.devices.iter_mut().find(|(known, ..)| *known == device) {
+            Some((_, generation, salt)) if *generation == generation_id && salt == session_salt => {
+                PasswordEpochDecision::Current
+            }
+            Some((_, generation, salt)) => {
+                *generation = generation_id;
+                *salt = session_salt.to_owned();
+                PasswordEpochDecision::Replaced
+            }
+            None => {
+                self.devices.push((device, generation_id, session_salt.to_owned()));
+                PasswordEpochDecision::Replaced
+            }
         }
     }
 
-    fn admit(&mut self, generation_id: u64, session_salt: &str) -> PasswordEpochDecision {
-        if generation_id != self.generation_id || session_salt != self.session_salt {
-            self.generation_id = generation_id;
-            self.session_salt = session_salt.to_owned();
-            PasswordEpochDecision::Replaced
-        } else {
-            PasswordEpochDecision::Current
-        }
+    fn matches(&self, device: DeviceKey, generation_id: u64, session_salt: &str) -> bool {
+        self.devices.iter().any(|(known, generation, salt)| {
+            *known == device && *generation == generation_id && salt == session_salt
+        })
     }
 
-    fn matches(&self, generation_id: u64, session_salt: &str) -> bool {
-        self.generation_id == generation_id && self.session_salt == session_salt
+    /// B6: the device stopped (DISCONNECT): its run is no longer current
+    fn forget(&mut self, device: DeviceKey) {
+        self.devices.retain(|(known, ..)| *known != device);
     }
 }
 
@@ -665,6 +673,7 @@ enum CredentialAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionEpochIdentity {
     password: String,
+    device: DeviceKey,
     generation_id: u64,
     session_salt: String,
 }
@@ -756,6 +765,8 @@ pub struct Session {
     pub id: u64,
     pub address: SocketAddr,
     pub password: String,
+    /// B6: the device of the password this session belongs to, from the GETCONF that created it
+    pub device: DeviceKey,
     pub generation_id: AtomicU64,
     pub session_salt: std::sync::Mutex<String>,
     pub worker_id: AtomicU64,
@@ -778,6 +789,7 @@ impl Session {
         id: u64,
         address: SocketAddr,
         password: &str,
+        device: DeviceKey,
         generation_id: u64,
         session_salt: &str,
         is_srtp: bool,
@@ -788,6 +800,7 @@ impl Session {
             id,
             address,
             password: password.to_owned(),
+            device,
             generation_id: AtomicU64::new(generation_id),
             session_salt: std::sync::Mutex::new(session_salt.to_owned()),
             worker_id: AtomicU64::new(u64::MAX),
@@ -1092,6 +1105,7 @@ impl HotSession {
         peer: SocketAddr,
         local_ip: Option<IpAddr>,
         password: Arc<str>,
+        device: DeviceKey,
         key: [u8; 32],
         payload_type: u8,
         is_srtp: bool,
@@ -1106,6 +1120,7 @@ impl HotSession {
             id,
             peer,
             &password,
+            device,
             generation_id,
             session_salt,
             is_srtp,
@@ -1432,11 +1447,13 @@ pub(crate) enum ProtocolCommand {
     },
     SetAuthoritativeEpoch {
         password: String,
+        device: DeviceKey,
         generation_id: u64,
         session_salt: String,
     },
     DisconnectPassword {
         password: String,
+        device: DeviceKey,
         requester_session_id: u64,
     },
     ReplaceCredentials(Arc<CredentialSet>),
@@ -1448,6 +1465,7 @@ pub(crate) enum ProtocolCommand {
     },
     UpdateDesiredStreams {
         password: String,
+        device: DeviceKey,
         generation_id: u64,
         desired_count: u16,
     },
@@ -2008,6 +2026,7 @@ impl ProtocolEngine {
         peer: SocketAddr,
         local_ip: Option<IpAddr>,
         password: Arc<str>,
+        device: DeviceKey,
         key: [u8; 32],
         payload_type: u8,
         is_srtp: bool,
@@ -2026,6 +2045,7 @@ impl ProtocolEngine {
             peer,
             local_ip,
             password,
+            device,
             key,
             payload_type,
             is_srtp,
@@ -2165,7 +2185,7 @@ impl ProtocolEngine {
             };
             if let Ok(decoded) = decoded {
                 let plain = decoded.range.get(self.setup_scratch.as_slice());
-                if let Some((password, generation_id, session_salt)) = parse_getconf_identity(plain)
+                if let Some((password, generation_id, session_salt, device)) = parse_getconf_identity(plain)
                 {
                     let matched = self
                         .credentials
@@ -2179,6 +2199,7 @@ impl ProtocolEngine {
                             decoded,
                             generation_id,
                             session_salt.to_owned(),
+                            device,
                             plain.to_vec(),
                             Some(dtls_keys.server_cipher_key),
                         ));
@@ -2205,7 +2226,7 @@ impl ProtocolEngine {
                     continue;
                 };
                 let plain = decoded.range.get(self.setup_scratch.as_slice());
-                let Some((password, generation_id, session_salt)) = parse_getconf_identity(plain)
+                let Some((password, generation_id, session_salt, device)) = parse_getconf_identity(plain)
                 else {
                     continue;
                 };
@@ -2218,6 +2239,7 @@ impl ProtocolEngine {
                     decoded,
                     generation_id,
                     session_salt.to_owned(),
+                    device,
                     plain.to_vec(),
                     Some(credential.dtls_server_cipher_key),
                 ));
@@ -2243,7 +2265,7 @@ impl ProtocolEngine {
                     continue;
                 };
                 let plain = decoded.range.get(self.setup_scratch.as_slice());
-                let Some((password, generation_id, session_salt)) = parse_getconf_identity(plain)
+                let Some((password, generation_id, session_salt, device)) = parse_getconf_identity(plain)
                 else {
                     continue;
                 };
@@ -2256,13 +2278,14 @@ impl ProtocolEngine {
                     decoded,
                     generation_id,
                     session_salt.to_owned(),
+                    device,
                     plain.to_vec(),
                     None,
                 ));
                 break;
             }
         }
-        let Some((password, key, decoded, generation_id, session_salt, plain, out_key)) = found
+        let Some((password, key, decoded, generation_id, session_salt, device, plain, out_key)) = found
         else {
             self.report_unauthenticated_setup(peer, wire.len());
             return;
@@ -2271,6 +2294,7 @@ impl ProtocolEngine {
             peer,
             local_ip,
             password,
+            device,
             key,
             decoded.payload_type,
             decoded.is_srtp,
@@ -2439,7 +2463,7 @@ impl ProtocolEngine {
             }
             if let Some(app_data) = client_app_data {
                 match parse_getconf_identity(&app_data) {
-                    Some((password, generation_id, session_salt))
+                    Some((password, generation_id, session_salt, device))
                         if self.credentials.contains_password(password) =>
                     {
                         eprintln!(
@@ -2450,6 +2474,7 @@ impl ProtocolEngine {
                             peer,
                             local_ip,
                             Arc::from(password),
+                            device,
                             dtls_keys.client_cipher_key,
                             111,
                             true,
@@ -2581,7 +2606,7 @@ impl ProtocolEngine {
 
         let is_getconf = plain.starts_with(b"GETCONF:");
         if is_getconf {
-            let Some((incoming_password, incoming_generation, incoming_salt)) =
+            let Some((incoming_password, incoming_generation, incoming_salt, incoming_device)) =
                 parse_getconf_identity(plain)
             else {
                 return true;
@@ -2591,10 +2616,10 @@ impl ProtocolEngine {
                 epoch.last_seen_ms = self.monotonic_ms;
             }
             match getconf_reconnect_action_hot(
-                &session.cold.password,
+                (&session.cold.password, session.cold.public.device),
                 session.cold.generation_id,
                 &session.cold.session_salt,
-                incoming_password,
+                (incoming_password, incoming_device),
                 incoming_generation,
                 incoming_salt,
             ) {
@@ -2613,6 +2638,7 @@ impl ProtocolEngine {
                         peer,
                         local_ip,
                         password,
+                        incoming_device,
                         key,
                         payload_type,
                         is_srtp,
@@ -2677,9 +2703,11 @@ impl ProtocolEngine {
             if plain == b"READY" {
                 if self.sessions[slot].tunnel_ip.is_none() {
                     let pass = self.sessions[slot].cold.password.clone();
+                    let device = self.sessions[slot].cold.public.device;
                     let existing_tunnel = if !pass.is_empty() {
                         self.sessions.iter().find_map(|(_, s)| {
-                            if s.cold.password == pass {
+                            // B6: another device of the password has an address of its own
+                            if s.cold.password == pass && s.cold.public.device == device {
                                 s.tunnel_ip.map(|ip| (ip, s.desired_stream_count))
                             } else {
                                 None
@@ -2842,6 +2870,24 @@ impl ProtocolEngine {
         let Some(slot) = self.by_id.get(&session_id).copied() else {
             return false;
         };
+        // B6: one address, one device of one password. A session of another that still holds this address — one a
+        // command never reached — is dropped before this route registers, so no downlink reaches the wrong user.
+        let owner = (
+            self.sessions[slot].cold.password.clone(),
+            self.sessions[slot].cold.public.device,
+        );
+        self.stale_slots.clear();
+        for (other_slot, other) in self.sessions.iter() {
+            if other_slot != slot
+                && other.tunnel_ip == Some(ip)
+                && (other.cold.password != owner.0 || other.cold.public.device != owner.1)
+            {
+                self.stale_slots.push(other_slot);
+            }
+        }
+        while let Some(other_slot) = self.stale_slots.pop() {
+            self.remove_slot_with_reason(other_slot, "address-taken");
+        }
         let session = &mut self.sessions[slot];
         if let (Some(previous_ip), Some(old_registration)) =
             (session.tunnel_ip, session.registration_id)
@@ -3328,16 +3374,17 @@ impl DataplaneLogic for ProtocolEngine {
             } => self.update_epoch(session_id, password, generation_id, session_salt),
             ProtocolCommand::SetAuthoritativeEpoch {
                 password,
+                device,
                 generation_id,
                 session_salt,
             } => {
                 self.stale_slots.clear();
                 for (slot, session) in self.sessions.iter() {
                     if session_is_retired_by_epoch(
-                        &session.cold.password,
+                        (&session.cold.password, session.cold.public.device),
                         session.cold.generation_id,
                         &session.cold.session_salt,
-                        &password,
+                        (&password, device),
                         generation_id,
                         &session_salt,
                     ) {
@@ -3357,6 +3404,7 @@ impl DataplaneLogic for ProtocolEngine {
             }
             ProtocolCommand::DisconnectPassword {
                 password,
+                device,
                 requester_session_id,
             } => {
                 if let Some(slot) = self.by_id.get(&requester_session_id).copied() {
@@ -3385,9 +3433,9 @@ impl DataplaneLogic for ProtocolEngine {
                 for (slot, session) in self.sessions.iter() {
                     if session_is_disconnected_password(
                         session.id,
-                        &session.cold.password,
+                        (&session.cold.password, session.cold.public.device),
                         requester_session_id,
-                        &password,
+                        (&password, device),
                     ) {
                         self.stale_slots.push(slot);
                     }
@@ -3426,11 +3474,13 @@ impl DataplaneLogic for ProtocolEngine {
             }
             ProtocolCommand::UpdateDesiredStreams {
                 password,
+                device,
                 generation_id,
                 desired_count,
             } => {
                 for (_, session) in self.sessions.iter_mut() {
                     if session.cold.password.as_ref() == password
+                        && session.cold.public.device == device
                         && session.cold.generation_id == generation_id
                     {
                         session.desired_stream_count = desired_count;
@@ -3935,7 +3985,7 @@ fn parse_generation_id(value: &str) -> Option<u64> {
     value.parse::<u64>().ok()
 }
 
-fn parse_getconf_identity(payload: &[u8]) -> Option<(&str, u64, &str)> {
+fn parse_getconf_identity(payload: &[u8]) -> Option<(&str, u64, &str, DeviceKey)> {
     let text = std::str::from_utf8(payload).ok()?;
     let content = text.strip_prefix("GETCONF:")?.trim();
     let parts: Vec<&str> = content.split('|').collect();
@@ -3948,7 +3998,8 @@ fn parse_getconf_identity(payload: &[u8]) -> Option<(&str, u64, &str)> {
         if password.is_empty() || password.len() > 128 || session_salt.len() > 128 {
             return None;
         }
-        return Some((password, generation_id, session_salt));
+        let device = DeviceKey::from_getconf(&parts, devices_enabled());
+        return Some((password, generation_id, session_salt, device));
     }
     if parts.len() >= 4 {
         let legacy_pass = parts.get(2)?.trim();
@@ -3963,7 +4014,8 @@ fn parse_getconf_identity(payload: &[u8]) -> Option<(&str, u64, &str)> {
         if password.is_empty() || password.len() > 128 || session_salt.len() > 128 {
             return None;
         }
-        return Some((password, generation_id, session_salt));
+        // the 2.1 format: one device per password, as before B6
+        return Some((password, generation_id, session_salt, DeviceKey::Legacy));
     }
     None
 }
@@ -4002,37 +4054,39 @@ fn should_flush_udp_immediately(payload: &[u8]) -> bool {
         || payload == PANEL_RESTART_NOTICE
 }
 
+/// A device's new run retires its own older sessions only (B6): other devices of the password keep theirs.
 fn session_is_retired_by_epoch(
-    session_password: &str,
+    session_owner: (&str, DeviceKey),
     session_generation_id: u64,
     session_salt: &str,
-    authoritative_password: &str,
+    authoritative_owner: (&str, DeviceKey),
     authoritative_generation_id: u64,
     authoritative_salt: &str,
 ) -> bool {
-    session_password == authoritative_password
+    session_owner == authoritative_owner
         && (session_generation_id != authoritative_generation_id
             || session_salt != authoritative_salt)
 }
 
+/// A stop (DISCONNECT) ends the stopping device's sessions only (B6); an old app's stop ends the legacy device's.
 fn session_is_disconnected_password(
     session_id: u64,
-    session_password: &str,
+    session_owner: (&str, DeviceKey),
     requester_session_id: u64,
-    target_password: &str,
+    target_owner: (&str, DeviceKey),
 ) -> bool {
-    session_id == requester_session_id || session_password == target_password
+    session_id == requester_session_id || session_owner == target_owner
 }
 
 fn getconf_reconnect_action_hot(
-    session_password: &str,
+    session_owner: (&str, DeviceKey),
     session_generation_id: u64,
     session_salt: &str,
-    incoming_password: &str,
+    incoming_owner: (&str, DeviceKey),
     incoming_generation_id: u64,
     incoming_salt: &str,
 ) -> GetconfReconnectAction {
-    if session_password == incoming_password
+    if session_owner == incoming_owner
         && session_generation_id == incoming_generation_id
         && session_salt == incoming_salt
     {
@@ -4317,8 +4371,12 @@ async fn handle_getworkers(
     };
 
     let generation_id = session.generation_id.load(Ordering::Acquire);
+    // B6: this device's run; two devices that started in the same second share a generation
     for s in app.sessions.iter() {
-        if s.password == password && s.generation_id.load(Ordering::Acquire) == generation_id {
+        if s.password == password
+            && s.device == session.device
+            && s.generation_id.load(Ordering::Acquire) == generation_id
+        {
             s.desired_stream_count
                 .store(agreed as u64, Ordering::Release);
         }
@@ -4327,6 +4385,7 @@ async fn handle_getworkers(
         app,
         ProtocolCommand::UpdateDesiredStreams {
             password: password.clone(),
+            device: session.device,
             generation_id,
             desired_count: agreed as u16,
         },
@@ -4428,6 +4487,7 @@ fn resolve_routing_rule_access<'a>(
 fn session_epoch_identity(session: &Session) -> SessionEpochIdentity {
     SessionEpochIdentity {
         password: session.password.clone(),
+        device: session.device,
         generation_id: session.generation_id.load(Ordering::Acquire),
         session_salt: lock_unpoison(&session.session_salt).clone(),
     }
@@ -4560,9 +4620,10 @@ fn log_getconf_result(
         "INFO",
         "GETCONF",
         &format!(
-            "GETCONF {} pass={} gen={} worker={}/{} -> {}",
+            "GETCONF {} pass={}{} gen={} worker={}/{} -> {}",
             session.address,
             pass,
+            session.device.log_tag(),
             generation,
             worker,
             desired,
@@ -4571,9 +4632,11 @@ fn log_getconf_result(
     );
 }
 
+/// The sessions of `device`'s older runs of `password` (B6: another device's stay).
 pub fn purge_stale_password_sessions(
     app: &Arc<App>,
     password: &str,
+    device: DeviceKey,
     generation_id: u64,
     session_salt: &str,
     current_session_id: u64,
@@ -4583,7 +4646,7 @@ pub fn purge_stale_password_sessions(
         .iter()
         .filter_map(|entry| {
             let session = entry.value();
-            if session.id == current_session_id {
+            if session.id == current_session_id || session.device != device {
                 return None;
             }
             let identity = session_epoch_identity(session);
@@ -4616,6 +4679,7 @@ pub fn purge_stale_password_sessions(
 fn purge_replaced_worker_sessions(
     app: &Arc<App>,
     password: &str,
+    device: DeviceKey,
     generation_id: u64,
     session_salt: &str,
     worker_id: u64,
@@ -4627,6 +4691,7 @@ fn purge_replaced_worker_sessions(
         .filter_map(|entry| {
             let session = entry.value();
             if session.id == current_session_id
+                || session.device != device
                 || session.worker_id.load(Ordering::Acquire) != worker_id
             {
                 return None;
@@ -4647,6 +4712,51 @@ fn purge_replaced_worker_sessions(
             removed.cancel_token.cancel();
         }
     }
+}
+
+/// B6 (D21): which of a password's devices a session belongs to. A client of 2.6 sends `dev=<32 hex>` after the six fields
+/// every 2.5 client sends (an HMAC of its install key and the password, B6c), so each of its devices has its own runs and
+/// tunnel address. A client that sends none — 2.5.x, csq-socks, the iOS app — is the password's one `Legacy` device, and
+/// so is every client of the 2.1 format and of a server run by swg-panel (`--desired`, whose node knows a user by the
+/// row's address until P4): one device per password, as before B6.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum DeviceKey {
+    #[default]
+    Legacy,
+    Id(u128),
+}
+
+impl DeviceKey {
+    fn from_getconf(parts: &[&str], devices_on: bool) -> Self {
+        if !devices_on {
+            return Self::Legacy;
+        }
+        parts
+            .iter()
+            .skip(6)
+            .filter_map(|field| field.trim().strip_prefix("dev="))
+            .find_map(|hex| {
+                if hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    u128::from_str_radix(hex, 16).ok()
+                } else {
+                    None
+                }
+            })
+            .map_or(Self::Legacy, Self::Id)
+    }
+
+    /// For the log: ` dev=` and the id's first 8 hex digits, as the client logs it; nothing for the legacy device.
+    fn log_tag(self) -> String {
+        match self {
+            Self::Legacy => String::new(),
+            Self::Id(id) => format!(" dev={:08x}", (id >> 96) as u32),
+        }
+    }
+}
+
+/// B6: a standalone server tells devices apart; one run by swg-panel keeps one device per password until P4.
+fn devices_enabled() -> bool {
+    crate::swgpanel::desired_path().is_none()
 }
 
 /// What a client announced in GETCONF: a field `caps=<name>,<name>…` after the six fields every 2.5 client sends. A
@@ -4731,6 +4841,93 @@ fn note_cleaned_rule(id: &str) -> bool {
     crate::lock_unpoison(NOTED.get_or_init(Default::default)).insert(id.to_owned())
 }
 
+/// B6: in one pass over the live sessions, the address a session of `password`'s `device` already has (another worker
+/// of its run, or its older run until that is purged), and every address another (password, device) holds.
+fn device_addresses(
+    app: &Arc<App>,
+    password: &str,
+    device: DeviceKey,
+    session_id: u64,
+) -> (Option<[u8; 4]>, std::collections::HashSet<[u8; 4]>) {
+    let mut own = None;
+    let mut held = std::collections::HashSet::new();
+    for entry in app.sessions.iter() {
+        let session = entry.value();
+        if session.id == session_id {
+            continue;
+        }
+        let Some(ip) = *lock_unpoison(&session.tunnel_ip) else {
+            continue;
+        };
+        if session.device == device && session.password == password {
+            own.get_or_insert(ip);
+        } else {
+            held.insert(ip);
+        }
+    }
+    (own, held)
+}
+
+/// B6: every address a live session holds — a password's other devices hold pool addresses no row records, so a new
+/// row or an imported one must not take them.
+pub fn held_addresses(app: &Arc<App>) -> std::collections::HashSet<[u8; 4]> {
+    app.sessions
+        .iter()
+        .filter_map(|entry| *lock_unpoison(&entry.value().tunnel_ip))
+        .collect()
+}
+
+/// B6: the tunnel address of a session of `password`'s `device`, chosen under the db write lock (`db`): the one the device
+/// already has; else the password's own — the row's, `.2` for the owner — unless another device of the password holds
+/// it; else the lowest pool address no row has and no live session holds. Empty when none is left (NOCONF). A password's
+/// only device, the legacy one above all, gets the password's own address, as before B6.
+fn device_tunnel_ip(
+    app: &Arc<App>,
+    db: &mut Database,
+    access: &CredentialAccess,
+    password: &str,
+    device: DeviceKey,
+    session_id: u64,
+    changed: &mut bool,
+) -> String {
+    let (device_ip, held) = device_addresses(app, password, device, session_id);
+    let own = match access {
+        CredentialAccess::Main => crate::model::owner_tunnel_ip(),
+        CredentialAccess::Slot(slot_key) => {
+            let needs_ip = db
+                .passwords
+                .get(slot_key)
+                .is_some_and(|entry| !crate::model::ip_in_pool(&entry.ip));
+            let next_ip = if needs_ip { get_next_ip(db, &held) } else { None };
+            let Some(entry) = db.passwords.get_mut(slot_key) else {
+                return String::new();
+            };
+            if let Some(ip) = next_ip {
+                entry.ip = ip;
+                *changed = true;
+            }
+            entry.ip.clone()
+        }
+    };
+    choose_device_ip(device_ip, own, &held, || get_next_ip(db, &held))
+}
+
+/// B6: `device_ip` when the device has one; else the password's `own` unless another device holds it; else `next_free`.
+fn choose_device_ip(
+    device_ip: Option<[u8; 4]>,
+    own: String,
+    held: &std::collections::HashSet<[u8; 4]>,
+    next_free: impl FnOnce() -> Option<String>,
+) -> String {
+    if let Some(ip) = device_ip {
+        return std::net::Ipv4Addr::from(ip).to_string();
+    }
+    match crate::tun_device::parse_ipv4(&own) {
+        Some(ip) if held.contains(&ip) => next_free().unwrap_or_default(),
+        _ => own,
+    }
+}
+
 async fn handle_getconf(
     app: &Arc<App>,
     writer: &ControlWriter<'_>,
@@ -4741,6 +4938,8 @@ async fn handle_getconf(
     let parts: Vec<&str> = content.split('|').collect();
     let client_port = parts.first().copied().unwrap_or("9000").trim();
     let caps = ClientCaps::from_getconf(&parts);
+    // B6: parsed once, when this GETCONF made the session (a GETCONF of another device makes a session of its own)
+    let device = session.device;
 
     let (password, generation_text, session_salt, worker_text, desired_text) = if parts
         .get(2)
@@ -4883,6 +5082,7 @@ async fn handle_getconf(
                             .iter()
                             .find_map(|s| {
                                 if s.password == password
+                                    && s.device == device
                                     && s.generation_id.load(Ordering::Acquire) == generation_id
                                 {
                                     let val = s.desired_stream_count.load(Ordering::Acquire) as u16;
@@ -4958,6 +5158,7 @@ async fn handle_getconf(
                     .iter()
                     .find_map(|s| {
                         if s.password == password
+                            && s.device == device
                             && s.generation_id.load(Ordering::Acquire) == generation_id
                         {
                             let val = s.desired_stream_count.load(Ordering::Acquire) as u16;
@@ -4999,7 +5200,7 @@ async fn handle_getconf(
                 reject_session = true;
                 response.to_owned()
             }
-            Ok(access) => match epoch.admit(generation_id, session_salt) {
+            Ok(access) => match epoch.admit(device, generation_id, session_salt) {
                 PasswordEpochDecision::Current | PasswordEpochDecision::Replaced => {
                     set_public_epoch(session, generation_id, session_salt);
                     session
@@ -5008,9 +5209,17 @@ async fn handle_getconf(
                     session
                         .desired_stream_count
                         .store(u64::from(effective_desired_count), Ordering::Release);
+                    // B6: the address before the purge, while the device's older run still shows the one it had; it is
+                    // the session's at once, so the next choice — under this same lock — sees it taken
+                    let ip_str =
+                        device_tunnel_ip(app, &mut db, &access, password, device, session.id, &mut changed);
+                    if let Some(ip) = crate::tun_device::parse_ipv4(&ip_str) {
+                        *lock_unpoison(&session.tunnel_ip) = Some(ip);
+                    }
                     purge_stale_password_sessions(
                         app,
                         password,
+                        device,
                         generation_id,
                         session_salt,
                         session.id,
@@ -5018,28 +5227,12 @@ async fn handle_getconf(
                     purge_replaced_worker_sessions(
                         app,
                         password,
+                        device,
                         generation_id,
                         session_salt,
                         u64::from(worker_id),
                         session.id,
                     );
-                    let ip_str = match &access {
-                        CredentialAccess::Main => crate::model::owner_tunnel_ip(),
-                        CredentialAccess::Slot(slot_key) => {
-                            let needs_ip =
-                                db.passwords.get(slot_key).is_some_and(|e| !crate::model::ip_in_pool(&e.ip));
-                            let next_ip = if needs_ip { get_next_ip(&db) } else { None };
-                            if let Some(entry) = db.passwords.get_mut(slot_key) {
-                                if let Some(ip) = next_ip {
-                                    entry.ip = ip;
-                                    changed = true;
-                                }
-                                entry.ip.clone()
-                            } else {
-                                String::new()
-                            }
-                        }
-                    };
                     if !ip_str.is_empty() {
                         tunnel_ip = crate::tun_device::parse_ipv4(&ip_str);
                         routing_rule = resolve_routing_rule_access(&db, &access).cloned();
@@ -5089,6 +5282,7 @@ async fn handle_getconf(
             app,
             ProtocolCommand::SetAuthoritativeEpoch {
                 password: password.to_owned(),
+                device,
                 generation_id,
                 session_salt: session_salt.to_owned(),
             },
@@ -5196,14 +5390,25 @@ async fn ensure_control_tunnel(app: &Arc<App>, session: &Arc<Session>) -> Result
     let ip = if let Some(ip) = *lock_unpoison(&session.tunnel_ip) {
         ip
     } else {
-        let ip = {
-            let db = db_read(app).await?;
-            resolve_session_ip(&db, &session.password)
-        }
-        .ok_or_else(|| anyhow!("no IP assigned for this session"))?;
-        let parsed =
-            crate::tun_device::parse_ipv4(&ip).ok_or_else(|| anyhow!("invalid tunnel IP: {ip}"))?;
+        // B6: the address the device has, else the password's own unless another device holds it (only a GETCONF takes a
+        // new pool address). Stored under the read lock, so a GETCONF's choice, under the write lock, sees it taken.
+        let db = db_read(app).await?;
+        let (device_ip, held) = device_addresses(app, &session.password, session.device, session.id);
+        let parsed = match device_ip {
+            Some(ip) => ip,
+            None => {
+                let ip = resolve_session_ip(&db, &session.password)
+                    .ok_or_else(|| anyhow!("no IP assigned for this session"))?;
+                let parsed = crate::tun_device::parse_ipv4(&ip)
+                    .ok_or_else(|| anyhow!("invalid tunnel IP: {ip}"))?;
+                if held.contains(&parsed) {
+                    return Err(anyhow!("the password's address is another device's"));
+                }
+                parsed
+            }
+        };
         *lock_unpoison(&session.tunnel_ip) = Some(parsed);
+        drop(db);
         parsed
     };
     let registration_id = ROUTE_REGISTRATION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -5239,7 +5444,7 @@ fn disconnect_request_authorized(
     !target_salt.is_empty()
         && secret_eq(&requester.password, password)
         && requester.session_salt == target_salt
-        && epoch.matches(requester.generation_id, target_salt)
+        && epoch.matches(requester.device, requester.generation_id, target_salt)
         && (secret_eq(password, &db.main_password) || db.passwords.contains_key(password))
 }
 
@@ -5264,7 +5469,7 @@ pub async fn handle_disconnect(
     if preliminary.password != effective_password || preliminary.session_salt != target_salt {
         return Err("DENIED:not_owner");
     }
-    let Some((_epoch_lock, epoch)) = lock_existing_password_epoch(app, effective_password).await
+    let Some((_epoch_lock, mut epoch)) = lock_existing_password_epoch(app, effective_password).await
     else {
         return Err("DENIED:not_owner");
     };
@@ -5280,33 +5485,37 @@ pub async fn handle_disconnect(
         return Err("DENIED:not_owner");
     }
     drop(db);
+    // B6: the stopping device's sessions; the password's other devices keep theirs
+    let device = requester.device;
+    let stopping = |session: &Session| {
+        session.id == requester.id
+            || (secret_eq(&session.password, effective_password) && session.device == device)
+    };
     let candidates = app
         .sessions
         .iter()
-        .filter_map(|entry| {
-            let session = entry.value();
-            (session.id == requester.id || secret_eq(&session.password, effective_password))
-                .then_some(session.id)
-        })
+        .filter_map(|entry| stopping(entry.value()).then_some(entry.value().id))
         .collect::<Vec<_>>();
     command(
         app,
         ProtocolCommand::DisconnectPassword {
             password: effective_password.to_owned(),
+            device,
             requester_session_id: requester.id,
         },
     )
     .map_err(|_| "DENIED:server_busy")?;
     let mut removed = 0usize;
     for session_id in candidates {
-        if let Some((_, session)) = app.sessions.remove_if(&session_id, |_, current| {
-            current.id == session_id
-                && (current.id == requester.id || secret_eq(&current.password, effective_password))
-        }) {
+        if let Some((_, session)) = app
+            .sessions
+            .remove_if(&session_id, |_, current| current.id == session_id && stopping(current))
+        {
             session.cancel_token.cancel();
             removed += 1;
         }
     }
+    epoch.forget(device);
     Ok(removed)
 }
 
@@ -5506,6 +5715,9 @@ pub async fn password_janitor(app: Arc<App>) {
 mod tests {
     use super::*;
     use crate::model::PasswordEntry;
+
+    /// B6: the one device every client was before it, and every client of an old app still is
+    const L: DeviceKey = DeviceKey::Legacy;
 
     #[test]
     fn caps_field_parsed() {
@@ -5712,7 +5924,7 @@ mod tests {
         );
         let mut epoch = PasswordEpochState::default();
         assert_eq!(
-            epoch.admit(1_786_000_000, "fresh-session-salt"),
+            epoch.admit(L, 1_786_000_000, "fresh-session-salt"),
             PasswordEpochDecision::Replaced
         );
         assert!(!directory.join("passwords.json").exists());
@@ -5803,12 +6015,12 @@ mod tests {
         let max = format!("GETCONF:9000|password|{}|salt", u64::MAX);
         assert_eq!(
             parse_getconf_identity(max.as_bytes()),
-            Some(("password", u64::MAX, "salt"))
+            Some(("password", u64::MAX, "salt", DeviceKey::Legacy))
         );
         let max_with_count = format!("GETCONF:9000|password|{}|salt|4|36", u64::MAX);
         assert_eq!(
             parse_getconf_identity(max_with_count.as_bytes()),
-            Some(("password", u64::MAX, "salt"))
+            Some(("password", u64::MAX, "salt", DeviceKey::Legacy))
         );
         let max_with_count_and_pad = format!(
             "GETCONF:9000|password|{}|salt|4|36|extra_padding_bytes_here",
@@ -5816,7 +6028,7 @@ mod tests {
         );
         assert_eq!(
             parse_getconf_identity(max_with_count_and_pad.as_bytes()),
-            Some(("password", u64::MAX, "salt"))
+            Some(("password", u64::MAX, "salt", DeviceKey::Legacy))
         );
         assert!(parse_getconf_identity(b"GETCONF:9000|password|-1|salt").is_none());
         assert!(parse_getconf_identity(b"GETCONF:9000|password|+1|salt").is_none());
@@ -5844,7 +6056,7 @@ mod tests {
         );
         assert_eq!(
             parse_getconf_identity(decoded.range.get(&matching)),
-            Some(("wire-password", 7, "wire-salt")),
+            Some(("wire-password", 7, "wire-salt", DeviceKey::Legacy)),
         );
 
         let wrong_key = derive_wrap_key("wrong-password").unwrap();
@@ -6025,19 +6237,19 @@ mod tests {
     #[test]
     fn reconnect_session_key_replaces_stale_and_conflicting_values() {
         assert_eq!(
-            getconf_reconnect_action_hot("device", 77, "salt-a", "device", 76, "old",),
+            getconf_reconnect_action_hot(("device", L), 77, "salt-a", ("device", L), 76, "old"),
             GetconfReconnectAction::Replace
         );
         assert_eq!(
-            getconf_reconnect_action_hot("device", 77, "salt-a", "device", 77, "salt-b",),
+            getconf_reconnect_action_hot(("device", L), 77, "salt-a", ("device", L), 77, "salt-b"),
             GetconfReconnectAction::Replace
         );
         assert_eq!(
-            getconf_reconnect_action_hot("device", 77, "salt-a", "device", 77, "salt-a",),
+            getconf_reconnect_action_hot(("device", L), 77, "salt-a", ("device", L), 77, "salt-a"),
             GetconfReconnectAction::Process
         );
         assert_eq!(
-            getconf_reconnect_action_hot("device", 77, "salt-a", "device", 77, "salt-a"),
+            getconf_reconnect_action_hot(("device", L), 77, "salt-a", ("device", L), 77, "salt-a"),
             GetconfReconnectAction::Process
         );
     }
@@ -6046,34 +6258,33 @@ mod tests {
     fn active_password_session_replaces_any_different_key_without_ordering() {
         let mut state = PasswordEpochState::default();
 
-        assert_eq!(state.admit(77, "salt-a"), PasswordEpochDecision::Replaced);
-        assert_eq!(state.admit(77, "salt-a"), PasswordEpochDecision::Current);
-        assert_eq!(state.admit(12, "salt-b"), PasswordEpochDecision::Replaced);
-        assert_eq!(state.generation_id, 12);
-        assert_eq!(state.session_salt, "salt-b");
-        assert_eq!(state.admit(12, "salt-c"), PasswordEpochDecision::Replaced);
-        assert_eq!(state.session_salt, "salt-c");
+        assert_eq!(state.admit(L, 77, "salt-a"), PasswordEpochDecision::Replaced);
+        assert_eq!(state.admit(L, 77, "salt-a"), PasswordEpochDecision::Current);
+        assert_eq!(state.admit(L, 12, "salt-b"), PasswordEpochDecision::Replaced);
+        assert!(state.matches(L, 12, "salt-b") && !state.matches(L, 77, "salt-a"));
+        assert_eq!(state.admit(L, 12, "salt-c"), PasswordEpochDecision::Replaced);
+        assert!(state.matches(L, 12, "salt-c") && !state.matches(L, 12, "salt-b"));
     }
 
     #[test]
     fn active_session_key_retires_every_different_session() {
         assert!(session_is_retired_by_epoch(
-            "pass1", 41, "old-a", "pass1", 42, "current"
+            ("pass1", L), 41, "old-a", ("pass1", L), 42, "current"
         ));
         assert!(session_is_retired_by_epoch(
-            "pass1", 1, "old-b", "pass1", 42, "current"
+            ("pass1", L), 1, "old-b", ("pass1", L), 42, "current"
         ));
         assert!(session_is_retired_by_epoch(
-            "pass1", 42, "conflict", "pass1", 42, "current"
+            ("pass1", L), 42, "conflict", ("pass1", L), 42, "current"
         ));
         assert!(!session_is_retired_by_epoch(
-            "pass1", 42, "current", "pass1", 42, "current"
+            ("pass1", L), 42, "current", ("pass1", L), 42, "current"
         ));
         assert!(session_is_retired_by_epoch(
-            "pass1", 43, "future", "pass1", 42, "current"
+            ("pass1", L), 43, "future", ("pass1", L), 42, "current"
         ));
         assert!(!session_is_retired_by_epoch(
-            "other", 1, "old", "pass1", 42, "current"
+            ("other", L), 1, "old", ("pass1", L), 42, "current"
         ));
     }
 
@@ -6085,7 +6296,7 @@ mod tests {
             let state = state.clone();
             tasks.push(tokio::spawn(async move {
                 let mut state = state.lock().await;
-                state.admit(generation, &format!("salt-{generation}"))
+                state.admit(L, generation, &format!("salt-{generation}"))
             }));
         }
         for task in tasks {
@@ -6093,20 +6304,169 @@ mod tests {
         }
         let mut state = state.lock().await;
         assert!(
-            (1..=128).any(|generation| state.matches(generation, &format!("salt-{generation}")))
+            (1..=128).any(|generation| state.matches(L, generation, &format!("salt-{generation}")))
         );
         assert_eq!(
-            state.admit(129, "salt-129"),
+            state.admit(L, 129, "salt-129"),
             PasswordEpochDecision::Replaced
         );
-        assert_eq!(state.admit(129, "salt-129"), PasswordEpochDecision::Current);
+        assert_eq!(state.admit(L, 129, "salt-129"), PasswordEpochDecision::Current);
+    }
+
+    #[test]
+    fn the_device_id_rides_after_the_six_fields_only() {
+        let parts = |request: &'static str| -> Vec<&'static str> { request.split('|').collect() };
+        let id = DeviceKey::Id(0x3491150b7870d83656cfb30a122e662e);
+        // our 2.6 client (B6c): after caps; the case of the digits does not matter
+        let ours = "9000|pw|7|salt|1|10|caps=h1|dev=3491150b7870d83656cfb30a122e662e";
+        assert_eq!(DeviceKey::from_getconf(&parts(ours), true), id);
+        assert_eq!(
+            DeviceKey::from_getconf(&parts("9000|pw|7|salt|1|10|caps=h1|dev=3491150B7870D83656CFB30A122E662E"), true),
+            id
+        );
+        // every 2.5 client, and an id that is not 32 hex digits: the legacy device
+        for request in [
+            "9000|pw|7|salt|1|",
+            "9000|pw|7|salt|1|10|caps=h1",
+            "9000|pw|7|salt|1|10|caps=h1|dev=",
+            "9000|pw|7|salt|1|10|caps=h1|dev=3491150b7870d83656cfb30a122e662",
+            "9000|pw|7|salt|1|10|caps=h1|dev=3491150b7870d83656cfb30a122e662ee",
+            "9000|pw|7|salt|1|10|caps=h1|dev=+491150b7870d83656cfb30a122e662e",
+            "9000|pw|7|salt|1|10|caps=h1|dev=3491150b7870d83656cfb30a122e66zz",
+        ] {
+            assert_eq!(DeviceKey::from_getconf(&parts(request), true), L, "{request}");
+        }
+        // a password or a salt that reads "dev=…" is no id (fields 0-5)
+        let fields = "9000|dev=3491150b7870d83656cfb30a122e662e|7|dev=3491150b7870d83656cfb30a122e662e|1|10";
+        assert_eq!(DeviceKey::from_getconf(&parts(fields), true), L);
+        // a server run by swg-panel reads none
+        assert_eq!(DeviceKey::from_getconf(&parts(ours), false), L);
+        // the GETCONF parse carries it (a test runs as a standalone server); the 2.1 format is always the legacy device
+        assert_eq!(
+            parse_getconf_identity(format!("GETCONF:{ours}").as_bytes()),
+            Some(("pw", 7, "salt", id))
+        );
+        assert_eq!(
+            parse_getconf_identity(
+                b"GETCONF:46000|wire-device|wire-password|7|wire-salt|1|27|dev=3491150b7870d83656cfb30a122e662e"
+            )
+            .map(|identity| identity.3),
+            Some(L)
+        );
+        assert_eq!(id.log_tag(), " dev=3491150b");
+        assert_eq!(L.log_tag(), "");
+    }
+
+    #[test]
+    fn each_device_of_a_password_has_a_run_of_its_own() {
+        let (a, b) = (DeviceKey::Id(1), DeviceKey::Id(2));
+        let mut state = PasswordEpochState::default();
+        assert_eq!(state.admit(a, 7, "salt-a"), PasswordEpochDecision::Replaced);
+        assert_eq!(state.admit(b, 7, "salt-b"), PasswordEpochDecision::Replaced);
+        assert_eq!(state.admit(L, 7, "salt-l"), PasswordEpochDecision::Replaced);
+        // a second device replaces nobody: the three runs are current together
+        assert!(state.matches(a, 7, "salt-a") && state.matches(b, 7, "salt-b") && state.matches(L, 7, "salt-l"));
+        // a device's new run replaces its own only
+        assert_eq!(state.admit(a, 8, "salt-a2"), PasswordEpochDecision::Replaced);
+        assert!(!state.matches(a, 7, "salt-a") && state.matches(a, 8, "salt-a2") && state.matches(b, 7, "salt-b"));
+        assert_eq!(state.admit(a, 8, "salt-a2"), PasswordEpochDecision::Current);
+        // one device's run never authorises another's DISCONNECT
+        assert!(!state.matches(b, 8, "salt-a2"));
+        // a stop forgets that device alone
+        state.forget(a);
+        assert!(!state.matches(a, 8, "salt-a2") && state.matches(b, 7, "salt-b") && state.matches(L, 7, "salt-l"));
+    }
+
+    #[test]
+    fn a_new_run_and_a_stop_touch_their_own_device_only() {
+        let (a, b) = (DeviceKey::Id(1), DeviceKey::Id(2));
+        // a's new run retires a's older sessions; b's and the legacy device's stay
+        assert!(session_is_retired_by_epoch(("pw", a), 7, "old", ("pw", a), 8, "new"));
+        assert!(!session_is_retired_by_epoch(("pw", b), 7, "old", ("pw", a), 8, "new"));
+        assert!(!session_is_retired_by_epoch(("pw", L), 7, "old", ("pw", a), 8, "new"));
+        // an old app's new run retires the legacy device's older sessions, as before B6, and no device's
+        assert!(session_is_retired_by_epoch(("pw", L), 7, "old", ("pw", L), 8, "new"));
+        assert!(!session_is_retired_by_epoch(("pw", a), 7, "old", ("pw", L), 8, "new"));
+        // a stop ends the stopping device's sessions (and the requester's own), no other device's
+        assert!(session_is_disconnected_password(8, ("pw", a), 7, ("pw", a)));
+        assert!(session_is_disconnected_password(7, ("pw", b), 7, ("pw", a)));
+        assert!(!session_is_disconnected_password(8, ("pw", b), 7, ("pw", a)));
+        assert!(!session_is_disconnected_password(8, ("pw", L), 7, ("pw", a)));
+        // a GETCONF of another device on an endpoint makes a session of its own
+        assert_eq!(
+            getconf_reconnect_action_hot(("pw", a), 7, "s", ("pw", b), 7, "s"),
+            GetconfReconnectAction::Replace
+        );
+        assert_eq!(
+            getconf_reconnect_action_hot(("pw", a), 7, "s", ("pw", a), 7, "s"),
+            GetconfReconnectAction::Process
+        );
+    }
+
+    #[test]
+    fn a_device_keeps_its_address_and_another_takes_a_free_one() {
+        let held = |addresses: &[[u8; 4]]| addresses.iter().copied().collect::<std::collections::HashSet<_>>();
+        let own = || "10.66.67.3".to_owned();
+        let next = || Some("10.66.67.9".to_owned());
+        // the device has an address (its other workers, its older run): it keeps it, whatever else is free
+        assert_eq!(choose_device_ip(Some([10, 66, 67, 7]), own(), &held(&[]), next), "10.66.67.7");
+        // the password's first device, the legacy one alone as before B6: the password's own address
+        assert_eq!(choose_device_ip(None, own(), &held(&[]), next), "10.66.67.3");
+        assert_eq!(choose_device_ip(None, own(), &held(&[[10, 66, 67, 4]]), next), "10.66.67.3");
+        // another device holds the password's own: the lowest free one, or none left (NOCONF)
+        assert_eq!(choose_device_ip(None, own(), &held(&[[10, 66, 67, 3]]), next), "10.66.67.9");
+        assert_eq!(choose_device_ip(None, own(), &held(&[[10, 66, 67, 3]]), || None), "");
+        // the owner's own is .2; a row with no address and a full pool has none (NOCONF, as before)
+        assert_eq!(choose_device_ip(None, "10.66.67.2".to_owned(), &held(&[]), next), "10.66.67.2");
+        assert_eq!(choose_device_ip(None, String::new(), &held(&[]), next), "");
+    }
+
+    #[test]
+    fn an_address_is_never_two_devices_at_once() {
+        fn session(engine: &mut ProtocolEngine, client: u8, device: DeviceKey, salt: &str) -> u64 {
+            let slot = engine.create_legacy_session(
+                SocketAddr::from(([198, 51, 100, client], 46000)),
+                None,
+                Arc::from("wire-password"),
+                device,
+                derive_wrap_key("wire-password").unwrap(),
+                111,
+                false,
+                7,
+                salt,
+                None,
+                None,
+            );
+            engine.sessions[slot].id
+        }
+        let (mut engine, _events) = fixture_engine("wire-password");
+        let a1 = session(&mut engine, 1, DeviceKey::Id(1), "run-a");
+        let a2 = session(&mut engine, 2, DeviceKey::Id(1), "run-a");
+        let b = session(&mut engine, 3, DeviceKey::Id(2), "run-b");
+        let legacy = session(&mut engine, 4, L, "run-l");
+        let address = [10, 66, 67, 3];
+        assert!(engine.activate_tunnel(a1, address, 1, 1, 2));
+        // the device's other worker shares its address
+        assert!(engine.activate_tunnel(a2, address, 2, 2, 2));
+        assert!(engine.by_id.contains_key(&a1) && engine.by_id.contains_key(&a2));
+        // another device on it — a command that never arrived — drops its holders before the route registers
+        assert!(engine.activate_tunnel(b, address, 3, 1, 1));
+        assert!(!engine.by_id.contains_key(&a1) && !engine.by_id.contains_key(&a2));
+        assert!(engine.by_id.contains_key(&b));
+        // and the legacy device is a device like any other here
+        assert!(engine.activate_tunnel(legacy, address, 4, 1, 1));
+        assert!(!engine.by_id.contains_key(&b) && engine.by_id.contains_key(&legacy));
+        // another address leaves everyone in place
+        let other = session(&mut engine, 5, DeviceKey::Id(3), "run-c");
+        assert!(engine.activate_tunnel(other, [10, 66, 67, 4], 5, 1, 1));
+        assert!(engine.by_id.contains_key(&legacy) && engine.by_id.contains_key(&other));
     }
 
     #[test]
     fn disconnect_targets_requester_and_all_password_sessions() {
-        assert!(session_is_disconnected_password(7, "", 7, "pass"));
-        assert!(session_is_disconnected_password(8, "pass", 7, "pass"));
-        assert!(!session_is_disconnected_password(8, "other", 7, "pass"));
+        assert!(session_is_disconnected_password(7, ("", L), 7, ("pass", L)));
+        assert!(session_is_disconnected_password(8, ("pass", L), 7, ("pass", L)));
+        assert!(!session_is_disconnected_password(8, ("other", L), 7, ("pass", L)));
     }
 
     #[test]
@@ -6153,7 +6513,7 @@ mod tests {
                 tasks.push(tokio::spawn(async move {
                     let salt = format!("client-{client}-generation-{generation}");
                     let mut state = state.lock().await;
-                    state.admit(generation, &salt);
+                    state.admit(L, generation, &salt);
                 }));
             }
         }
@@ -6164,7 +6524,7 @@ mod tests {
         for (client, state) in states.iter().enumerate() {
             let state = state.lock().await;
             assert!(
-                (1..=128).any(|generation| state.matches(
+                (1..=128).any(|generation| state.matches(L, 
                     generation,
                     &format!("client-{client}-generation-{generation}")
                 )),
@@ -6183,7 +6543,7 @@ mod tests {
                 let generation = attempt.wrapping_mul(37).wrapping_add(11);
                 let salt = format!("salt-{generation}-{attempt}");
                 let mut state = state.lock().await;
-                state.admit(generation, &salt);
+                state.admit(L, generation, &salt);
             }));
         }
         for task in tasks {
@@ -6194,7 +6554,7 @@ mod tests {
         assert!(
             (0..1024u64).any(|attempt| {
                 let generation = attempt.wrapping_mul(37).wrapping_add(11);
-                state.matches(generation, &format!("salt-{generation}-{attempt}"))
+                state.matches(L, generation, &format!("salt-{generation}-{attempt}"))
             }),
             "generation and salt were observed from different reconnects"
         );

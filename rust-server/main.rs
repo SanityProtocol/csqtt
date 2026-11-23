@@ -1722,7 +1722,7 @@ async fn swgpanel_reconcile_desired(app: &Arc<App>, path: &std::path::Path) {
                 }
                 None => {
                     // as the stock web panel's client_create: the address and the subscription id are given here
-                    let ip = model::get_next_ip(&db).unwrap_or_default();
+                    let ip = model::get_next_ip(&db, &protocol::held_addresses(app)).unwrap_or_default();
                     db.passwords.insert(
                         (*pw).to_owned(),
                         model::PasswordEntry {
