@@ -4922,7 +4922,8 @@ fn e2e_set_device_limit(password: &str, limit: Option<u32>) {
 }
 
 /// B6b, case 2: at the password's limit (3 by default) a fourth device is refused with its own reason, which stops the
-/// run; an old app still gets in, past the limit.
+/// run; an old app gets in past the limit and takes no slot: here it connects before the third 2.6 device, which still
+/// gets in (review F1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires ci/e2e-server.sh's standalone server, CSQTT_E2E_DEV_PEER and CSQTT_E2E_DEV_WEB"]
 async fn devices_a_fourth_device_is_refused_and_an_old_app_still_gets_in() {
@@ -4931,13 +4932,13 @@ async fn devices_a_fourth_device_is_refused_and_an_old_app_still_gets_in() {
     e2e_limited_password(password, 3);
     let a = E2eDevice::up(peer, password, Some(E2E_DEVICE_A), 601, "devices-limit-a").await;
     let b = E2eDevice::up(peer, password, Some(E2E_DEVICE_B), 602, "devices-limit-b").await;
-    let c = E2eDevice::up(peer, password, Some(E2E_DEVICE_C), 603, "devices-limit-c").await;
-    let refusal = E2eDevice::refused(peer, password, "0000000000000000000000000000000d", 604, "devices-limit-d").await;
+    let old = E2eDevice::up(peer, password, None, 603, "devices-limit-old").await;
+    let c = E2eDevice::up(peer, password, Some(E2E_DEVICE_C), 604, "devices-limit-c").await;
+    let refusal = E2eDevice::refused(peer, password, "0000000000000000000000000000000d", 605, "devices-limit-d").await;
     assert!(
         refusal.contains("FATAL_AUTH") && refusal.contains("лимит устройств"),
         "the fourth device ended with {refusal}"
     );
-    let old = E2eDevice::up(peer, password, None, 605, "devices-limit-old").await;
     for (name, device) in [("a", &a), ("b", &b), ("c", &c), ("old", &old)] {
         assert!(device.alive().await, "device {name} carries nothing");
     }

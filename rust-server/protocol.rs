@@ -4965,8 +4965,10 @@ fn choose_device_ip(
     }
 }
 
-/// B6b: a device stays connected while its client sends anything: a keepalive goes out every 10 s, so 180 s without a
-/// packet means the client is gone (a stop without DISCONNECT, a killed app, a phone off) and its slot may be taken.
+/// B6b: a device keeps its slot against a newcomer while its client sends anything: a running client sends a keepalive
+/// every 10 s, so 180 s without a packet means it is gone (a stop without DISCONNECT, a killed app, a phone off) or
+/// asleep (a phone whose battery saver holds no wake lock with the screen off): the plan's accepted risk, such a phone
+/// meets the limit when it wakes.
 const DEVICE_LIVE_SECS: u64 = 180;
 
 /// B6b: what a GETCONF of a device meets at its password's limit.
@@ -4986,9 +4988,11 @@ struct Occupant {
     last_inbound: u64,
 }
 
-/// B6b, the rule: the legacy device (an old app) is never refused; a device that holds a slot keeps it; a new device
-/// fits while fewer than `limit` hold one — every new-app device that has an admitted session, the legacy device only
-/// while it carries; else silent new-app devices give way, stalest first, as many as make room; else it is refused.
+/// B6b, the rule: a device that holds a slot keeps it; a new device fits while fewer than `limit` new-app devices have
+/// an admitted session; else silent ones give way, stalest first, as many as make room; else it is refused. The legacy
+/// device (an old app) is never refused and takes no slot: it is always the one extra, so a limit of 3 is three 2.6
+/// devices and an old app in whatever order they connect (the operator, 2026-11-23: "up to 4 with three new apps";
+/// counting it while it carried refused a phone just updated from 2.5, or the last 2.6 phone after a server restart).
 /// Lowering a limit cuts nobody: it holds for the next device.
 fn decide_admission(device: DeviceKey, limit: u32, occupants: &[Occupant], now: u64) -> Admission {
     if device == DeviceKey::Legacy || occupants.iter().any(|occupant| occupant.device == device) {
@@ -4997,7 +5001,7 @@ fn decide_admission(device: DeviceKey, limit: u32, occupants: &[Occupant], now: 
     let silent = |occupant: &&Occupant| now.saturating_sub(occupant.last_inbound) >= DEVICE_LIVE_SECS;
     let held = occupants
         .iter()
-        .filter(|occupant| occupant.device != DeviceKey::Legacy || !silent(occupant))
+        .filter(|occupant| occupant.device != DeviceKey::Legacy)
         .count();
     let limit = limit.max(1) as usize;
     if held < limit {
@@ -6748,12 +6752,13 @@ mod tests {
         assert_eq!(admit(d, 3, &[live(a), silent(b, 200), silent(c, 400)]), Admission::Evict(vec![c]));
         assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 179)]), Admission::Refuse);
         assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 180)]), Admission::Evict(vec![c]));
-        // the legacy device (an old app): never refused, past the limit too; it holds a slot only while it carries, and
-        // it never gives way
+        // the legacy device (an old app): never refused, past the limit too; it takes no slot and never gives way, so a
+        // limit of 3 is three new-app devices and an old app, whichever came first (review F1)
         assert_eq!(admit(L, 1, &[live(a), live(b)]), Admission::Admit);
-        assert_eq!(admit(d, 3, &[live(a), live(b), live(L)]), Admission::Refuse);
-        assert_eq!(admit(d, 3, &[live(a), live(b), silent(L, 600)]), Admission::Admit);
-        assert_eq!(admit(d, 3, &[live(a), silent(b, 300), live(L)]), Admission::Evict(vec![b]));
+        assert_eq!(admit(c, 3, &[live(a), live(L), live(b)]), Admission::Admit);
+        assert_eq!(admit(d, 3, &[live(a), live(b), live(c), live(L)]), Admission::Refuse);
+        assert_eq!(admit(d, 3, &[live(a), silent(b, 300), live(c), live(L)]), Admission::Evict(vec![b]));
+        assert_eq!(admit(d, 3, &[live(a), live(b), live(c), silent(L, 600)]), Admission::Refuse);
         // a limit lowered below the devices holding a slot: the silent ones give way if they make room, or nobody does
         assert_eq!(admit(d, 2, &[silent(a, 300), silent(b, 500), live(c)]), Admission::Evict(vec![b, a]));
         assert_eq!(admit(d, 1, &[silent(a, 300), silent(b, 500), live(c)]), Admission::Refuse);
