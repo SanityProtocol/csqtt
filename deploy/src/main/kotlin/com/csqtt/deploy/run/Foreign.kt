@@ -98,14 +98,17 @@ object ForeignRemoval {
         val lastStock = others.none { it.owner in STOCK }
         val lineages = inv.files.mapNotNull { LINEAGE.find(it.path)?.groupValues?.get(1) }.distinct()
         // the untagged FORWARD rule is a 2.5 network-up's (added when missing): an install of another line never put it there,
-        // so the one on the box is someone else's (B11b review F2)
+        // so the one on the box is someone else's (B11b review F2); and only a 2.5 install needs it (a 2.1 install's own accepts
+        // on its tunnel cover it), so it goes with the last stock install of the 2.5 line, whatever 2.1 install stays (B11b
+        // verify N1: a 2.1.9 main beside a 2.5 side, removed after it, kept it for good)
         val untaggedThere = inv.firewall.any { !it.isChain && it.text == UNTAGGED }
         val untaggedOurs = untaggedThere && install.build?.line == com.csqtt.deploy.inspect.ProtocolLine.V25
+        val other25 = others.firstOrNull { it.owner in STOCK && it.build?.line == com.csqtt.deploy.inspect.ProtocolLine.V25 }
         if (untaggedThere && !untaggedOurs) left += "правило FORWARD RELATED,ESTABLISHED: эта установка его не ставила"
-        if (!lastStock && (lineages.isNotEmpty() || untaggedOurs)) {
-            left += "общие с ${others.first { it.owner in STOCK }.name}: " +
-                (lineages.map { "сертификат $it" } + if (untaggedOurs) listOf("правило FORWARD RELATED,ESTABLISHED") else emptyList()).joinToString(", ")
+        if (!lastStock && lineages.isNotEmpty()) {
+            left += "общие с ${others.first { it.owner in STOCK }.name}: " + lineages.joinToString(", ") { "сертификат $it" }
         }
+        if (untaggedOurs && other25 != null) left += "общее с ${other25.name}: правило FORWARD RELATED,ESTABLISHED"
         if (inv.files.any { it.path == "/etc/modules-load.d/bbr.conf" }) left += "/etc/modules-load.d/bbr.conf (такой файл пишут и другие программы)"
         // 2.0.0's deploy tagged its SSH opening: run.sh never takes an INPUT rule for a port sshd listens on (a box whose INPUT
         // drops would refuse every new SSH login)
@@ -119,7 +122,7 @@ object ForeignRemoval {
             ?.let { left += "правила без метки для $subnet ($it, так их ставил 2.0.0)" }
         if (inv.firewall.any { !it.isChain && it.text == CLAMP }) left += "общий TCPMSS-clamp в FORWARD (такой ставят и другие программы)"
         val store = install.stores.firstOrNull { it.dir == role.store }
-        return Listing(role, units, paths, tags, tables, if (lastStock) lineages else emptyList(), lastStock && untaggedOurs, store?.dir,
+        return Listing(role, units, paths, tags, tables, if (lastStock) lineages else emptyList(), untaggedOurs && other25 == null, store?.dir,
             purge, left, store?.linkTarget.orEmpty())
     }
 

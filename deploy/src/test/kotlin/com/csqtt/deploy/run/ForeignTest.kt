@@ -116,6 +116,28 @@ class ForeignTest {
     }
 
     @Test
+    fun theUntaggedRuleGoesWithTheLastInstallOfTheTwoFiveLine() {
+        // B11b verify N1: the old app's own layout, a 2.5 side beside a 2.1.9 main; only a 2.5 install needs the rule, so a
+        // 2.1 install staying keeps it no more, in either removal order
+        val layout = lines("v219-systemd-noble") + lines("v253side-systemd-noble") + shared
+        val side = checkNotNull(listing(layout, "csqtt25.service"))
+        assertTrue(side.will.joinToString(), side.untagged)
+        // the certificate lineage is still the 2.1.5+ main's as well: it stays, named
+        assertEquals(emptyList<String>(), side.lineages)
+        assertTrue(side.will.joinToString(), side.will.any { it.startsWith("Останется: общие с csqtt.service: сертификат") })
+        assertFalse(side.will.joinToString(), side.will.any { "общее с" in it })
+        // the 2.1.9 main first: never its rule, named as such; the side then takes it
+        val main = checkNotNull(listing(layout, "csqtt.service"))
+        assertFalse(main.untagged)
+        assertTrue(main.will.joinToString(), "Останется: правило FORWARD RELATED,ESTABLISHED: эта установка его не ставила" in main.will)
+        assertTrue(checkNotNull(listing(lines("v253side-systemd-noble") + shared, "csqtt25.service")).untagged)
+        // two installs of the 2.5 line: the first to go leaves it to the other, named
+        val two = checkNotNull(listing(lines("v253main-systemd-noble") + lines("v253side-systemd-noble") + shared, "csqtt.service"))
+        assertFalse(two.untagged)
+        assertTrue(two.will.joinToString(), "Останется: общее с csqtt25.service: правило FORWARD RELATED,ESTABLISHED" in two.will)
+    }
+
+    @Test
     fun aSymlinkedStoreLosesItsLinkAndTheListingSaysSo() {
         // B11b review F3: the run unlinks a symlinked config dir and never touches what it points to; the listing says so
         val linked = lines("v253main-systemd-noble").map {
