@@ -37,6 +37,8 @@ class SshFailureTest {
             java.net.SocketException("Broken pipe") to SshFailure.CLOSED,
             java.net.SocketException("Software caused connection abort") to SshFailure.CLOSED,
             java.net.SocketException("Socket closed") to SshFailure.CLOSED,
+            // a session a timeout or a lost link ended (verify N1)
+            IllegalStateException("Not connected") to SshFailure.CLOSED,
             HostKeyChanged("vps", 22, "SHA256:a", "SHA256:b") to SshFailure.HOST_KEY_CHANGED,
             IllegalStateException("something new") to SshFailure.OTHER,
         )

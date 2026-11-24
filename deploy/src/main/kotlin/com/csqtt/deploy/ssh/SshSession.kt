@@ -36,6 +36,7 @@ import java.io.InputStream
 import java.io.StringReader
 import java.security.PrivateKey
 import java.security.PublicKey
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -64,10 +65,12 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
      * (dd on a full disk) returns its own status and stderr at once, which say why (review F2: one large write held sshj's
      * stream through the transport's 30 s window wait, with the reader thread queued behind it).
      *
-     * [deadlineMs] bounds the whole call, stdin included (review F1). Past it the channel is closed. If a dead path holds
-     * sshj's write lock inside a socket write, so that not even that can go out, the socket itself is closed after a few
-     * seconds. A chunk that makes no progress for 30 s means the link is lost and ends the call the same way, since the
-     * keepalive cannot run behind that lock. Either way the result is an SshError: TIMEOUT or CLOSED.
+     * [deadlineMs] bounds the whole call, stdin included (review F1). Past it the call ends with SshError(TIMEOUT) and the
+     * channel is asked to close without waiting for the answer, since OpenSSH holds a session channel's close until its
+     * command exits (session.c's "delay detach of session"); the session stays usable. Only when the deadline finds a
+     * write in progress, which on a dead path holds sshj's locks inside a socket write, is the socket itself closed. A
+     * chunk that makes no progress for 30 s means the link is lost and ends the call as CLOSED, since the keepalive cannot
+     * run behind that lock (verify N1).
      */
     fun exec(command: RemoteCommand, stdin: ByteArray? = null, deadlineMs: Long = 60_000): ExecResult {
         val session = try {
@@ -90,22 +93,29 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
                 writeError = runCatching { writeStdin(cmd, stdin, writing) }.exceptionOrNull()
             }
             val cut = AtomicReference<SshFailure?>(null)
-            val watch = watchdog(cmd, deadlineMs, writing, cut)
+            // the call ends on whichever comes first: the channel's close (the command exited, or the link failed) or
+            // the watchdog's verdict, which does not wait for sshd's close
+            val done = CountDownLatch(1)
+            var joinError: Throwable? = null
+            thread(isDaemon = true, name = "ssh-join") {
+                joinError = runCatching { cmd.join() }.exceptionOrNull()
+                done.countDown()
+            }
+            val watch = watchdog(cmd, deadlineMs, writing, cut, done)
             fun cutError(cause: Throwable?): SshError? = cut.get()?.let { kind ->
                 SshError(kind, if (kind == SshFailure.TIMEOUT) "\"$command\" did not finish in ${deadlineMs / 1000} s"
                 else "\"$command\": the link stopped carrying data for ${STALL_MS / 1000} s", cause)
             }
             try {
-                // the watchdog acts first; this bound only stops the wait if it could not
-                cmd.join(deadlineMs + GRACE_MS + 10_000, TimeUnit.MILLISECONDS)
-            } catch (error: Exception) {
-                cutError(error)?.let { throw it }
-                runCatching { cmd.close() }
-                throw SshError(SshFailures.classify(error), "\"$command\": ${error.message}", error)
+                // the watchdog acts at the deadline; this bound only stops the wait if it could not
+                done.await(deadlineMs + 10_000, TimeUnit.MILLISECONDS)
             } finally {
                 watch.interrupt()
             }
-            cutError(null)?.let { throw it }
+            cutError(joinError)?.let { throw it }
+            joinError?.let { error ->
+                throw SshError(SshFailures.classify(error), "\"$command\": ${error.message}", error)
+            }
             writer.join(5_000)
             readers.forEach { it.join(5_000) }
             val status = cmd.exitStatus
@@ -139,7 +149,8 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
         if (cmd.isOpen && cmd.exitStatus == null) out.close()
     }
 
-    private fun watchdog(cmd: Session.Command, deadlineMs: Long, writing: AtomicLong, cut: AtomicReference<SshFailure?>): Thread =
+    private fun watchdog(cmd: Session.Command, deadlineMs: Long, writing: AtomicLong, cut: AtomicReference<SshFailure?>,
+        done: CountDownLatch): Thread =
         thread(isDaemon = true, name = "ssh-watch") {
             val end = System.nanoTime() + deadlineMs * 1_000_000
             try {
@@ -148,19 +159,21 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
                     val now = System.nanoTime()
                     val since = writing.get()
                     val kind = when {
-                        now > end -> SshFailure.TIMEOUT
                         since != 0L && now - since > STALL_MS * 1_000_000 -> SshFailure.CLOSED
+                        now > end -> SshFailure.TIMEOUT
                         else -> null
                     } ?: continue
                     cut.set(kind)
-                    if (kind == SshFailure.TIMEOUT) {
-                        // a live link closes the channel at once and the session stays usable
-                        val closer = thread(isDaemon = true, name = "ssh-close") { runCatching { cmd.close() } }
-                        closer.join(GRACE_MS)
-                        if (!closer.isAlive) return@thread
+                    if (kind == SshFailure.TIMEOUT && writing.get() == 0L) {
+                        // no write holds sshj's locks: the channel is asked to close and the session stays; sshd answers
+                        // once the command exits, and the closer's own wait is bounded by the connection's timeout
+                        thread(isDaemon = true, name = "ssh-close") { runCatching { cmd.close() } }
+                    } else {
+                        // a write in progress on a dead path holds sshj's locks: the socket, which takes none, is closed and
+                        // every wait on the transport ends
+                        runCatching { client.socket?.close() }
                     }
-                    // the closest thing to the wire, which takes no sshj lock: the transport fails, every wait on it ends
-                    runCatching { client.socket?.close() }
+                    done.countDown()
                     return@thread
                 }
             } catch (_: InterruptedException) {
@@ -168,7 +181,12 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
             }
         }
 
+    /**
+     * Ends the session at once, even from another thread while an exec waits on a dead path (an app's Cancel): the socket
+     * first, which takes no sshj lock, then sshj's own teardown.
+     */
     override fun close() {
+        runCatching { client.socket?.close() }
         runCatching { client.disconnect() }
         runCatching { client.close() }
     }
@@ -176,9 +194,6 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
     companion object {
         /** stdin's chunk: no more than this, nor than the remote window, per write. */
         private const val CHUNK = 32 * 1024
-
-        /** A deadline's channel close may take this long before the socket itself is closed. */
-        private const val GRACE_MS = 3_000L
 
         /** A chunk that makes no progress this long: the link is lost (the keepalive's own bound, which cannot run then). */
         private const val STALL_MS = 30_000L

@@ -90,7 +90,8 @@ object SshFailures {
             "identification" in message -> SshFailure.NOT_SSH
             "unable to reach a settlement" in message -> SshFailure.KEX
             "broken transport" in message || "connection reset" in message || "end of stream" in message ||
-                "broken pipe" in message || "socket closed" in message || "connection abort" in message -> SshFailure.CLOSED
+                "broken pipe" in message || "socket closed" in message || "connection abort" in message ||
+                "not connected" in message -> SshFailure.CLOSED
             else -> null
         }
     }

@@ -46,7 +46,8 @@ fun main(args: Array<String>) {
         dispatch(args)
     } catch (error: Exception) {
         // a target file that cannot be read or is missing a field: a usage error, said in one line
-        if (error !is IllegalStateException && error !is NumberFormatException && error !is java.io.IOException) throw error
+        // IllegalArgumentException: SshTarget's own checks (a port past 65535)
+        if (error !is IllegalStateException && error !is IllegalArgumentException && error !is java.io.IOException) throw error
         System.err.println("target: ${error.message}")
         2
     }
