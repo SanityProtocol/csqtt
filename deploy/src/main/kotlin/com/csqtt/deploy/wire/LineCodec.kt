@@ -74,6 +74,18 @@ object LineCodec {
 
     fun end(count: Int): String = "$PREFIX$END|$count"
 
+    /**
+     * One line of a stream that is still being written (a run's log read by offset): its marker line, or null for noise.
+     * The end line is a line like any other here; a malformed marker line is null too, which a stream reader skips.
+     */
+    fun parseLine(raw: String): Line? {
+        val text = raw.removeSuffix("\r")
+        if (!text.startsWith(PREFIX)) return null
+        val parts = text.substring(PREFIX.length).split('|')
+        if (!KIND.matches(parts[0])) return null
+        return Line(parts[0], parts.drop(1).map(::unescape))
+    }
+
     fun parse(output: String): Report {
         val lines = mutableListOf<Line>()
         for (raw in output.split('\n')) {

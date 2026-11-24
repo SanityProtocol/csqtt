@@ -4,6 +4,14 @@ package com.csqtt.deploy.cli
 
 import com.csqtt.deploy.bundle.Bundle
 import com.csqtt.deploy.inspect.Preflight
+import com.csqtt.deploy.run.Coordinator
+import com.csqtt.deploy.run.DeployState
+import com.csqtt.deploy.run.FileStateStore
+import com.csqtt.deploy.run.RunEvent
+import com.csqtt.deploy.run.RunPlan
+import com.csqtt.deploy.run.RunResult
+import com.csqtt.deploy.run.Runner
+import com.csqtt.deploy.run.StartOutcome
 import com.csqtt.deploy.inspect.PreflightRules
 import com.csqtt.deploy.ssh.HostKeyChanged
 import com.csqtt.deploy.ssh.HostKeyPins
@@ -38,8 +46,14 @@ private const val USAGE = """usage: deploy-cli <command>
                           installs it for the login user; remove takes exactly that key's line away
   inspect <target> [host…] the environment as root (P2 B3): every check's facts, then each finding with its level; the hosts
                           are the ones the planned run must reach (github.com, the ACME server), none for a plain look
+  run <target> selftest [steps] [seconds] [port…]   start the run skeleton's self-test as root on the box (B7a) and
+                          follow it; its state is kept in <target>.state, so a killed deploy-cli re-attaches
+  attach <target>         follow the run <target>.state names (or say what state it holds)
+  cancel <target>         ask that run to stop at its next safe point
+  runs <target>           the runs the box keeps: id, live, result (none and not live: interrupted)
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
-      · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed)"""
+      · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed) · 7 a run failed (its result
+      printed) · 8 another run holds the box · 9 the run was interrupted"""
 
 fun main(args: Array<String>) {
     val code = try {
@@ -60,6 +74,10 @@ private fun dispatch(args: Array<String>): Int {
         args.size == 2 && args[0] == "ssh-check" -> sshCheck(File(args[1]))
         args.size == 2 && args[0] == "root-check" -> withSession(File(args[1])) { session, p -> rootCheck(session, p) }
         args.size >= 2 && args[0] == "inspect" -> withSession(File(args[1])) { session, p -> inspect(session, p, args.drop(2)) }
+        args.size >= 3 && args[0] == "run" && args[2] == "selftest" ->
+            withSession(File(args[1])) { session, p -> runSelftest(session, p, File(args[1]), args.drop(3)) }
+        args.size == 2 && args[0] in setOf("attach", "cancel", "runs") ->
+            withSession(File(args[1])) { session, p -> runVerb(session, p, File(args[1]), args[0]) }
         args.size == 3 && args[0] == "login-key" && args[2] in setOf("add", "remove") ->
             withSession(File(args[1])) { session, _ -> loginKey(session, File(args[1] + ".loginkey"), args[2]) }
         else -> {
@@ -268,4 +286,87 @@ private fun inspect(session: SshSession, p: Properties, hosts: List<String>): In
     verdicts.forEach { println("${it.level} ${it.finding}" + if (it.detail.isEmpty()) "" else " ${it.detail}") }
     println("inspect took $took ms")
     return if (PreflightRules.stops(verdicts).isEmpty()) 0 else 6
+}
+
+private fun runner(session: SshSession, p: Properties): Runner {
+    val remote = session.asRemote()
+    return Runner(remote, RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password"))))
+}
+
+private fun coordinator(target: File) = Coordinator(FileStateStore(File(target.path + ".state"))).also { c ->
+    c.observe { state -> if (state is DeployState.Running && state.phase.isEmpty()) println("state running ${state.runId}") }
+}
+
+/** Follows a run to its result, keeping the coordinator's Running state current (the pendingRunId is in it from the start). */
+private fun follow(runner: Runner, coordinator: Coordinator, runId: String): Int {
+    var running = DeployState.Running(runId)
+    val result = runner.attach(runId) { event, _ ->
+        when (event) {
+            is RunEvent.Phase -> running = running.copy(phase = event.name, waitingFor = null)
+            is RunEvent.Percent -> running = running.copy(percent = event.value)
+            is RunEvent.Beat -> running = running.copy(waitingFor = event.waitingFor)
+            else -> {}
+        }
+        coordinator.move(running)
+        println(when (event) {
+            is RunEvent.Phase -> "phase ${event.name}"
+            is RunEvent.Percent -> "${event.value}%"
+            is RunEvent.Beat -> "waiting: ${event.waitingFor}"
+            is RunEvent.Step -> "step ${event.name}: ${event.command}"
+            is RunEvent.Output -> "  ${event.line}"
+            is RunEvent.Result -> "result ${event.result.kind} at ${event.result.step}: ${event.result.cause} ${event.result.next}".trim()
+        })
+    }
+    return if (result == null) {
+        coordinator.move(DeployState.Interrupted(runId))
+        println("interrupted: the run ended with no result")
+        9
+    } else {
+        coordinator.move(DeployState.Finished(result))
+        if (result.ok) 0 else 7
+    }
+}
+
+private fun runSelftest(session: SshSession, p: Properties, target: File, args: List<String>): Int {
+    val runner = runner(session, p)
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val plan = RunPlan("selftest", mapOf("steps" to (args.getOrNull(0) ?: "3"), "step_seconds" to (args.getOrNull(1) ?: "2"),
+        "ports" to args.drop(2).joinToString(" ")), mapOf("zoo_secret" to "ZooSecretValue26"))
+    // the pendingRunId is kept before the start: a death in between finds the run by it, or finds no run at all
+    coordinator.move(DeployState.Running(runId))
+    return when (val outcome = runner.start(runId, plan)) {
+        is StartOutcome.Started -> follow(runner, coordinator, runId)
+        is StartOutcome.Busy -> {
+            coordinator.move(DeployState.Idle)
+            println("busy: run ${outcome.activeRunId} holds the box (attach to watch it)")
+            8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(DeployState.Idle)
+            println("refused: ${outcome.reason}")
+            7
+        }
+    }
+}
+
+private fun runVerb(session: SshSession, p: Properties, target: File, verb: String): Int {
+    val runner = runner(session, p)
+    if (verb == "runs") {
+        runner.status().forEach { println("${it.id} ${it.action} " + if (it.active) "live" else it.result.ifEmpty { "interrupted" }) }
+        return 0
+    }
+    val coordinator = coordinator(target)
+    val state = coordinator.state
+    val runId = (state as? DeployState.Running)?.runId ?: (state as? DeployState.Interrupted)?.runId
+    if (runId == null) {
+        println("no run to $verb: the state is ${state::class.simpleName}" + if (state is DeployState.Finished) " (${(state.result as RunResult).kind})" else "")
+        return 2
+    }
+    if (verb == "cancel") {
+        runner.cancel(runId)
+        println("cancel asked for $runId")
+        return 0
+    }
+    return follow(runner, coordinator, runId)
 }
