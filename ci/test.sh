@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Run one test suite of a source tree inside the pinned CI images (M-159: every crate tested on every push).
-# Usage: ci/test.sh <source tree> <server|client|app|e2e> [e2e only: a substring of the case names to run]
+# Usage: ci/test.sh <source tree> <server|client|app|deploy|bundle|e2e> [e2e only: a substring of the case names to run]
 #   server: cargo test of rust-server for the target it ships on (x86_64 musl, built through zig like ci/build-server.sh)
 #   client: cargo test of rust-client on the host target (its sni.rs includes the tree's root domains.txt)
 #   app:    the Gradle unit tests (testDebugUnitTest; AGP 9 has no release unit-test task)
+#   deploy: deploy v3's engine and command line (pure JVM): :deploy's unit tests, which also run the bundle's POSIX half on
+#           the image's sh, and deploy-cli's installDist (its packaging)
+#   bundle: deploy-bundle/'s scripts: shellcheck on each, in the dialect its `shellcheck shell=` line names, and BusyBox ash's
+#           parser on the POSIX ones (`shell=dash`), which must run on whatever box inspect.sh meets
 #   e2e:    rust-client's #[ignore] end-to-end tests against a running server (ci/e2e-server.sh up); CSQTT_E2E_PEER (and
 #           CSQTT_E2E_WEB, the other CSQTT_E2E_* knobs) are passed through, and the container shares the host network;
 #           CSQTT_E2E_SERVER_LOG (ci/e2e-server.sh's LOG) is mounted read-only
@@ -13,11 +17,13 @@
 set -euo pipefail
 CI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC=$(cd "$1" && pwd); SUITE=$2; FILTER=${3:-}
-case "$SUITE" in server|client|app|e2e) ;; *) echo "unknown suite: $SUITE" >&2; exit 2;; esac
+case "$SUITE" in server|client|app|deploy|bundle|e2e) ;; *) echo "unknown suite: $SUITE" >&2; exit 2;; esac
 GRADLE_SHA256=2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb    # gradle-9.4.1-bin.zip, as ci/build-apk.sh
+SHELLCHECK_IMAGE=${CSQTT_SHELLCHECK_IMAGE:-koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002}
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 REG=${CSQTT_CARGO_REGISTRY:-$W/registry}; GH=${CSQTT_GRADLE_HOME:-$W/gradle-home}; mkdir -p "$REG" "$GH" "$W/src"
 tar -C "$SRC" --exclude=./.git --exclude=./.build --exclude=./.campaign --exclude='./rust-*/target' --exclude=./app/build \
+  --exclude=./deploy/build --exclude=./deploy-cli/build \
   -cf - . | tar -C "$W/src" -xf -
 read -r -a XARGS <<< "${CSQTT_DOCKER_ARGS:-}"
 if [ "$SUITE" = e2e ]; then
@@ -52,13 +58,27 @@ e2e)
   run "${CSQTT_SERVER_IMAGE:-csqtt-ci-server}" 'set -euo pipefail; unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 cd /w/src/rust-client && cargo +1.97.1 test --locked --release -- --ignored --test-threads=1 ${E2E_FILTER:+"$E2E_FILTER"}'
   ;;
-app)
+app|deploy)
   P="$W/src/gradle/wrapper/gradle-wrapper.properties"
   grep -q '^distributionUrl=.*gradle-9\.4\.1-bin\.zip$' "$P" || { echo "the tree wants another Gradle than 9.4.1; pin it here" >&2; exit 1; }
   sed -i '/^distributionSha256Sum=/d' "$P"; echo "distributionSha256Sum=$GRADLE_SHA256" >> "$P"
-  run "${CSQTT_ANDROID_IMAGE:-csqtt-ci-android}" '
+  if [ "$SUITE" = app ]; then TASKS=testDebugUnitTest; else TASKS=':deploy:test :deploy-cli:installDist'; fi
+  run "${CSQTT_ANDROID_IMAGE:-csqtt-ci-android}" "
 set -euo pipefail
-cd /w/src && chmod +x gradlew && printf "sdk.dir=%s\n" "$ANDROID_HOME" > local.properties
-./gradlew --no-daemon --console=plain -I /ci/unsigned.init.gradle.kts testDebugUnitTest'
+cd /w/src && chmod +x gradlew && printf 'sdk.dir=%s\n' \"\$ANDROID_HOME\" > local.properties
+./gradlew --no-daemon --console=plain -I /ci/unsigned.init.gradle.kts $TASKS"
+  ;;
+bundle)
+  # read-only, offline, as the calling user; the image is pinned by digest like every other input
+  docker run --rm --network none -u "$(id -u):$(id -g)" -v "$W/src/deploy-bundle:/b:ro" "$SHELLCHECK_IMAGE" sh -c '
+set -eu
+cd /b
+files=$(find . -type f -name "*.sh" | sort)
+[ -n "$files" ] || { echo "deploy-bundle carries no script" >&2; exit 1; }
+for f in $files; do
+  shellcheck --severity=warning "$f"
+  if grep -q "^# shellcheck shell=dash" "$f"; then busybox sh -n "$f"; fi
+done
+echo "bundle: $(echo "$files" | wc -l) scripts checked"'
   ;;
 esac

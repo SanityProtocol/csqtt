@@ -17,3 +17,7 @@ dependencyResolutionManagement {
 }
 rootProject.name = "CSQTT"
 include(":app")
+// deploy v3 (CSQTT-APP-PLAN §4.1): the engine, pure JVM so the app and the command line run the same code, and that
+// command line, which drives the test zoo
+include(":deploy")
+include(":deploy-cli")

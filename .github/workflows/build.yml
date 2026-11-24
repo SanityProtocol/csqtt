@@ -69,6 +69,14 @@ jobs:
         if: ${{ !cancelled() }}  # a red suite above still lets this one report
         run: recipe/ci/test.sh src app
 
+      - name: Deploy engine tests
+        if: ${{ !cancelled() }}  # a red suite above still lets this one report
+        run: recipe/ci/test.sh src deploy
+
+      - name: Deploy bundle checks
+        if: ${{ !cancelled() }}  # a red suite above still lets this one report
+        run: recipe/ci/test.sh src bundle
+
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
