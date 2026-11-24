@@ -369,12 +369,20 @@ inv_note_dir() {
 
 # A bin line for every host path a binary of the family is found at (its sha256), so each install sharing a build finds it
 # by its own path, running or not (B4 review F2); the strings are read once per sha (inv_exe).
-inv_bins=' '
+inv_bins=' ' inv_reals=' '
 inv_bin() {  # inv_bin <host path> [its sha256, when known]
 	case $inv_bins in *" $1 "*) return 0 ;; esac
 	[ -f "$1" ] || return 0
 	inv_bins="$inv_bins$1 "
-	if [ -n "${2:-}" ]; then inv_sha=$2; else inv_exe "$1" "$1"; fi
+	# a real file hashed once, whichever links lead to it (swg's <cfgdir>/server links to one slot binary)
+	ib_real=$(readlink -f "$1" 2>/dev/null) || ib_real=$1
+	case $inv_reals in
+	*" $ib_real="*) inv_sha=${inv_reals#*" $ib_real="}; inv_sha=${inv_sha%% *} ;;
+	*)
+		if [ -n "${2:-}" ]; then inv_sha=$2; else inv_exe "$1" "$1"; fi
+		[ -z "$inv_sha" ] || inv_reals="$inv_reals$ib_real=$inv_sha "
+		;;
+	esac
 	[ -z "$inv_sha" ] || csqtt_emit INV bin "path=$1" "sha=$inv_sha"
 }
 
@@ -439,9 +447,16 @@ inv_procs() {
 				inv_exe "/proc/$ip_pid/exe" "$ip_exe" 1
 			else
 				inv_exe "/proc/$ip_pid/exe" "$ip_exe"
-				# the host path too, when it is the running file (not replaced or deleted since the start)
-				[ "${ip_del:-0}" = 1 ] || [ "$(sha256sum "$ip_exe" 2>/dev/null | cut -d' ' -f1)" != "$inv_sha" ] ||
-					inv_bin "$ip_exe" "$inv_sha"
+				# the host path too, when it is the running file (not replaced or deleted since the start); a path already
+				# recorded (another process of the same binary) is not hashed again
+				case $inv_bins in
+				*" $ip_exe "*) ;;
+				*)
+					ip_s=$inv_sha
+					[ "${ip_del:-0}" = 1 ] || [ "$(sha256sum "$ip_exe" 2>/dev/null | cut -d' ' -f1)" != "$ip_s" ] || inv_bin "$ip_exe" "$ip_s"
+					inv_sha=$ip_s
+					;;
+				esac
 			fi
 			;;
 		esac
@@ -507,10 +522,15 @@ EOF
 inv_ctrs() {
 	for ic_rt in docker podman; do
 		have $ic_rt || continue
+		# podman's docker shim (`dnf install docker` on EL) is podman: asked as podman, next (B4 verify N1)
+		[ "$ic_rt" != docker ] || [ "$pdk_flavour" != podman ] || continue
 		if [ "$ic_rt" = docker ] && ! docker_live; then
 			# a stopped Docker is not asked (its socket would start it, and its containers with it): they stay unknown, and
-			# the engine is told so, wherever its unit lives (podman, daemonless, is asked next)
-			csqtt_emit INV docker "daemon=inactive"
+			# the engine is told so, wherever its unit lives; a docker CLI with no daemon installed holds no container
+			if have dockerd || [ -e /lib/systemd/system/docker.service ] || [ -e /usr/lib/systemd/system/docker.service ] ||
+				[ -e /etc/systemd/system/docker.service ] || [ -e /etc/systemd/system/snap.docker.dockerd.service ]; then
+				csqtt_emit INV docker "daemon=inactive"
+			fi
 			continue
 		fi
 		# podman builds its store on its first command as root: asked only where that store exists, so an inspection never
