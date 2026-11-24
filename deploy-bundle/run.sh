@@ -758,6 +758,11 @@ inst_env() { sed -n "s/^$2=//p" "$1/env" 2>/dev/null | head -n 1 | env_unquote; 
 # what is copied from the stock config dir once its server is stopped (consistent then): the store, its certificate (the
 # panel's pin stays), a one-shot overrides file it had not yet consumed (B6)
 MV_STORE='csqtt.db csqtt.db-wal csqtt.db-shm passwords.json passwords.json.imported web_cert.pem web_key.pem deploy-overrides.json'
+# A stock container's restart policy and whether it ran, as the first move that touched it found them (P2 B13b): its `no` and
+# its stop outlive a reboot by themselves, so this record does too: outside the state dir (an undo removes that first), synced
+# before the container is touched, never written over while it stands, read by every later run that puts the container back
+# and removed only once it is back, or gone (B13b review F2)
+MV_STOCK=/var/lib/sanityprotocol/stock-
 
 mv_line() {  # mv_line <key> <fallback>: the stock env's line for <key>, its value as it stands (quoted or not), or <fallback>
 	ml_v=$(sed -n "s/^\(export \)\{0,1\}$1=//p" "$cr_mv_store/csqtt.env" 2>/dev/null | head -n 1)
@@ -790,15 +795,20 @@ mv_finish() {
 	[ ! -d "$cr_mv_store" ] || printf 'sqc-%s\n' "$cr_id" >"$cr_mv_store/.sanity-moved"
 	systemctl daemon-reload
 	mf_write
-	rm -f "$cr_state/stock-ran" "$cr_state/stock-container" "$cr_state/moved"
+	rm -f "$cr_state/stock-ran" "$cr_state/moved"
 }
 
-# mv_container_back <policy> <ran>: a stock Docker install's container as the move found it: its restart policy back, started
-# again if it ran (P2 B13b)
+# mv_container_back: a stock Docker install's container as its record says the first move found it: its restart policy back,
+# started again if it ran; the record goes only once both are done, so a run cut before that leaves it for the next (P2 B13b,
+# review F2). Nothing without a record: nothing of the container was touched
 mv_container_back() {
-	[ -n "$cr_mv_ctr" ] && [ -n "$1" ] || return 0
-	run_cmd docker update --restart="$1" "$cr_mv_ctr"
-	[ "$2" != 1 ] || run_cmd docker start "$cr_mv_ctr"
+	[ -n "$cr_mv_ctr" ] && [ -s "$MV_STOCK$cr_mv_ctr" ] || return 0
+	mc_pol=$(sed -n 1p "$MV_STOCK$cr_mv_ctr") mc_ran=$(sed -n 2p "$MV_STOCK$cr_mv_ctr")
+	case $mc_pol in no | always | unless-stopped | on-failure | on-failure:[0-9]*) ;; *) return 0 ;; esac
+	run_cmd docker update --restart="$mc_pol" "$cr_mv_ctr" || return 0
+	[ "$mc_ran" != 1 ] || run_cmd docker start "$cr_mv_ctr" || return 0
+	rm -f "$MV_STOCK$cr_mv_ctr"
+	sync
 	return 0
 }
 
@@ -811,8 +821,6 @@ mv_settle() {
 	# (the stock server is started again only if it ran when the move stopped it: B12 review F4)
 	cr_mv_ran=0
 	[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
-	# (a stock container's restart policy and whether it ran, as the switch kept them: P2 B13b)
-	cr_mv_pol=$(sed -n 1p "$cr_state/stock-container" 2>/dev/null) cr_mv_cran=$(sed -n 2p "$cr_state/stock-container" 2>/dev/null)
 	MF_OBJECTS=$(mf_objects_of "$MF") MF_HOST=$(mf_host_of "$MF")
 	# ours as the cut run made it: its unit, or in Docker its container, made from its docker file when the cut came first (P2 B13b)
 	cr_docker=0 ms_check=$cr_unit
@@ -836,6 +844,8 @@ mv_settle() {
 	fi
 	cr_why=$(inst_verify "$ms_check" "$cr_udp" "$cr_web" "$cr_iface" "$(mv_secret)")
 	if [ -z "$cr_why" ]; then
+		# (a kept store's lines a settle cut off before had written: ours serves, so it is live)
+		rm -f "$cr_state/unit.saved"
 		mv_finish
 		run_phase "done" 100
 		run_result ok "" "the move cut off before is finished: read the connection back"
@@ -843,15 +853,18 @@ mv_settle() {
 	if [ $cr_docker = 1 ]; then
 		# (kept as a Docker removal keeps it: the docker file's lines in unit.saved, the file itself gone, P2 B13b)
 		docker stop -t 15 "$ms_ctr" >/dev/null 2>&1
-		{ printf '# release %s\n' "$(sed -n 's/^# image sanity-csqtt://p' "$cr_state/docker")"; cat "$cr_state/docker"; } >"$cr_state/unit.saved"
-		rm -f "$cr_state/docker"
+		{ printf '# release %s\n' "$(sed -n 's/^# image sanity-csqtt://p' "$cr_state/docker")"; cat "$cr_state/docker"; } >"$cr_state/unit.saved.new"
 	else
 		systemctl stop "$cr_unit" 2>/dev/null
 		{ printf '# release %s\n' "$(basename "$(readlink "$cr_root/current" 2>/dev/null)" 2>/dev/null)"
-			sed '/^ConditionPathExists=/d' "/etc/systemd/system/$cr_unit"; } >"$cr_state/unit.saved"
+			sed '/^ConditionPathExists=/d' "/etc/systemd/system/$cr_unit"; } >"$cr_state/unit.saved.new"
 	fi
-	rm -f "$cr_state/moved" "$cr_state/stock-ran" "$cr_state/stock-container"
+	mv -f "$cr_state/unit.saved.new" "$cr_state/unit.saved"
+	# the marker before the docker file: a settle cut off from here leaves a kept store, never a second settle that reads ours as
+	# a unit and writes its lines over unit.saved (B13b review F2)
+	rm -f "$cr_state/moved"
 	sync
+	rm -f "$cr_state/docker" "$cr_state/stock-ran"
 	MF_OBJECTS=$(printf '%s\n' "$MF_OBJECTS" | grep -v "^dir $cr_state\$")
 	mf_undo
 	inst_sweep "$cr_id"
@@ -861,7 +874,7 @@ mv_settle() {
 	mf_write
 	systemctl daemon-reload
 	[ -z "$cr_mv_unit" ] || [ $cr_mv_ran = 0 ] || run_cmd systemctl start "$cr_mv_unit"
-	mv_container_back "$cr_mv_pol" "$cr_mv_cran"
+	mv_container_back
 	run_result failed-rolled-back "the move cut off before does not serve: $cr_why" \
 		"the stock install is back as it was; the new instance's store is kept («Восстановить» brings it back)"
 }
@@ -1011,7 +1024,7 @@ action_create() {
 	# a move (P2 B12, §1.7): the stock install this instance takes the place of, its role, its server unit (none when its unit
 	# is gone, B2) and its config dir; all empty for a plain create
 	cr_mv_role=$(plan move_role) cr_mv_unit=$(plan move_unit) cr_mv_store=$(plan move_store) cr_mv_ctr=$(plan move_container)
-	cr_move=0 cr_mv_stopped=0 cr_mv_ran=0 cr_mv_pol='' cr_mv_cran=0
+	cr_move=0 cr_mv_stopped=0 cr_mv_ran=0
 	[ -z "$cr_mv_role" ] || cr_move=1
 	# Docker mode (P2 B13a): the instance a container, sanity-csqtt-<id>, its image ours; a move into it is B13b's
 	cr_docker=0 cr_ctr=sanity-csqtt-$cr_id
@@ -1033,7 +1046,8 @@ action_create() {
 			systemctl daemon-reload
 			run_cmd systemctl start "$cr_mv_unit"
 		fi
-		[ "$cr_mv_stopped" = 0 ] || mv_container_back "$cr_mv_pol" "$cr_mv_cran"
+		# (a stock container as its record says, whichever run wrote it: one an earlier move left at `no` included)
+		[ $cr_move = 0 ] || mv_container_back
 		return 0
 	}
 	cr_fail() { action_cleanup; run_result failed-cleaned "$1" "${2:-check again}"; }
@@ -1074,7 +1088,6 @@ action_create() {
 			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
 			MF_HOST=$(mf_host_of "$cr_state/manifest.json")
 			[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
-			cr_mv_pol=$(sed -n 1p "$cr_state/stock-container" 2>/dev/null) cr_mv_cran=$(sed -n 2p "$cr_state/stock-container" 2>/dev/null)
 			# the images that run made (pinned, the same again) stay for this one, its own to take if it fails (P2 B13a review F1)
 			cr_kept_images=$(printf '%s\n' "$MF_OBJECTS" | grep '^image ')
 			MF_OBJECTS=$(printf '%s\n' "$MF_OBJECTS" | grep -v '^image ')
@@ -1095,8 +1108,8 @@ action_create() {
 				systemctl daemon-reload
 				run_cmd systemctl start "$cr_mv_unit"
 			fi
-			# (its container as the cut run found it, P2 B13b)
-			[ $cr_move = 0 ] || mv_container_back "$cr_mv_pol" "$cr_mv_cran"
+			# (its container as the first move found it, P2 B13b)
+			[ $cr_move = 0 ] || mv_container_back
 		elif [ "$(plan resume)" = 1 ]; then
 			run_result failed-cleaned "sqc-$cr_id is not what run ${cr_of:-?} left: it was finished or made again since (run ${cr_made_by:-?})" \
 				"check again; to use it, «Подключиться»"
@@ -1236,14 +1249,17 @@ action_create() {
 			*) cr_mv_ran=1; : >"$cr_state/stock-ran" ;;
 			esac
 		fi
-		# a stock Docker install's container (P2 B13b): its restart policy and whether it ran kept first; the policy set to `no` and
-		# the container stopped is its half of the switch (ours runs with `unless-stopped`): a reboot after ours runs starts ours
-		# alone, one before leaves neither running and both startable, which «Продолжить» settles
-		if [ -n "$cr_mv_ctr" ]; then
+		# a stock Docker install's container (P2 B13b): its restart policy and whether it ran recorded first (MV_STOCK: synced, kept
+		# from an earlier move cut off); the policy set to `no` and the container stopped is its half of the switch (ours runs with
+		# `unless-stopped`): a reboot after ours runs starts ours alone, one before leaves neither running and both startable,
+		# which «Продолжить» settles
+		if [ -n "$cr_mv_ctr" ] && [ ! -s "$MV_STOCK$cr_mv_ctr" ]; then
 			cr_mv_pol=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cr_mv_ctr" 2>/dev/null)
+			[ -n "$cr_mv_pol" ] || cr_fail "cannot read $cr_mv_ctr's restart policy" "check again"
+			cr_mv_cran=0
 			[ "$(docker inspect -f '{{.State.Running}}' "$cr_mv_ctr" 2>/dev/null)" != true ] || cr_mv_cran=1
-			printf '%s\n%s\n' "${cr_mv_pol:-no}" "$cr_mv_cran" >"$cr_state/stock-container" || cr_fail "cannot write $cr_state/stock-container"
-			cr_mv_pol=${cr_mv_pol:-no}
+			printf '%s\n%s\n' "$cr_mv_pol" "$cr_mv_cran" >"$MV_STOCK$cr_mv_ctr.new" && mv -f "$MV_STOCK$cr_mv_ctr.new" "$MV_STOCK$cr_mv_ctr" &&
+				sync || cr_fail "cannot write $MV_STOCK$cr_mv_ctr"
 		fi
 		cr_mv_stopped=1
 		[ -z "$cr_mv_unit" ] || run_cmd systemctl stop "$cr_mv_unit"
@@ -1256,7 +1272,7 @@ action_create() {
 		done
 		sync
 		# the switch: one rename moves the box from theirs to ours
-		: >"$cr_state/moved.new" && mv -f "$cr_state/moved.new" "$cr_state/moved" || cr_fail "cannot switch"
+		: >"$cr_state/moved.new" && mv -f "$cr_state/moved.new" "$cr_state/moved" && sync || cr_fail "cannot switch"
 	elif [ $cr_docker = 0 ]; then
 		# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
 		run_cmd systemctl enable "$cr_unit" || cr_fail "$cr_unit could not be enabled"
@@ -1982,7 +1998,8 @@ fr_outside() {
 # Each floor they set that our drop-in lacks goes into it at its live value, recorded so (the value it was is the value it
 # is): it survives the next boot, and a later last removal of ours writes nothing back
 fr_keep_floors() {
-	for fk_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$fk_u" ] && break; fk_u=''; done
+	# (one in Docker by its docker file, as the drop-in's rule counts it: B13b review F1)
+	for fk_u in /etc/systemd/system/sanity-csqtt-*.service /var/lib/sanityprotocol/csqtt/*/docker; do [ -f "$fk_u" ] && break; fk_u=''; done
 	[ -n "$fk_u" ] || return 0
 	for fk_p in $(plan "$1paths" | tr , ' '); do
 		case $fk_p in /etc/sysctl.d/*.conf) [ -f "$fk_p" ] || continue ;; *) continue ;; esac
@@ -2008,7 +2025,7 @@ fr_take() {
 	systemctl daemon-reload
 	for fr_u in $(plan "$1units" | tr , ' '); do systemctl reset-failed "$fr_u" >/dev/null 2>&1; done
 	# a stock Docker install's container and images (an image another container still uses is Docker's to keep) (P2 B13b)
-	for fr_v in $(plan "$1containers" | tr , ' '); do docker rm -f "$fr_v" >/dev/null 2>&1; done
+	for fr_v in $(plan "$1containers" | tr , ' '); do docker rm -f "$fr_v" >/dev/null 2>&1; rm -f "$MV_STOCK$fr_v"; done
 	for fr_v in $(plan "$1images" | tr , ' '); do docker image rm "$fr_v" >/dev/null 2>&1; done
 	for fr_v in $(plan "$1tags" | tr , ' '); do fr_sweep_tag "$fr_v"; done
 	for fr_v in $(plan "$1tables" | tr , ' '); do
@@ -2038,7 +2055,7 @@ action_remove_foreign() {
 	: >"$RUN_DIR/switching"
 	for fr_u in $(plan units | tr , ' '); do fr_stop_unit "$fr_u"; done
 	fr_stop_containers "" || run_result failed-not-rolled-back "the stock $fr_role container would not stop" \
-		"stop it, then remove again: its restart policy is off, nothing else changed"
+		"stop it, then remove again: its restart policy is off and its units disabled, nothing else changed"
 	fr_live=$(fr_outside "$fr_role")
 	[ -z "$fr_live" ] || run_result failed-not-rolled-back "the stock $fr_role binary still runs outside its unit (pid$fr_live)" \
 		"stop it, then remove again: its units are disabled, nothing else changed"

@@ -243,25 +243,46 @@ class ForeignTest {
     }
 
     @Test
-    fun aMovedStockContainerIsPutBackAsTheMoveFoundIt() {
-        // P2 B13b: its restart policy back, started again only if it ran; nothing for a move with no stock container
-        val stubs = "run_cmd() { echo \"run \$*\"; }\n"
-        assertEquals("run docker update --restart=unless-stopped csqtt\nrun docker start csqtt",
-            runShell(stubs + function("mv_container_back") + "cr_mv_ctr=csqtt\nmv_container_back unless-stopped 1\n").trim())
-        assertEquals("run docker update --restart=always csqtt",
-            runShell(stubs + function("mv_container_back") + "cr_mv_ctr=csqtt\nmv_container_back always 0\n").trim())
-        assertEquals("", runShell(stubs + function("mv_container_back") + "cr_mv_ctr=\nmv_container_back unless-stopped 1\n").trim())
-        // the switch keeps its policy and whether it ran before it stops it; the undo, a «Продолжить» and a settle put it back
+    fun aMovedStockContainerIsPutBackAsItsRecordSays() {
+        // P2 B13b review F2: the record outlives the state dir and every undo; it goes only once the container is back
+        val dir = kotlin.io.path.createTempDirectory("csqtt-stock").toFile()
+        try {
+            val rec = File(dir, "stock-csqtt")
+            fun back(record: String?, fail: String = ""): String {
+                if (record != null) rec.writeText(record) else rec.delete()
+                return runShell("run_cmd() { echo \"run \$*\"; [ \"\$2\" != \"$fail\" ]; }\nMV_STOCK=${dir.path}/stock-\ncr_mv_ctr=csqtt\n" +
+                    function("mv_container_back") + "mv_container_back\n[ -e ${rec.path} ] && echo kept || echo gone\n").trim()
+            }
+            assertEquals("run docker update --restart=unless-stopped csqtt\nrun docker start csqtt\ngone", back("unless-stopped\n1\n"))
+            assertEquals("run docker update --restart=always csqtt\ngone", back("always\n0\n"))
+            // nothing touched it (no record): nothing to put back
+            assertEquals("gone", back(null))
+            // Docker refusing: the record stays for the next run
+            assertEquals("run docker update --restart=unless-stopped csqtt\nkept", back("unless-stopped\n1\n", fail = "update"))
+            assertEquals("run docker update --restart=unless-stopped csqtt\nrun docker start csqtt\nkept", back("unless-stopped\n1\n", fail = "start"))
+            assertEquals("kept", back("rm -rf /\n1\n"))
+        } finally {
+            dir.deleteRecursively()
+        }
         val create = function("action_create")
-        assertTrue(create, create.indexOf(">\"\$cr_state/stock-container\"") in 0 until create.indexOf("fr_stop_containers move_"))
-        assertEquals(2, Regex("mv_container_back \"\\\$cr_mv_pol\" \"\\\$cr_mv_cran\"").findAll(create).count())
-        assertTrue(function("mv_settle").contains("mv_container_back \"\$cr_mv_pol\" \"\$cr_mv_cran\""))
-        // a settle in Docker: its container started, or made from its docker file; kept as a Docker removal keeps it
+        // the switch: recorded (synced, never over an earlier move's) before the container is touched
+        assertTrue(create, "[ ! -s \"\$MV_STOCK\$cr_mv_ctr\" ]" in create)
+        val recorded = create.indexOf("mv -f \"\$MV_STOCK\$cr_mv_ctr.new\" \"\$MV_STOCK\$cr_mv_ctr\" &&")
+        assertTrue(create, recorded in 0 until create.indexOf("fr_stop_containers move_") && "&&\n\t\t\t\tsync ||" in create)
+        // the undo and a «Продолжить» put it back whichever run recorded it; a settle too
+        assertEquals(2, Regex("\\|\\| mv_container_back\n").findAll(create).count())
+        assertTrue(function("mv_settle").contains("\tmv_container_back\n"))
+        // the marker synced before ours is made: a container of ours starts at boot whatever the marker
+        assertTrue(create, "mv -f \"\$cr_state/moved.new\" \"\$cr_state/moved\" && sync" in create)
+        // a settle rolling back: the marker before the docker file, so no second settle reads ours as a unit
         val settle = function("mv_settle")
-        assertTrue(settle, "run_cmd dk_run \"\$ms_ctr\"" in settle && "cat \"\$cr_state/docker\"; } >\"\$cr_state/unit.saved\"" in settle &&
-            "rm -f \"\$cr_state/docker\"" in settle)
-        // its finish edits no unit in Docker
+        assertTrue(settle, settle.indexOf("rm -f \"\$cr_state/moved\"") in 0 until settle.indexOf("rm -f \"\$cr_state/docker\""))
+        assertTrue(settle, "cat \"\$cr_state/docker\"; } >\"\$cr_state/unit.saved.new\"" in settle && "run_cmd dk_run \"\$ms_ctr\"" in settle)
+        // its finish edits no unit in Docker; the container's record goes with the container
         assertTrue(function("mv_finish").contains("if [ \$cr_docker = 0 ]; then"))
+        assertTrue(function("fr_take").contains("docker rm -f \"\$fr_v\" >/dev/null 2>&1; rm -f \"\$MV_STOCK\$fr_v\""))
         assertFalse(create.contains("a move into Docker is not built yet"))
+        // review F1: the floors a stock sysctl file set are kept for a live instance of ours in Docker too
+        assertTrue(function("fr_keep_floors").contains("/var/lib/sanityprotocol/csqtt/*/docker"))
     }
 }
