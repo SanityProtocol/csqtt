@@ -25,7 +25,7 @@ class PreflightTest {
         "firewall" to "firewalld=inactive|ufw=inactive|backend=nft|docker_forward=0|nft_drop=|mixed=0|nftables_service=",
         "pkg" to "manager=apt|lock=|audit_lines=0|missing=", "disk" to "root_kb=20000000|varlib_kb=20000000|opt_kb=20000000|docker_kb=",
         "ram" to "total_kb=2000000|available_kb=1500000|swap_kb=0", "clock" to "epoch=$now|ntp=yes", "rundir" to "noexec=",
-        "docker" to "bin=|version=|flavour=|enabled=|rootless=0",
+        "docker" to "bin=|version=|flavour=|enabled=|active=|rootless=0",
     )
 
     private fun report(checks: Map<String, String>, vararg reach: String): String =
@@ -55,6 +55,9 @@ class PreflightTest {
             with("os", "id=centos|version=7|like=rhel|name=CentOS 7") to Finding.OS_UNSUPPORTED,
             with("os", "id=alpine|version=3.21.0|like=|name=Alpine") to Finding.OS_UNSUPPORTED,
             with("os", "id=arch|version=|like=|name=Arch Linux") to Finding.OS_ROLLING,
+            // review F3: testing and sid carry no VERSION_ID; Arch Linux ARM is archarm, like arch
+            with("os", "id=debian|version=|like=|name=Debian GNU/Linux forky/sid") to Finding.OS_ROLLING,
+            with("os", "id=archarm|version=|like=arch|name=Arch Linux ARM") to Finding.OS_ROLLING,
             with("os", "id=raspbian|version=10|like=debian|name=Raspbian 10") to Finding.OS_UNSUPPORTED,
             with("init", "systemd=0|version=|pid1=init|systemd_run=0") to Finding.NO_SYSTEMD,
             with("init", "systemd=1|version=219|pid1=systemd|systemd_run=0") to Finding.NO_SYSTEMD_RUN,
@@ -68,6 +71,8 @@ class PreflightTest {
             with("tun", "dev=1|probe=unsupported|error=|module=absent") to Finding.TUN_UNTESTED,
             with("nat", "probe=failed|error=can't initialize iptables table `nat'|iptables=1") to Finding.NO_NAT,
             with("nat", "probe=skipped|error=|iptables=0") to Finding.NAT_UNTESTED,
+            // review F4: another program held the xtables lock past -w: busy, not "no NAT"
+            with("nat", "probe=busy|error=Another app is currently holding the xtables lock.|ns=1|iptables=1") to Finding.NAT_UNTESTED,
             with("forwarding", "ipv4=0|writable=0") to Finding.FORWARDING_LOCKED,
             with("ipv4", "dev=|via=|src=|addrs=") to Finding.NO_IPV4,
             with("ipv4", "dev=eth0|via=10.0.0.1|src=10.0.0.5|addrs=10.0.0.5/24 ") to Finding.BEHIND_NAT,
@@ -75,7 +80,7 @@ class PreflightTest {
             with("ipv4", "dev=br-wan|via=203.0.113.1|src=203.0.113.20|addrs=") to Finding.UPLINK_LIKE_DOCKER_BRIDGE,
             with("port80", "holder=nginx|ss=1") to Finding.PORT80_TAKEN,
             with("firewall", "firewalld=inactive|ufw=absent|backend=nft|docker_forward=0|nft_drop=inet swg_fwd,|mixed=0|nftables_service=")
-                to Finding.FORWARD_DROPPED_BY_SWG,
+                to Finding.FORWARD_DROPPED_BY_NFT,
             with("firewall", "firewalld=inactive|ufw=absent|backend=nft|docker_forward=0|nft_drop=inet filter,|mixed=0|nftables_service=")
                 to Finding.FORWARD_DROPPED_BY_NFT,
             with("firewall", "firewalld=inactive|ufw=absent|backend=nft|docker_forward=1|nft_drop=|mixed=1|nftables_service=")
@@ -102,6 +107,8 @@ class PreflightTest {
         assertEquals(setOf(Finding.HOST_UNREACHABLE), findings(clean, "host=github.com|dns=0|https=skipped"))
         assertEquals(setOf(Finding.HOST_UNREACHABLE), findings(clean, "host=acme-v02.api.letsencrypt.org|dns=1|https=failed"))
         assertEquals(emptySet<Finding>(), findings(clean, "host=github.com|dns=1|https=ok"))
+        // review F1: a host the 12 s cap left unchecked is no finding
+        assertEquals(emptySet<Finding>(), findings(clean, "host=acme-v02.api.letsencrypt.org|dns=|https=skipped"))
         // Raspberry Pi OS (32-bit) is Debian under another name
         assertEquals(emptySet<Finding>(), findings(with("os", "id=raspbian|version=12|like=debian|name=Raspbian 12")))
     }

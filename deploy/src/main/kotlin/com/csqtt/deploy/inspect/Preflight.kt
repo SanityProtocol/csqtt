@@ -68,7 +68,6 @@ enum class Finding(val level: Level) {
     UPLINK_LIKE_DOCKER_BRIDGE(Level.FAIL),
     BEHIND_NAT(Level.WARN),
     PORT80_TAKEN(Level.WARN),
-    FORWARD_DROPPED_BY_SWG(Level.FAIL),
     FORWARD_DROPPED_BY_NFT(Level.FAIL),
     MIXED_IPTABLES(Level.FAIL),
     NFTABLES_FLUSHES(Level.WARN),
@@ -136,10 +135,10 @@ object PreflightRules {
         }
         p.facts("port80")["holder"].also { if (it.isNotEmpty()) add(Finding.PORT80_TAKEN, it) }
         p.facts("firewall").also { fw ->
+            // named, swg's included: none of swg-panel's forward chains drops by policy, so a box it manages stops here only
+            // if one ever does (B5's classifier recognises swg's installations by themselves)
             val dropping = fw["nft_drop"].split(',').map { it.trim() }.filter { it.isNotEmpty() }
-            val swg = dropping.filter { it.substringAfter(' ').startsWith("swg") }
-            if (swg.isNotEmpty()) add(Finding.FORWARD_DROPPED_BY_SWG, swg.joinToString(", "))
-            if (dropping.size > swg.size) add(Finding.FORWARD_DROPPED_BY_NFT, (dropping - swg.toSet()).joinToString(", "))
+            if (dropping.isNotEmpty()) add(Finding.FORWARD_DROPPED_BY_NFT, dropping.joinToString(", "))
             if (fw["mixed"] == "1") add(Finding.MIXED_IPTABLES)
             if (fw["nftables_service"] == "enabled-flushes") add(Finding.NFTABLES_FLUSHES)
             if (fw["firewalld"] == "active") add(Finding.FIREWALLD)
@@ -159,7 +158,8 @@ object PreflightRules {
             val skew = it - nowEpochSeconds
             if (kotlin.math.abs(skew) > MAX_CLOCK_SKEW_S) add(Finding.CLOCK_SKEW, "$skew s")
         }
-        for (host in p.reach) if (host["dns"] != "1" || host["https"] == "failed") add(Finding.HOST_UNREACHABLE, host["host"])
+        // a host left unchecked by the 12 s cap (dns empty) is no finding: the run meets it, or not, with its own message
+        for (host in p.reach) if (host["dns"] == "0" || host["https"] == "failed") add(Finding.HOST_UNREACHABLE, host["host"])
         p.facts("rundir")["noexec"].trimEnd(',').also { if (it.isNotEmpty()) add(Finding.RUNDIR_NOEXEC, it) }
         p.facts("docker").also {
             if (it["flavour"] == "snap" || it["flavour"] == "podman" || it["rootless"] == "1") {
@@ -180,12 +180,15 @@ object PreflightRules {
         val name = f["name"].ifEmpty { "$id ${f["version"]}" }
         return when (id) {
             "" -> Finding.OS_UNKNOWN to "no /etc/os-release"
-            "debian", "raspbian" -> if (major >= 11) null else Finding.OS_UNSUPPORTED to name
+            // testing and sid carry no VERSION_ID: rolling, like Arch
+            "debian", "raspbian" -> if (f["version"].isEmpty()) Finding.OS_ROLLING to name else if (major >= 11) null
+            else Finding.OS_UNSUPPORTED to name
             "ubuntu" -> if (major > 20 || (major == 20 && minor >= 4)) null else Finding.OS_UNSUPPORTED to name
             "almalinux", "rocky", "rhel", "ol", "centos" -> if (major >= 8) null else Finding.OS_UNSUPPORTED to name
             "fedora" -> if (major >= 40) null else Finding.OS_UNSUPPORTED to name
             "arch", "manjaro", "endeavouros" -> Finding.OS_ROLLING to name
-            else -> Finding.OS_UNSUPPORTED to name
+            // Arch's derivatives by ID_LIKE (Arch Linux ARM's ID is archarm)
+            else -> if ("arch" in f["like"].split(' ')) Finding.OS_ROLLING to name else Finding.OS_UNSUPPORTED to name
         }
     }
 

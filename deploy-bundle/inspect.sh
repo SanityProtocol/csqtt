@@ -123,7 +123,10 @@ pre_nat() {
 			pn_probe=ok
 			pn_err=''
 		else
+			# iptables exits 4 when another program holds the xtables lock past -w (fail2ban, a Docker start): busy, not "no NAT"
+			pn_rc=$?
 			pn_probe=failed
+			case "$pn_rc:$pn_err" in 4:* | *"xtables lock"*) pn_probe=busy ;; esac
 			pn_err=$(printf '%s\n' "$pn_err" | head -n 1)
 		fi
 		if [ "$probe_ns" = 0 ]; then
@@ -170,7 +173,8 @@ pre_firewall() {
 	fi
 	if have iptables; then
 		case "$(first iptables -V)" in *nf_tables*) pw_backend=nft ;; *legacy*) pw_backend=legacy ;; *) pw_backend=other ;; esac
-		iptables -w 5 -S FORWARD 2>/dev/null | grep -q DOCKER && pw_docker=1
+		# iptables-save dumps the tables there are; `iptables -S FORWARD` would make a legacy box's filter table to answer
+		iptables-save 2>/dev/null | grep -q '^-A FORWARD .*DOCKER' && pw_docker=1
 		if have iptables-legacy-save && have iptables-nft-save; then
 			pw_l=$(iptables-legacy-save 2>/dev/null | grep -c '^-A' || true)
 			pw_n=$(iptables-nft-save 2>/dev/null | grep -c '^-A' || true)
@@ -181,10 +185,13 @@ pre_firewall() {
 		# tables with a chain on the forward hook whose policy drops: our iptables accept cannot outrank them
 		# (iptables-nft's own FORWARD chain is not counted: our accept sits inside it, ahead of its policy; a native table that
 		# only shares iptables' table name has its own lowercase chains and is)
-		pw_nftdrop=$(nft list ruleset 2>/dev/null | awk '
-			/^table / {t = $2 " " $3; ipt = ($2 == "ip" || $2 == "ip6") && ($3 ~ /^(filter|nat|mangle|raw|security)$/)}
+		# -t: terse, without set elements (a 300k-element blocklist set costs seconds and hundreds of MB); only the families
+		# routed traffic meets (a bridge table's forward hook never sees the tunnel's packets)
+		pw_nftdrop=$(nft -t list ruleset 2>/dev/null | awk '
+			/^table / {t = $2 " " $3; fam = ($2 == "ip" || $2 == "ip6" || $2 == "inet")
+				ipt = ($2 == "ip" || $2 == "ip6") && ($3 ~ /^(filter|nat|mangle|raw|security)$/)}
 			/^[ \t]*chain / {c = $2}
-			/hook forward/ && /policy drop/ && !(ipt && c == "FORWARD") {d[t] = 1}
+			fam && /hook forward/ && /policy drop/ && !(ipt && c == "FORWARD") {d[t] = 1}
 			END {for (x in d) printf "%s,", x}')
 	fi
 	if have systemctl && [ "$(systemctl is-enabled nftables 2>/dev/null)" = enabled ]; then
@@ -248,29 +255,36 @@ pre_clock() {
 	csqtt_emit PRE clock "epoch=$(date -u +%s)" "ntp=$(first timedatectl show -p NTPSynchronized --value)"
 }
 
+# Each host's DNS and HTTPS, every call bounded: a dead resolver is what this check exists to report, and an unbounded wait
+# (5 s per silent nameserver, wget's 20 tries) would cost the whole report its deadline. No host is started past 12 s: it is
+# reported unchecked (dns empty), which is no finding. wget's exit 8 is the server's error answer: the host was reached.
 pre_reach() {
+	pr_start=$(date +%s)
 	for pr_host in "$@"; do
-		pr_dns=0 pr_https=skipped
-		if have getent; then getent ahosts "$pr_host" >/dev/null 2>&1 && pr_dns=1; fi
-		if [ "$pr_dns" = 1 ]; then
-			if have curl; then
-				curl -s -o /dev/null -m 5 -I "https://$pr_host/" && pr_https=ok || pr_https=failed
-			elif have wget; then
-				wget -q -T 5 --spider "https://$pr_host/" 2>/dev/null && pr_https=ok || pr_https=failed
+		pr_dns='' pr_https=skipped
+		if [ $(($(date +%s) - pr_start)) -lt 12 ]; then
+			pr_dns=0
+			if have getent; then tmo getent ahosts "$pr_host" >/dev/null 2>&1 && pr_dns=1; fi
+			if [ "$pr_dns" = 1 ]; then
+				if have curl; then
+					curl -s -o /dev/null -m 5 -I "https://$pr_host/" && pr_https=ok || pr_https=failed
+				elif have wget; then
+					pr_rc=0
+					wget -q -t 1 -T 5 -O /dev/null "https://$pr_host/" 2>/dev/null || pr_rc=$?
+					case $pr_rc in 0 | 8) pr_https=ok ;; *) pr_https=failed ;; esac
+				fi
 			fi
 		fi
 		csqtt_emit PRE reach "host=$pr_host" "dns=$pr_dns" "https=$pr_https"
 	done
 }
 
-# the core runs from /opt/sanityprotocol/csqtt/<id>/releases/…, its state lives under /var/lib/sanityprotocol
+# the core runs from /opt/sanityprotocol/csqtt/<id>/releases/…; nothing executes from /var/lib (scripts run as `sh <file>`)
 pre_rundir() {
 	pr_noexec=''
-	for pr_dir in /opt /var/lib; do
-		pr_opts=''
-		have findmnt && pr_opts=$(findmnt -no OPTIONS --target "$pr_dir" 2>/dev/null)
-		case ",$pr_opts," in *,noexec,*) pr_noexec="$pr_noexec$pr_dir," ;; esac
-	done
+	if have findmnt; then
+		case ",$(findmnt -no OPTIONS --target /opt 2>/dev/null)," in *,noexec,*) pr_noexec=/opt, ;; esac
+	fi
 	csqtt_emit PRE rundir "noexec=$pr_noexec"
 }
 
@@ -279,22 +293,32 @@ tmo() {
 	if have timeout; then timeout 5 "$@"; else "$@"; fi
 }
 
+# The daemon is asked only when it runs: docker.socket starts a stopped Docker on the first connect, and with it every
+# container with a restart policy, which an inspection never does. Its client says the flavour without a daemon.
+docker_live() {
+	[ "$(systemctl is-active docker 2>/dev/null)" = active ] || ! have systemctl
+}
+
 pre_docker() {
-	pdk_bin='' pdk_version='' pdk_flavour='' pdk_enabled='' pdk_rootless=0
+	pdk_bin='' pdk_version='' pdk_flavour='' pdk_enabled='' pdk_active='' pdk_rootless=0
 	if have docker; then
 		pdk_path=$(command -v docker)
 		pdk_bin=$(readlink -f "$pdk_path" 2>/dev/null)
-		pdk_version=$(tmo docker version --format '{{.Server.Version}}' 2>/dev/null || true)
+		if have systemctl; then
+			pdk_enabled=$(systemctl is-enabled docker 2>/dev/null || true)
+			pdk_active=$(systemctl is-active docker 2>/dev/null || true)
+		fi
+		docker_live && pdk_version=$(tmo docker version --format '{{.Server.Version}}' 2>/dev/null || true)
 		# snap's commands are links to /usr/bin/snap; podman-docker's is a script that runs podman
 		case "$pdk_path:$pdk_bin:$(tmo docker --version 2>/dev/null | head -n 1)" in
 		/snap/* | *:/usr/bin/snap:*) pdk_flavour=snap ;;
 		*podman* | *Podman*) pdk_flavour=podman ;;
 		*) pdk_flavour=docker ;;
 		esac
-		tmo docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless && pdk_rootless=1
-		have systemctl && pdk_enabled=$(systemctl is-enabled docker 2>/dev/null || true)
+		if docker_live && tmo docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then pdk_rootless=1; fi
 	fi
-	csqtt_emit PRE docker "bin=$pdk_bin" "version=$pdk_version" "flavour=$pdk_flavour" "enabled=$pdk_enabled" "rootless=$pdk_rootless"
+	csqtt_emit PRE docker "bin=$pdk_bin" "version=$pdk_version" "flavour=$pdk_flavour" "enabled=$pdk_enabled" \
+		"active=$pdk_active" "rootless=$pdk_rootless"
 }
 
 pre_priv
