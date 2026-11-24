@@ -6,11 +6,17 @@ import com.csqtt.deploy.bundle.Bundle
 import com.csqtt.deploy.ssh.HostKeyChanged
 import com.csqtt.deploy.ssh.HostKeyPins
 import com.csqtt.deploy.ssh.HostKeys
+import com.csqtt.deploy.ssh.LoginKey
+import com.csqtt.deploy.ssh.LoginKeys
+import com.csqtt.deploy.ssh.Privilege
+import com.csqtt.deploy.ssh.PrivilegeError
 import com.csqtt.deploy.ssh.RemoteCommand
+import com.csqtt.deploy.ssh.RootRunner
 import com.csqtt.deploy.ssh.SshAuth
 import com.csqtt.deploy.ssh.SshError
 import com.csqtt.deploy.ssh.SshSession
 import com.csqtt.deploy.ssh.SshTarget
+import com.csqtt.deploy.ssh.asRemote
 import com.csqtt.deploy.wire.LineCodec
 import com.csqtt.deploy.wire.Report
 import java.io.File
@@ -23,13 +29,21 @@ private const val USAGE = """usage: deploy-cli <command>
                           The target is a properties file (keep it 0600; nothing secret ever goes on the command line):
                             host, port (22), user, then password=… or key_file=… [passphrase=…] [cert_file=…];
                             pins (the pinned host keys, default ./known-hosts); trust=<fingerprint> pins a changed key,
-                            and only the one the last refusal showed
-exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)"""
+                            and only the one the last refusal showed; sudo_password=… for a login that needs one
+  root-check <target>     how this login becomes root (root, sudo without a password, sudo with one), then a script run as
+                          root prints its uid
+  login-key <target> add|remove   «Вход без пароля»: add makes a key, SAVES it to <target>.loginkey (0600) and only then
+                          installs it for the login user; remove takes exactly that key's line away
+exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
+      · 5 no root (its kind printed)"""
 
 fun main(args: Array<String>) {
     val code = when {
         args.toList() == listOf("bundle-check") -> bundleCheck()
         args.size == 2 && args[0] == "ssh-check" -> sshCheck(File(args[1]))
+        args.size == 2 && args[0] == "root-check" -> withSession(File(args[1])) { session, p -> rootCheck(session, p) }
+        args.size == 3 && args[0] == "login-key" && args[2] in setOf("add", "remove") ->
+            withSession(File(args[1])) { session, _ -> loginKey(session, File(args[1] + ".loginkey"), args[2]) }
         else -> {
             System.err.println(USAGE)
             2
@@ -121,3 +135,70 @@ private fun sshCheck(targetFile: File): Int {
     }
 }
 
+/** Opens a session to the target (no trust step: ssh-check does that) and runs [body]; SSH failures exit 3 or 4. */
+private fun withSession(targetFile: File, body: (SshSession, Properties) -> Int): Int {
+    val p = properties(targetFile)
+    val session = try {
+        SshSession.open(targetOf(p), pinsOf(p))
+    } catch (change: HostKeyChanged) {
+        println("host key changed: ${change.host}:${change.port} pinned ${change.pinned}, presented ${change.presented}")
+        return 3
+    } catch (error: SshError) {
+        println("${error.kind}: ${error.detail}")
+        return 4
+    }
+    return session.use {
+        try {
+            body(it, p)
+        } catch (error: SshError) {
+            println("${error.kind}: ${error.detail}")
+            4
+        } catch (error: PrivilegeError) {
+            println("${error.kind}: ${error.detail}")
+            5
+        }
+    }
+}
+
+private fun rootCheck(session: SshSession, p: Properties): Int {
+    val remote = session.asRemote()
+    val privilege = Privilege.detect(remote, p.getProperty("sudo_password"))
+    println("privilege ${privilege.javaClass.simpleName}")
+    val script = Bundle.bytes("lib/marker.sh") + "\ncsqtt_emit ROOT \"\$(id -u)\"\ncsqtt_end\n".toByteArray()
+    val result = RootRunner(remote, privilege).runScript(script)
+    return when (val report = LineCodec.parse(result.stdoutText)) {
+        is Report.Complete -> {
+            report.lines.forEach { line -> println("${line.kind} ${line.fields.joinToString(" ")}") }
+            if (report.lines.any { it.kind == "ROOT" && it.fields == listOf("0") }) 0 else 5
+        }
+        is Report.Broken -> {
+            println("report broken: ${report.reason}")
+            4
+        }
+    }
+}
+
+private fun loginKey(session: SshSession, keyFile: File, verb: String): Int {
+    val remote = session.asRemote()
+    if (verb == "add") {
+        val key = LoginKey.generate()
+        // saved first: a key installed and then lost would leave an orphan line on the box. The private key alone in
+        // <target>.loginkey (0600, a key_file a later target can name), its public half in <target>.loginkey.pub
+        save(File(keyFile.path + ".pub"), "${key.type} ${key.publicBlob}\n")
+        save(keyFile, key.privateKey)
+        println("saved ${keyFile.path} (${key.fingerprint})")
+        println("login key ${LoginKeys.install(remote, key)}")
+    } else {
+        val blob = File(keyFile.path + ".pub").readText().trim().split(" ").getOrNull(1)
+            ?: error("${keyFile.path}.pub holds no public key")
+        println("login key ${LoginKeys.remove(remote, blob)}")
+    }
+    return 0
+}
+
+private fun save(file: File, text: String) {
+    val tmp = File(file.path + ".new")
+    tmp.writeText(text)
+    tmp.setReadable(false, false); tmp.setReadable(true, true); tmp.setWritable(false, false); tmp.setWritable(true, true)
+    if (!tmp.renameTo(file)) error("could not save ${file.path}")
+}

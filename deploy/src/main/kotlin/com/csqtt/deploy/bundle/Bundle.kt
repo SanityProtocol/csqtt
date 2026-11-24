@@ -7,7 +7,7 @@ import java.security.MessageDigest
 /** deploy-bundle/ as the engine carries it: the scripts it uploads to a VPS, shipped as resources of this module. */
 object Bundle {
     /** Every file of deploy-bundle/. BundleTest holds this list equal to the directory, so none is left behind. */
-    val FILES: List<String> = listOf("lib/marker.sh")
+    val FILES: List<String> = listOf("lib/authkey.sh", "lib/marker.sh")
 
     private const val ROOT = "com/csqtt/deploy/bundle/"
 
