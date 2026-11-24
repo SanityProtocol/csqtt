@@ -204,7 +204,7 @@ class ManagerTest {
         val stock = Manager.entries(c, carried).single { it.installation.name == "csqtt.service" }
         assertEquals(listOf(Action.REMOVE), stock.offers.map { it.action })
         assertTrue(stock.offers.single().folded && stock.offers.single().confirm != null)
-        assertEquals("Порт или интерфейс занят: swg-csqtt-csqtt1.service", stock.note)
+        assertEquals("UDP 46000 занят: swg-csqtt-csqtt1.service", stock.note)
     }
 
     @Test
@@ -260,5 +260,41 @@ class ManagerTest {
             val q = Proposer.propose(c, inv, Random(seed))
             for (port in listOf(q.udpPort, q.webPort)) assertFalse("$port", port in Proposer.SWG_PORTS)
         }
+    }
+
+    @Test
+    fun roundTwoHeldOnlyWhatCouldStartAndMovesThatCanBeMade() {
+        // a 2.1 binary failing on a 2.5 store (B7): «Обновить до 2.6» is its cure (B6 verify N1)
+        assertEquals(Action.UPDATE_FROM_21, offers("v250-systemd-noble+B7").second.first())
+        // a running server clashing with another on its port (B9) keeps its own offers (N4)
+        assertEquals(Action.UPDATE, Manager.entries(fixture("v253main-systemd-noble+B9").first, carried)
+            .single { it.installation.name == "csqtt.service" }.offers.first().action)
+        val swg = arrayOf(
+            "CSQTT_INV|proc|pid=70|exe=/usr/local/bin/csqtt-swg|deleted=0|comm=csqtt-swg|unit=swg-csqtt-csqtt1.service|ctr=|tun=csqtt1|sha=|" +
+                "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1",
+            "CSQTT_INV|unit|id=swg-csqtt-csqtt1.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=70|" +
+                "file_state=enabled|fragment=/etc/systemd/system/swg-csqtt-csqtt1.service|exec=/usr/local/bin/csqtt-swg|exec_ok=1|" +
+                "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1|pre=|pre_status=|env=")
+        // a store alone, left beside a live server on its port: still «Удалить остатки», never a removal that keeps it (N2)
+        // (the stock uninstall keeps csqtt.env: a store without its WEB_PASS would be B5, which «Починить» gives new credentials)
+        val (leftover, _) = box("CSQTT_INV|store|dir=/etc/csqtt|files=csqtt.db,csqtt.env|lock=none|schema=table:client_groups|" +
+            "env_keys=CSQTT_WEB_PASS,CSQTT_WEB_USER|public_ip=|domain=", *swg)
+        assertEquals(listOf(Action.REMOVE_LEFTOVERS), Manager.entries(leftover, carried).single { it.installation.name == "/etc/csqtt" }.offers.map { it.action })
+        // a swg node's second server, unseen by the claims, holds the stopped stock install's port: found through the listeners (N5)
+        val node = arrayOf(
+            "CSQTT_INV|ctr|id=0123456789ab|name=swg-node|image=swg-node:1.8|state=running|pid=80|restarts=0|exit=0|policy=always|net=host|labels=|flags=|mounts=|runtime=docker",
+            "CSQTT_INV|proc|pid=81|exe=/usr/local/bin/csqtt-swg|deleted=0|comm=csqtt-swg|unit=|ctr=0123456789ab|tun=csqtt3|sha=|flags=--listen 0.0.0.0:56012 --desired /a",
+            "CSQTT_INV|proc|pid=82|exe=/usr/local/bin/csqtt-swg|deleted=0|comm=csqtt-swg|unit=|ctr=0123456789ab|tun=csqtt1|sha=|flags=--listen 0.0.0.0:46000 --desired /b",
+            "CSQTT_INV|listen|proto=udp|addr=0.0.0.0|port=56012|comm=csqtt-swg|pid=81",
+            "CSQTT_INV|listen|proto=udp|addr=0.0.0.0|port=46000|comm=csqtt-swg|pid=82")
+        val (c, inv) = box(*stockMain(active = "inactive", fileState = "disabled"), *node)
+        val stock = Manager.entries(c, carried, inv).single { it.installation.name == "csqtt.service" }
+        assertEquals(listOf(Action.REMOVE), stock.offers.map { it.action })
+        assertEquals("UDP 46000 занят: csqtt-swg", stock.note)
+        // a move whose new instance cannot be made (every 10.77 /24 under a 10/8 route) is named, not offered (N3)
+        val (routed, routedInv) = box(*stockMain(), "CSQTT_INV|route|dst=10.0.0.0/8|dev=wg0|table=main")
+        val entry = Manager.entries(routed, carried, routedInv).single()
+        assertFalse(Action.UPDATE in entry.offers.map { it.action })
+        assertTrue(entry.note.orEmpty(), entry.note.orEmpty().startsWith("Переезд невозможен:"))
     }
 }

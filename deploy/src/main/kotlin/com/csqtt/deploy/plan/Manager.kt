@@ -80,14 +80,21 @@ data class BoxIssue(val code: String, val detail: String, val repairable: Boolea
 object Manager {
     private val STOCK = setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL)
 
-    /** §1.3's stock «Починить» list (B1, B2, B5, B6, B11, B18), with a crash loop and an exited container: the move fixes them. */
-    private val MOVABLE = setOf("B1", "B2", "B3", "B4", "B5", "B6", "B11", "B18")
+    /**
+     * §1.3's stock «Починить» list (B1, B2, B5, B6, B11, B18), with a crash loop and an exited container: the move fixes them;
+     * and B7, a 2.1 binary failing on a 2.5 store, which «Обновить до 2.6» cures (B6 verify N1).
+     */
+    private val MOVABLE = setOf("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B11", "B18")
 
     /** Instances of ours one box holds: the local-proxy slots 2–7. */
     const val MAX_OURS = 6
 
-    fun entries(classification: Classification, carried: Version): List<Entry> =
-        classification.installations.map { entry(it, classification, carried) }
+    /**
+     * The list's entries. With the [inv]entory, a holder the claims do not show is found too (a listener, a TUN), and a move
+     * whose new instance cannot be made is named instead of offered.
+     */
+    fun entries(classification: Classification, carried: Version, inv: Inventory? = null): List<Entry> =
+        classification.installations.map { entry(it, classification, carried, inv) }
 
     /**
      * Every box problem, named (B6 review F10): B14, B24 and B15 get «Исправить»; the rest are said, never dropped, so the
@@ -110,18 +117,36 @@ object Manager {
         }
     }
 
-    /** A live installation that claims this one's UDP port or interface: swg-panel's take-over of a stock install (F1). */
-    fun heldBy(install: Installation, classification: Classification): Installation? = classification.installations.firstOrNull { other ->
-        other !== install && other.state in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING) &&
-            ((install.claims.udpPort != null && other.claims.udpPort == install.claims.udpPort) ||
-                (install.claims.iface != null && other.claims.iface == install.claims.iface))
+    /** Which claim of an installation another server holds, and who: «UDP 46000» by «swg-csqtt-csqtt1.service». */
+    data class Held(val what: String, val by: String)
+
+    /**
+     * Another live server holds the UDP port or the interface of an installation that could start again: swg-panel's take-over
+     * of a stock install (F1). A running installation holds its own (a clash with another is B9, named), and a leftover
+     * starts nothing, so neither is held (B6 verify N2, N4). The holder is an installation's claim, or, with the inventory, a
+     * listener or a TUN outside this installation (a swg node's second server, a foreign process: N5).
+     */
+    fun heldBy(install: Installation, classification: Classification, inv: Inventory? = null): Held? {
+        if (install.state == InstallState.RUNNING || (install.units.isEmpty() && install.containers.isEmpty())) return null
+        val udp = install.claims.udpPort
+        val iface = install.claims.iface
+        classification.installations.firstOrNull { other ->
+            other !== install && other.state in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING) &&
+                ((udp != null && other.claims.udpPort == udp) || (iface != null && other.claims.iface == iface))
+        }?.let { other -> return Held(if (udp != null && other.claims.udpPort == udp) "UDP $udp" else "интерфейс $iface", other.name) }
+        val own = install.procs.map { it.pid }.toSet()
+        inv?.listens?.firstOrNull { it.proto == "udp" && udp != null && it.port == udp && it.pid != null && it.pid !in own }?.let {
+            return Held("UDP $udp", it.comm.ifEmpty { "pid ${it.pid}" })
+        }
+        inv?.procs?.firstOrNull { iface != null && iface in it.tuns && it.pid !in own }?.let { return Held("интерфейс $iface", it.comm) }
+        return null
     }
 
     /** A store with clients in it: what a move carries and «Подключиться» reads (B8's WAL without its database is none, F6). */
     fun hasDatabase(install: Installation): Boolean =
         install.stores.any { store -> store.files.any { it in setOf("csqtt.db", "passwords.json", "passwords.json.imported") } }
 
-    private fun entry(install: Installation, classification: Classification, carried: Version): Entry {
+    private fun entry(install: Installation, classification: Classification, carried: Version, inv: Inventory?): Entry {
         val compatibility = compatibility(install, carried)
         // Docker stopped: what it holds is unseen. A move would race its container back onto the port, a removal would delete
         // the store of an install that only waits for its daemon (B5 review F1)
@@ -130,21 +155,22 @@ object Manager {
             Owner.SWG_BARE, Owner.SWG_DOCKER -> Entry(install, compatibility, emptyList(), "Управляется swg-panel")
             Owner.MRTT, Owner.MRTT_BETA -> Entry(install, compatibility, emptyList(), "Другой протокол (MRTT)")
             Owner.HANDMADE, Owner.UNKNOWN -> Entry(install, compatibility, emptyList(), "Чужая установка")
-            Owner.OURS -> ours(install, compatibility, classification, carried)
-            in STOCK -> stock(install, compatibility, classification)
+            Owner.OURS -> ours(install, compatibility, classification, carried, inv)
+            in STOCK -> stock(install, compatibility, classification, inv)
             else -> Entry(install, compatibility, emptyList(), "Чужая установка")
         }
     }
 
     /** Another live server has this one's port or interface: nothing that would start this one again; removal, which B11
      *  bounds to this installation's own objects, folded and typed. */
-    private fun held(install: Installation, compatibility: Compatibility, holder: Installation) = Entry(install, compatibility,
+    private fun held(install: Installation, compatibility: Compatibility, held: Held) = Entry(install, compatibility,
         listOf(Offer(Action.REMOVE, folded = true, confirm = "удалить ${install.name}",
-            warning = "порт и интерфейс заняты ${holder.name}: удаление их не тронет")),
-        "Порт или интерфейс занят: ${holder.name}")
+            warning = "${held.what} занят ${held.by}: удаление его не тронет")),
+        "${held.what.replaceFirstChar { it.uppercase() }} занят: ${held.by}")
 
-    private fun ours(install: Installation, compatibility: Compatibility, classification: Classification, carried: Version): Entry {
-        heldBy(install, classification)?.let { return held(install, compatibility, it) }
+    private fun ours(install: Installation, compatibility: Compatibility, classification: Classification, carried: Version,
+        inv: Inventory?): Entry {
+        heldBy(install, classification, inv)?.let { return held(install, compatibility, it) }
         val newer = compatibility == Compatibility.NEWER_THAN_APP
         val installed = Version.parse(install.build?.version.orEmpty())
         val update = !newer && installed != null && carried > installed
@@ -174,8 +200,8 @@ object Manager {
         return Entry(install, compatibility, offers, if (newer) "Обновить нельзя: установлена более новая версия" else null)
     }
 
-    private fun stock(install: Installation, compatibility: Compatibility, classification: Classification): Entry {
-        heldBy(install, classification)?.let { return held(install, compatibility, it) }
+    private fun stock(install: Installation, compatibility: Compatibility, classification: Classification, inv: Inventory?): Entry {
+        heldBy(install, classification, inv)?.let { return held(install, compatibility, it) }
         val confirm = "удалить ${install.name}"
         val database = hasDatabase(install)
         // a leftover with nothing to repair is removed, its every object listed and typed (§1.3); B2's binary with no unit is
@@ -192,6 +218,13 @@ object Manager {
             !database -> "База клиентов не найдена: переносить нечего"
             blocking.isNotEmpty() -> "Сначала нужно разобраться: ${blocking.joinToString()}"
             classification.installations.count { it.owner == Owner.OURS } >= MAX_OURS -> "На сервере уже $MAX_OURS наших экземпляров"
+            // the instance the move becomes must be possible (no free /24 under a 10/8 route…): named, not offered (N3)
+            inv != null -> try {
+                Proposer.proposeMove(install, classification, inv)
+                null
+            } catch (refused: ProposalRefused) {
+                "Переезд невозможен: ${refused.reason}"
+            }
             else -> null
         }
         return when (compatibility) {
