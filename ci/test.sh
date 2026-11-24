@@ -64,7 +64,17 @@ app|deploy)
   grep -q '^distributionUrl=.*gradle-9\.4\.1-bin\.zip$' "$P" || { echo "the tree wants another Gradle than 9.4.1; pin it here" >&2; exit 1; }
   sed -i '/^distributionSha256Sum=/d' "$P"; echo "distributionSha256Sum=$GRADLE_SHA256" >> "$P"
   if [ "$SUITE" = app ]; then TASKS=testDebugUnitTest; AFTER=true
-  else TASKS=':deploy:test :deploy-cli:installDist'; AFTER='deploy-cli/build/install/deploy-cli/bin/deploy-cli bundle-check'; fi
+  else
+    TASKS=':deploy:test :deploy-cli:installDist'
+    # the count from the JUnit reports (a test class Gradle never found would not fail the build), then the laid-out command
+    AFTER="awk -F'\"' '/<testsuite /{for(i=1;i<NF;i++){if(\$i~/ tests=\$/)t+=\$(i+1);if(\$i~/ (failures|errors)=\$/)f+=\$(i+1);if(\$i~/ skipped=\$/)s+=\$(i+1)}} END{print \"deploy tests: \" t \" run, \" f \" failed, \" s \" skipped\"}' deploy/build/test-results/test/*.xml
+deploy-cli/build/install/deploy-cli/bin/deploy-cli bundle-check"
+    # the key tests make their keys with ssh-keygen, the reference for OpenSSH's formats, and ssh-keygen will not run as a
+    # uid with no passwd entry (it looks its user up first): the image's passwd plus one line for the calling user
+    docker run --rm "${CSQTT_ANDROID_IMAGE:-csqtt-ci-android}" cat /etc/passwd > "$W/passwd"
+    printf 'ci:x:%s:%s:ci:/tmp:/bin/sh\n' "$(id -u)" "$(id -g)" >> "$W/passwd"
+    XARGS+=(-v "$W/passwd:/etc/passwd:ro")
+  fi
   run "${CSQTT_ANDROID_IMAGE:-csqtt-ci-android}" "
 set -euo pipefail
 cd /w/src && chmod +x gradlew && printf 'sdk.dir=%s\n' \"\$ANDROID_HOME\" > local.properties

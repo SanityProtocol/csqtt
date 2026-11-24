@@ -33,5 +33,15 @@ tasks.test {
 }
 
 dependencies {
+    // the SSH stack the app already ships, at the app's versions and with the same exclusion: BouncyCastle once, 1.85 (B1)
+    api("com.hierynomus:sshj:0.38.0") {
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk18on")
+        exclude(group = "org.bouncycastle", module = "bcpkix-jdk18on")
+        exclude(group = "org.bouncycastle", module = "bcutil-jdk18on")
+    }
+    implementation("org.bouncycastle:bcprov-jdk18on:1.85")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
+    implementation("org.bouncycastle:bcutil-jdk18on:1.85")
+
     testImplementation("junit:junit:4.13.2")
 }
