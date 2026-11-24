@@ -842,7 +842,7 @@ mv_settle() {
 	[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
 	# (what the cut run's manifest names, only as far as it is the instance's own: the guard)
 	MF_OBJECTS=$(mf_objects_of "$MF" | mf_objects_ours "$cr_id")
-	MF_HOST=$(mf_host_of "$MF" | in_unit=$cr_unit in_state=$cr_state inst_ours_only "$cr_id")
+	MF_HOST=$(mf_host_of "$MF" | in_unit=$cr_unit in_state=$cr_state in_ports=$cr_open inst_ours_only "$cr_id")
 	# ours as the cut run made it: its unit, or in Docker its container, made from its docker file when the cut came first (P2 B13b)
 	cr_docker=0 ms_check=$cr_unit
 	if [ -f "$cr_state/docker" ]; then
@@ -1107,7 +1107,7 @@ action_create() {
 			# «Продолжить» (B8 review F1): an earlier run of this plan was cut off; what its manifest names goes (its server
 			# stopped, its rules with it), and the create runs again from the start with this run's credentials
 			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json" | mf_objects_ours "$cr_id")
-			MF_HOST=$(mf_host_of "$cr_state/manifest.json" | in_unit=$cr_unit in_state=$cr_state inst_ours_only "$cr_id")
+			MF_HOST=$(mf_host_of "$cr_state/manifest.json" | in_unit=$cr_unit in_state=$cr_state in_ports=$cr_open inst_ours_only "$cr_id")
 			[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
 			# the images that run made (pinned, the same again) stay for this one, its own to take if it fails (P2 B13a review F1)
 			cr_kept_images=$(printf '%s\n' "$MF_OBJECTS" | grep '^image ')
@@ -1665,6 +1665,9 @@ inst_ours_only() {
 		io_ports="$io_ports $(printf '%s\n' "$io_flags" | sed -n 's/.*--web-port \([0-9][0-9]*\).*/\1/p')/tcp"
 		break
 	done
+	# (and the ports the caller's plan opened: a cut-off run's undo knows them from its own plan, wherever the box's flags went;
+	# p2-cut-undo-guard review F1)
+	io_ports="$io_ports ${in_ports:-}"
 	while read -r io_kind io_rest; do
 		[ -n "$io_kind" ] || continue
 		io_zone='' io_port='' io_rule='' io_policy='' io_key='' io_unit=''

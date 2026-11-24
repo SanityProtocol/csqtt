@@ -207,11 +207,19 @@ class RepairTest {
         assertEquals(listOf(host[0], host[1], host[2], host[6], host[7]),
             sh(lists + "ufw() { :; }\nin_unit=sanity-csqtt-zz-no-such.service in_state=/nonexistent\n" + function("inst_ours_only") +
                 "inst_ours_only 0a1b2c <<'EOF'\n" + host.joinToString("\n") + "\nEOF\n"))
-        // both paths read the cut run's manifest through the two (a removal's own stays as it was)
+        // review F1: the cut run's own ports come from its plan too, wherever the box's flags went (a «Продолжить» cut again after
+        // its unit file was taken): a default-zone port of its own is still closed, another's is not
+        assertEquals(listOf("firewalld-port zone=public port=49784/udp", "firewalld-port zone=public port=45734/tcp"),
+            sh("ufw() { :; }\nin_unit=sanity-csqtt-zz-no-such.service in_state=/nonexistent in_ports='49784/udp 45734/tcp'\n" +
+                function("inst_ours_only") + "inst_ours_only 0a1b2c <<'EOF'\nfirewalld-port zone=public port=49784/udp\n" +
+                "firewalld-port zone=public port=22/tcp\nfirewalld-port zone=public port=45734/tcp\nEOF\n"))
+        // both paths read the cut run's manifest through the two, with the plan's ports (a removal's own stays as it was)
         for (path in listOf(function("mv_settle"), function("action_create"))) {
             assertTrue(path, "| mf_objects_ours \"\$cr_id\")" in path)
-            assertTrue(path, "| in_unit=\$cr_unit in_state=\$cr_state inst_ours_only \"\$cr_id\")" in path)
+            assertTrue(path, "| in_unit=\$cr_unit in_state=\$cr_state in_ports=\$cr_open inst_ours_only \"\$cr_id\")" in path)
         }
-        assertFalse(Regex("MF_OBJECTS=\\$\\(mf_objects_of \"[^\"]+\"\\)").containsMatchIn(function("mv_settle") + function("action_create")))
+        val both = function("mv_settle") + function("action_create")
+        assertFalse(Regex("MF_OBJECTS=\\$\\(mf_objects_of \"[^\"]+\"\\)").containsMatchIn(both))
+        assertFalse(Regex("MF_HOST=\\$\\(mf_host_of \"[^\"]+\"\\)").containsMatchIn(both))
     }
 }
