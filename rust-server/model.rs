@@ -1773,6 +1773,12 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
     Ok(db)
 }
 
+/// Whether a server's store is in this directory: the SQLite file, or a 2.0.0 or 2.1 JSON one load_database imports. Without
+/// one, load_database starts an empty store, which `--read-store` must never report as a server's (P2 Bsrv).
+pub fn holds_store(config_dir: &Path) -> bool {
+    std::iter::once(DATABASE_FILE).chain(LEGACY_DATABASE_FILES).any(|name| config_dir.join(name).is_file())
+}
+
 pub fn load_database(config_dir: &Path) -> Result<Database> {
     let _guard = DATABASE_SAVE_LOCK
         .lock()

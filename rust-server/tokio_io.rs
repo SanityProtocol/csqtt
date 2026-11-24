@@ -1319,25 +1319,33 @@ fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
     ]
 }
 
-/// P2 Bsrv: the chain a flow from the tunnel enters with its first packet (managed_firewall_rules jumps here). Packets bound
-/// for Docker's bridges (`docker0`, `docker_gwbridge`, a user network's `br-…`) RETURN to FORWARD, where Docker's own rules
-/// decide them as for any other source: a published port is accepted, an unpublished one dropped. Everything else is
-/// accepted, as the old blanket rule did. The chain is flushed and refilled at every start, so it always holds exactly these
-/// rules in this order, each tagged so a sweep by the instance's tag finds it.
+/// P2 Bsrv: the chain a flow from the tunnel enters with its first packet (managed_firewall_rules jumps here). A packet bound
+/// for one of Docker's bridges (`docker0`, `docker_gwbridge`, a user network's `br-…`) that Docker did not DNAT is for an
+/// unpublished container port: it is dropped. A DNATed one is a published port: it RETURNs to FORWARD, where Docker's own
+/// rules (DOCKER-USER first) decide it as for any other source. Everything else is accepted, as the old blanket rule did.
+/// Docker's rules alone do not close unpublished ports: up to Docker 27 they carry no DROP of their own, and FORWARD's policy
+/// is DROP only when dockerd turned ip_forward on itself, which a host that already forwards (our sysctl drop-in, any VPN)
+/// never lets it do. The chain is flushed and refilled at every start, so it always holds exactly these rules in this order,
+/// each tagged so a sweep by the instance's tag finds it.
 struct ForwardScope {
     chain: &'static str,
 }
 
 impl ForwardScope {
-    const RULES: [&'static [&'static str]; 3] =
-        [&["-o", "docker+", "-j", "RETURN"], &["-o", "br-+", "-j", "RETURN"], &["-j", "ACCEPT"]];
+    const RULES: [&'static [&'static str]; 5] = [
+        &["-o", "docker+", "-m", "conntrack", "!", "--ctstate", "DNAT", "-j", "DROP"],
+        &["-o", "br-+", "-m", "conntrack", "!", "--ctstate", "DNAT", "-j", "DROP"],
+        &["-o", "docker+", "-j", "RETURN"],
+        &["-o", "br-+", "-j", "RETURN"],
+        &["-j", "ACCEPT"],
+    ];
 
     fn iptables(args: &[&str]) -> io::Result<std::process::Output> {
         std::process::Command::new("iptables").args(["-w", "2"]).args(args).output()
     }
 
     fn rule(&self, rule: &[&'static str]) -> Vec<&str> {
-        let (target, matches) = rule.split_at(rule.len() - 2);
+        let (matches, target) = rule.split_at(rule.len() - 2);
         let mut args = vec!["-A", self.chain];
         args.extend_from_slice(matches);
         args.extend_from_slice(&["-m", "comment", "--comment", crate::swgpanel::managed_tag()]);
@@ -1659,20 +1667,30 @@ mod tests {
         // the old blanket accept is gone from the plan (purge_unscoped_forward_accept removes a leftover one)
         let blanket = ["-i", "sqc0", "-m", "comment", "--comment", tag, "-j", "ACCEPT"];
         assert!(!forward.iter().any(|rule| rule.spec == blanket));
-        // a new flow: Docker's bridges go back to Docker's rules, the rest is accepted
+        // a new flow: an unpublished container port (no DNAT) is dropped, a published one goes back to Docker's rules,
+        // anything else is accepted
         let scope = ForwardScope { chain };
         let planned: Vec<Vec<&str>> = ForwardScope::RULES.iter().map(|rule| scope.rule(rule)).collect();
-        assert_eq!(planned[0], ["-A", chain, "-o", "docker+", "-m", "comment", "--comment", tag, "-j", "RETURN"]);
-        assert_eq!(planned[1], ["-A", chain, "-o", "br-+", "-m", "comment", "--comment", tag, "-j", "RETURN"]);
-        assert_eq!(planned[2], ["-A", chain, "-m", "comment", "--comment", tag, "-j", "ACCEPT"]);
+        let comment = ["-m", "comment", "--comment", tag];
+        let unpublished = ["-m", "conntrack", "!", "--ctstate", "DNAT"];
+        assert_eq!(planned.len(), 5);
+        for (i, bridge) in ["docker+", "br-+"].into_iter().enumerate() {
+            assert_eq!(planned[i], [&["-A", chain, "-o", bridge][..], &unpublished, &comment, &["-j", "DROP"]].concat());
+            assert_eq!(planned[i + 2], [&["-A", chain, "-o", bridge][..], &comment, &["-j", "RETURN"]].concat());
+        }
+        assert_eq!(planned[4], [&["-A", chain][..], &comment, &["-j", "ACCEPT"]].concat());
     }
 
     #[test]
     fn every_instances_forward_chain_name_fits_iptables() {
-        // `--instance` takes at most 15 characters (swgpanel::build); iptables takes a chain name of at most 28
-        let longest = format!("{}_MANAGED_FWD", "a".repeat(15).to_ascii_uppercase());
-        assert!(longest.len() <= 28, "{longest}");
-        assert_eq!(crate::swgpanel::forward_chain(), format!("{}_FWD", crate::swgpanel::managed_tag()));
+        // the longest name --instance takes (15 of a-z, 0-9, '-'), through the same build as the server's own config;
+        // iptables takes a chain name of at most 28 characters
+        let cfg = crate::swgpanel::build(None, None, false, false, None, Some("a".repeat(15)), None, crate::swgpanel::HostTuning::Auto)
+            .unwrap();
+        let chain = crate::swgpanel::forward_chain_for(&cfg.managed_tag);
+        assert_eq!(chain, "AAAAAAAAAAAAAAA_MANAGED_FWD");
+        assert!(chain.len() <= 28, "{chain}");
+        assert_eq!(crate::swgpanel::forward_chain(), crate::swgpanel::forward_chain_for(crate::swgpanel::managed_tag()));
     }
 
     #[test]

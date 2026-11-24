@@ -122,9 +122,12 @@ pub fn managed_tag() -> &'static str {
 }
 // P2 Bsrv: the chain a new flow from the tunnel enters (tokio_io.rs ForwardScope). The longest, a 15-character instance's
 // `…_MANAGED_FWD`, is 27 characters, inside iptables' 28.
+pub fn forward_chain_for(managed_tag: &str) -> String {
+    format!("{managed_tag}_FWD")
+}
 pub fn forward_chain() -> &'static str {
     static CHAIN: OnceLock<String> = OnceLock::new();
-    CHAIN.get_or_init(|| format!("{}_FWD", managed_tag()))
+    CHAIN.get_or_init(|| forward_chain_for(managed_tag()))
 }
 pub fn tproxy_tag() -> &'static str {
     &get().tproxy_tag

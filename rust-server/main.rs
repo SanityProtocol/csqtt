@@ -225,8 +225,12 @@ struct Args {
 }
 
 /// `--read-store`'s report in deploy v3's line protocol (deploy-bundle/lib/marker.sh): the main password, escaped like every
-/// marker field, then the end line.
+/// marker field, then the end line. A directory with no store is an error (no end line, a non-zero exit), never an empty
+/// password that would read like a server's.
 fn read_store_report(dir: &std::path::Path) -> Result<String> {
+    if !model::holds_store(dir) {
+        bail!("no csqtt store in {}", dir.display());
+    }
     let db = load_database(dir)?;
     let password = db.main_password.replace('%', "%25").replace('|', "%7C").replace('\r', "%0D").replace('\n', "%0A");
     Ok(format!("CSQTT_RB|main_password|{password}\nCSQTT_END|1\n"))
@@ -2350,11 +2354,57 @@ mod version_tests {
 
     #[test]
     fn read_store_reads_a_200_passwords_json_too() {
-        // a 2.0.0 server never had csqtt.db: its store is passwords.json, which loading imports (into the copy)
+        // a 2.0.0 server never had csqtt.db: its store is passwords.json, 2.0.0's own Database serialised
+        // (v2.0.0:csqtt-uring/model.rs: main_password, main_device_id, passwords with device_id, devices…), which loading
+        // imports into the copy
         let directory = scratch("json");
-        let legacy = model::Database { main_password: "old-main".into(), ..Default::default() };
-        std::fs::write(directory.join("passwords.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(read_store_report(&directory).unwrap(), "CSQTT_RB|main_password|old-main\nCSQTT_END|1\n");
+        let json = r#"{"main_password":"old-20-main","main_device_id":"d0","dns":"","main_up_bytes":1,"main_down_bytes":2,
+            "admin_id":"","bot_token":"","passwords":{"client-20":{"device_id":"d1","expires_at":0,"down_bytes":3,
+            "up_bytes":4,"dtls_port":0,"wg_port":0,"local_port":0}},"devices":{"d1":{"device_id":"d1","ip":"10.66.67.3",
+            "priv_key":"k","pub_key":"p","up_bytes":0,"down_bytes":0,"last_generation_id":0}},"web_sessions":{},
+            "logging_active":null}"#;
+        std::fs::write(directory.join("passwords.json"), json).unwrap();
+        assert_eq!(read_store_report(&directory).unwrap(), "CSQTT_RB|main_password|old-20-main\nCSQTT_END|1\n");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn read_store_reads_a_219_store() {
+        // a 2.1.9 server's csqtt.db: its own schema (v2.1.9:rust-server/model.rs), the main password in meta, a client
+        // with a device id and no address; loading migrates the copy to today's schema first
+        let directory = scratch("sqlite21");
+        let conn = rusqlite::Connection::open(directory.join("csqtt.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE counters (id INTEGER PRIMARY KEY CHECK (id = 1), main_up_bytes INTEGER NOT NULL DEFAULT 0,
+                 main_down_bytes INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE passwords (password TEXT PRIMARY KEY, device_id TEXT NOT NULL DEFAULT '',
+                 expires_at INTEGER NOT NULL DEFAULT 0, down_bytes INTEGER NOT NULL DEFAULT 0, up_bytes INTEGER NOT NULL DEFAULT 0,
+                 vk_hash TEXT NOT NULL DEFAULT '', ports TEXT NOT NULL DEFAULT '', is_deactivated INTEGER NOT NULL DEFAULT 0,
+                 name TEXT NOT NULL DEFAULT '', vk_hashes TEXT NOT NULL DEFAULT '', dtls_port INTEGER NOT NULL DEFAULT 0,
+                 wg_port INTEGER NOT NULL DEFAULT 0, local_port INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE devices (device_id TEXT PRIMARY KEY, ip TEXT NOT NULL, priv_key TEXT NOT NULL, pub_key TEXT NOT NULL,
+                 up_bytes INTEGER NOT NULL DEFAULT 0, down_bytes INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE local_proxy_profiles (id TEXT PRIMARY KEY, sort_order INTEGER NOT NULL, name TEXT NOT NULL,
+                 port INTEGER NOT NULL, username TEXT NOT NULL DEFAULT '', password TEXT NOT NULL DEFAULT '');
+             CREATE TABLE local_proxy_state (id INTEGER PRIMARY KEY CHECK (id = 1), active_profile_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO meta (key, value) VALUES ('main_password', 'old-21-main');
+             INSERT INTO counters (id, main_up_bytes, main_down_bytes) VALUES (1, 5, 6);
+             INSERT INTO passwords (password, device_id, name) VALUES ('client-21', 'd1', 'a client');
+             INSERT INTO devices (device_id, ip, priv_key, pub_key) VALUES ('d1', '10.66.67.3', 'k', 'p');",
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(read_store_report(&directory).unwrap(), "CSQTT_RB|main_password|old-21-main\nCSQTT_END|1\n");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn read_store_refuses_a_directory_without_a_store() {
+        // the deploy copied the wrong directory, or a server that never started: an error, not an empty password
+        let directory = scratch("empty");
+        assert!(read_store_report(&directory).is_err());
+        assert!(read_store_report(&directory.join("absent")).is_err());
         let _ = std::fs::remove_dir_all(directory);
     }
 
