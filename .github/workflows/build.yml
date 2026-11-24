@@ -118,6 +118,21 @@ jobs:
       - name: Cores manifest
         run: python3 recipe/ci/provenance.py src out/cores "${{ steps.src.outputs.sha }}"
 
+      - name: Docker mode's root filesystems (amd64, arm64, armv7)
+        # P2 B13a (APP-PLAN §6.11 rule 1): Alpine's minirootfs, pinned, with iptables and iproute2's ip at pinned versions,
+        # built reproducibly by ci/build-rootfs.sh; each must equal the pin the engine carries, or the run fails. A source
+        # with no pins (a manual run of an older tree) has no Docker mode to build for.
+        run: |
+          pins=src/deploy/src/main/resources/com/csqtt/deploy/run/rootfs.pins
+          if [ ! -f "$pins" ]; then echo "no rootfs.pins in this source: nothing to build"; mkdir -p out/rootfs; exit 0; fi
+          for a in amd64 arm64 armv7; do recipe/ci/build-rootfs.sh "$a" out/rootfs; done
+          for a in amd64 arm64 armv7; do
+            want=$(awk -v a="$a" '$1 == a {print $2}' "$pins")
+            got=$(sha256sum "out/rootfs/csqtt-rootfs-$a.tar.gz" | cut -d' ' -f1)
+            [ "$got" = "$want" ] || { echo "csqtt-rootfs-$a.tar.gz is $got, pinned $want"; exit 1; }
+          done
+          (cd out/rootfs && sha256sum csqtt-rootfs-*.tar.gz > SHA256SUMS)
+
       - name: Android build image
         run: docker build -t csqtt-ci-android -f recipe/ci/Dockerfile.android recipe/ci
 
@@ -134,6 +149,18 @@ jobs:
             out/cores/csqtt-linux-armv7
             out/cores/csqtt.server-provenance.json
             out/cores/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the root filesystems
+        if: hashFiles('out/rootfs/SHA256SUMS') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: csqtt-rootfs-${{ steps.src.outputs.short }}
+          path: |
+            out/rootfs/csqtt-rootfs-*.tar.gz
+            out/rootfs/csqtt-rootfs-*.provenance.json
+            out/rootfs/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
@@ -154,7 +181,8 @@ jobs:
             echo
             echo "| file | bytes | sha256 |"
             echo "|---|---|---|"
-            for f in out/cores/csqtt-linux-* out/apk/*.apk; do
+            for f in out/cores/csqtt-linux-* out/rootfs/csqtt-rootfs-*.tar.gz out/apk/*.apk; do
+              [ -f "$f" ] || continue
               echo "| $(basename "$f") | $(stat -c%s "$f") | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"
             done
             echo

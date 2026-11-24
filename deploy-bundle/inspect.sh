@@ -619,11 +619,13 @@ inv_stores() {
 		is_keys=$(printf '%s\n' $is_keys | sort -u | tr '\n' ',')
 		# a store of ours kept by «Удалить»: the flags it ran with (its ports, interface, subnet and slot stay its own, so no new
 		# instance takes them) and the release it ran (no older core restores it) (B11a review F3, F6)
-		is_kflags='' is_krel=''
+		is_kflags='' is_krel='' is_kdock=''
 		case $is_d in /var/lib/sanityprotocol/csqtt/*)
 			if [ -f "$is_d/unit.saved" ]; then
 				is_kflags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$is_d/unit.saved" | head -n 1)
 				is_krel=$(sed -n 's/^# release //p' "$is_d/unit.saved" | head -n 1)
+				# (an instance that ran in Docker: its kept flags are its container's, P2 B13a)
+				! grep -q '^# docker ' "$is_d/unit.saved" || is_kdock=1
 			fi ;;
 		esac
 		# a config dir that is a link (moved to another disk, #5): its removal takes the link, never what it points to (B11b
@@ -634,7 +636,7 @@ inv_stores() {
 		is_moved=''
 		[ ! -f "$is_d/.sanity-moved" ] || is_moved=$(head -n 1 "$is_d/.sanity-moved" | tr -cd 'a-z0-9-')
 		csqtt_emit INV store "dir=$is_d" "files=$is_files" "lock=$is_lock" "schema=${is_schema%,}" "env_keys=${is_keys%,}" \
-			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel" "link=$is_link" "moved=$is_moved"
+			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel" "link=$is_link" "moved=$is_moved" "kept_docker=$is_kdock"
 	done
 }
 

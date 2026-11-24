@@ -23,7 +23,9 @@ import kotlin.random.Random
  * release it installs, if any (create, update: root's only, its sha256 checked again before use).
  */
 class RunPlan(val action: String, val values: Map<String, String> = emptyMap(), val secrets: Map<String, String> = emptyMap(),
-    val core: ByteArray? = null) {
+    val core: ByteArray? = null,
+    /** Docker mode's root filesystem, when the client brings it (C3; P2 B13a): its sha256 is the plan's. */
+    val rootfs: ByteArray? = null) {
     init {
         // one key=value line each: a key is a word, and no value may start another line
         for ((key, value) in values + secrets) {
@@ -111,10 +113,11 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
 
     fun start(runId: String, plan: RunPlan): StartOutcome {
         val script = script()
-        val dir = Uploads.privateDir(remote, script.size.toLong() + (plan.core?.size ?: 0))
+        val dir = Uploads.privateDir(remote, script.size.toLong() + (plan.core?.size ?: 0) + (plan.rootfs?.size ?: 0))
         try {
             Uploads.writeFile(remote, "$dir/run.sh", script)
             plan.core?.let { Uploads.writeFile(remote, "$dir/core", it) }
+            plan.rootfs?.let { Uploads.writeFile(remote, "$dir/rootfs", it) }
             Uploads.writeFile(remote, "$dir/plan", plan.planText().toByteArray())
             // the private directory is the login user's, 0700; run.sh installs the secrets 0600 for root and the directory goes
             if (plan.secrets.isNotEmpty()) Uploads.writeFile(remote, "$dir/secrets", plan.secretsText().toByteArray())

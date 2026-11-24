@@ -62,6 +62,8 @@ cmd_start() {
 	fi
 	# a release the run installs (create, update): root's only, its sha checked again before use
 	[ ! -f "$rs_up/core" ] || install -m 700 "$rs_up/core" "$rs_dir/core"
+	# Docker mode's root filesystem, when the client brought it (P2 B13a): its sha checked against the plan before use
+	[ ! -f "$rs_up/rootfs" ] || install -m 600 "$rs_up/rootfs" "$rs_dir/rootfs"
 	: >"$rs_dir/log" && chown "$rs_uid" "$rs_dir/log" && chmod 600 "$rs_dir/log"
 	# the last KEEP runs are kept (the newest by name: run ids start with their UTC time)
 	ls -1 "$RUNS" 2>/dev/null | sort | awk -v keep=$KEEP '{a[NR] = $0} END {for (i = 1; i <= NR - keep; i++) print a[i]}' |
@@ -69,7 +71,7 @@ cmd_start() {
 			[ "$rs_old" = "$rs_id" ] || rm -rf "${RUNS:?}/$rs_old"
 		done
 	if ! systemd-run --unit "sanity-csqtt-deploy-$rs_id" --collect --quiet --property=KillMode=mixed \
-		--property="ExecStopPost=/bin/rm -f $rs_dir/secrets $rs_dir/out $rs_dir/core" \
+		--property="ExecStopPost=/bin/rm -f $rs_dir/secrets $rs_dir/out $rs_dir/core $rs_dir/rootfs" \
 		flock -n $LOCK /bin/sh "$rs_dir/run.sh" exec "$rs_id" >/dev/null 2>&1; then
 		csqtt_emit START failed "systemd-run refused the run"
 		csqtt_end
@@ -194,7 +196,7 @@ run_result() {  # run_result <kind> <cause> <next action>
 	run_emit RESULT "$1" "$RUN_STEP" "$(printf '%s\n' "$2" | run_redact)" "$(printf '%s\n' "$3" | run_redact)"
 	# the kind alone (no secret) where every login reads it: the log is its starting login's own (B7 verify N2)
 	printf '%s\n' "$1" >"$RUN_DIR/result" && chmod 644 "$RUN_DIR/result"
-	rm -f "$RUN_DIR/secrets" "$RUN_DIR/core"
+	rm -f "$RUN_DIR/secrets" "$RUN_DIR/core" "$RUN_DIR/rootfs"
 	printf 'CSQTT_END|%s\n' "$(grep -c '^CSQTT_' "$RUN_LOG")" >>"$RUN_LOG"
 	exit 0
 }
@@ -482,10 +484,11 @@ host_undo() {
 	hu_list=$(printf '%s\n' "$MF_HOST" | awk 'NF {l[++n] = $0} END {for (i = n; i > 0; i--) print l[i]}')
 	hu_reload=0
 	while read -r hu_kind hu_rest; do
-		hu_key='' hu_was='' hu_rule='' hu_zone='' hu_port='' hu_policy='' hu_redir=''
+		hu_key='' hu_was='' hu_rule='' hu_zone='' hu_port='' hu_policy='' hu_redir='' hu_unit=''
 		for hu_kv in $hu_rest; do
 			case $hu_kv in
 			key=*) hu_key=${hu_kv#key=} ;; was=*) hu_was=${hu_kv#was=} ;; rule=*) hu_rule=${hu_kv#rule=} ;; redirects=*) hu_redir=${hu_kv#redirects=} ;;
+			unit=*) hu_unit=${hu_kv#unit=} ;;
 			zone=*) hu_zone=${hu_kv#zone=} ;; port=*) hu_port=${hu_kv#port=} ;; policy=*) hu_policy=${hu_kv#policy=} ;;
 			esac
 		done
@@ -502,6 +505,9 @@ host_undo() {
 		firewalld-policy) firewall-cmd -q --permanent --delete-policy="$hu_policy" 2>/dev/null ;;
 		# this run reloaded: its permanent changes went live, so taking them back needs a reload too (B9 review F5)
 		firewalld-reload) hu_reload=1 ;;
+		# Docker enabled at boot or started by this run (P2 B13a): back as it was
+		service-enabled) systemctl disable "$hu_unit" >/dev/null 2>&1 ;;
+		service-started) systemctl stop "$hu_unit" >/dev/null 2>&1 ;;
 		esac
 	done <<EOF
 $hu_list
@@ -522,6 +528,9 @@ mf_undo() {
 			systemctl reset-failed "${mu_path##*/}" >/dev/null 2>&1
 			;;
 		dir) rm -rf "$mu_path" ;;
+		# Docker mode's (P2 B13a): the container, and an image Docker removes only while no container of anyone's uses it
+		container) docker rm -f "$mu_path" >/dev/null 2>&1 ;;
+		image) docker image rm "$mu_path" >/dev/null 2>&1 ;;
 		# a single file this run wrote (the move's drop-in on the stock unit)
 		file)
 			rm -f "$mu_path"
@@ -560,15 +569,33 @@ inst_start_lines() {  # inst_start_lines <unit>
 # An instance of ours serves (create's and update's verify): its unit active, its UDP and web ports held by its own pid alone
 # (SO_REUSEADDR makes a bind prove nothing), its interface up, its panel answering on 127.0.0.1 where curl is. Prints why
 # not, or nothing.
-inst_verify() {  # inst_verify <unit> <udp> <web> <iface> <secret path>
+inst_verify() {  # inst_verify <unit, or docker:<container>> <udp> <web> <iface> <secret path>
 	iv_unit=$1 iv_udp=$2 iv_web=$3 iv_iface=$4 iv_secret=$5
-	[ "$(systemctl is-active "$iv_unit")" = active ] || { echo "$iv_unit is not active"; return 0; }
-	iv_pid=$(systemctl show -p MainPID --value "$iv_unit")
+	# (a container's server binds its ports after `docker run` returned: it is given 20 s; a unit's start returned on its
+	# READY=1, sent once they are bound)
+	iv_patience=0
+	case $iv_unit in
+	docker:*)
+		iv_c=${iv_unit#docker:} iv_patience=20
+		[ "$(docker inspect -f '{{.State.Running}}' "$iv_c" 2>/dev/null)" = true ] || { echo "its container $iv_c is not running"; return 0; }
+		iv_pid=$(docker inspect -f '{{.State.Pid}}' "$iv_c" 2>/dev/null)
+		;;
+	*)
+		[ "$(systemctl is-active "$iv_unit")" = active ] || { echo "$iv_unit is not active"; return 0; }
+		iv_pid=$(systemctl show -p MainPID --value "$iv_unit")
+		;;
+	esac
 	for iv_check in "u $iv_udp UDP" "t $iv_web TCP"; do
 		iv_p=${iv_check%% *} iv_rest=${iv_check#* }
 		iv_port=${iv_rest%% *} iv_name=${iv_rest#* }
-		iv_holders=$(ss -H -l"$iv_p"np "( sport = :$iv_port )" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
-		[ "$iv_holders" = "$iv_pid " ] || { echo "$iv_name $iv_port is held by pids ${iv_holders:-none} (ours: $iv_pid)"; return 0; }
+		iv_waited=0
+		while :; do
+			iv_holders=$(ss -H -l"$iv_p"np "( sport = :$iv_port )" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
+			[ "$iv_holders" != "$iv_pid " ] || break
+			[ $iv_waited -lt $iv_patience ] || { echo "$iv_name $iv_port is held by pids ${iv_holders:-none} (ours: $iv_pid)"; return 0; }
+			sleep 1
+			iv_waited=$((iv_waited + 1))
+		done
 	done
 	ip link show "$iv_iface" >/dev/null 2>&1 || { echo "the server made no $iv_iface"; return 0; }
 	command -v curl >/dev/null 2>&1 || return 0
@@ -767,6 +794,87 @@ mv_settle() {
 		"the stock install is back as it was; the new instance's store is kept («Восстановить» brings it back)"
 }
 
+# ── Docker mode (P2 B13a; APP-PLAN §6.11; P2-PLAN §1.8): our image made on the box from a pinned root filesystem and our
+# core, never pulled; the container on the host's network with NET_ADMIN and the TUN, never privileged ──────────────────────
+# The image's entrypoint: the host's iptables backend (SANITY_IPTABLES: legacy or nft; Alpine defaults to nft, which on a
+# legacy host puts rules where the kernel's path does not look), the instance's INPUT openings on a box whose INPUT is closed
+# (SANITY_OPEN, its open.sh, at every start as its unit would run it), then the server in place of this shell
+dk_entrypoint() {
+	cat <<'EOF'
+#!/bin/sh
+case ${SANITY_IPTABLES:-nft} in legacy) m=xtables-legacy-multi ;; *) m=xtables-nft-multi ;; esac
+for t in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do ln -sf "$m" "/usr/sbin/$t"; done
+[ -z "${SANITY_OPEN:-}" ] || sh "$SANITY_OPEN" add
+exec "$@"
+EOF
+}
+
+# the host's own iptables backend, as its iptables names itself (the one Docker's own rules went to)
+dk_backend() { case $(iptables -V 2>/dev/null) in *legacy*) echo legacy ;; *) echo nft ;; esac; }
+
+# the last lines a container wrote, for a result's cause
+dk_lines() { docker logs --tail 5 "$1" 2>&1 | tr '\n' ' ' | cut -c1-300; }
+
+# dk_daemon: Docker running now and enabled at boot, so its restart policy brings our container back after a reboot (§6.11
+# rule 6); each, when it was not so, is this run's host change: undone if the run fails, kept by a removal (others may rely
+# on it by then)
+dk_daemon() {
+	if ! systemctl is-enabled --quiet docker.service 2>/dev/null; then
+		host_add service-enabled unit=docker.service
+		run_cmd systemctl enable docker.service || cr_fail "Docker could not be enabled at boot"
+	fi
+	if ! systemctl is-active --quiet docker.service; then
+		host_add service-started unit=docker.service
+		run_cmd systemctl start docker.service || cr_fail "Docker did not start: $(inst_start_lines docker.service)"
+	fi
+	docker info >/dev/null 2>&1 || cr_fail "Docker does not answer" "check Docker on the box"
+}
+
+# dk_rootfs <sha256> <url>: the root filesystem image, sanity-csqtt-rootfs:<sha8>, as Docker has it, or imported from the
+# client's upload or from <url> (the release's), its sha256 checked first (C3)
+dk_rootfs() {
+	dr_tag=sanity-csqtt-rootfs:$(printf '%.8s' "$1")
+	docker image inspect "$dr_tag" >/dev/null 2>&1 && return 0
+	if [ ! -f "$RUN_DIR/rootfs" ]; then
+		[ -n "$2" ] || cr_fail "no root filesystem for Docker: none was uploaded and none is to be fetched" "update the app"
+		if command -v curl >/dev/null 2>&1; then
+			run_cmd curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$RUN_DIR/rootfs" "$2"
+		else
+			run_cmd wget -q -T 30 -O "$RUN_DIR/rootfs" "$2"
+		fi || cr_fail "cannot fetch the root filesystem from $2" "check again: the app then brings it itself"
+	fi
+	[ "$(sha256sum "$RUN_DIR/rootfs" | cut -d' ' -f1)" = "$1" ] || cr_fail "the root filesystem is damaged" "try again"
+	mf_add image "$dr_tag"
+	run_cmd docker import "$RUN_DIR/rootfs" "$dr_tag" || cr_fail "Docker would not import the root filesystem"
+	rm -f "$RUN_DIR/rootfs"
+}
+
+# dk_image <rootfs tag> <image tag> <core>: our core and the entrypoint on the root filesystem, built with no network (no
+# registry, no mirror: §6.11 rule 1), as Docker has it or made now
+dk_image() {
+	docker image inspect "$2" >/dev/null 2>&1 && return 0
+	di_ctx=$RUN_DIR/image
+	{ mkdir -p "$di_ctx" && install -m 755 "$3" "$di_ctx/csqtt-server" && dk_entrypoint >"$di_ctx/sanity-entrypoint" &&
+		chmod 755 "$di_ctx/sanity-entrypoint" &&
+		printf 'FROM %s\nCOPY csqtt-server /usr/local/bin/csqtt-server\nCOPY sanity-entrypoint /usr/local/bin/sanity-entrypoint\nENTRYPOINT ["/usr/local/bin/sanity-entrypoint"]\n' \
+			"$1" >"$di_ctx/Dockerfile"; } || cr_fail "cannot lay out the image's files"
+	mf_add image "$2"
+	run_cmd docker build -q --network none -t "$2" "$di_ctx" || cr_fail "Docker would not build the image"
+	rm -rf "$di_ctx"
+}
+
+# dk_run <container> <image> <state dir> <firewall mode> <flags…>: the instance's container, started. Its restart policy
+# brings it back with Docker after a reboot or a crash (M-2: the server's own watchdog exits a stuck process); its logs
+# rotate (Docker's local driver); its store and env are the state dir, mounted at its own path
+dk_run() {
+	dn_c=$1 dn_img=$2 dn_state=$3 dn_open=''
+	[ "$4" != iptables ] || dn_open=$3/open.sh
+	shift 4
+	docker run -d --name "$dn_c" --restart unless-stopped --network host --cap-add NET_ADMIN --device /dev/net/tun \
+		--log-driver local --env-file "$dn_state/env" -e "SANITY_IPTABLES=$(dk_backend)" -e "SANITY_OPEN=$dn_open" \
+		-v "$dn_state:$dn_state" --label "org.sanityprotocol.csqtt=$dn_c" "$dn_img" /usr/local/bin/csqtt-server "$@"
+}
+
 action_create() {
 	cr_id=$(plan id) cr_iface=$(plan iface) cr_subnet=$(plan subnet) cr_udp=$(plan udp) cr_web=$(plan web)
 	cr_slot=$(plan slot) cr_bind=$(plan web_bind) cr_version=$(plan version) cr_sha=$(plan core_sha)
@@ -786,6 +894,10 @@ action_create() {
 	cr_mv_role=$(plan move_role) cr_mv_unit=$(plan move_unit) cr_mv_store=$(plan move_store)
 	cr_move=0 cr_mv_stopped=0 cr_mv_ran=0
 	[ -z "$cr_mv_role" ] || cr_move=1
+	# Docker mode (P2 B13a): the instance a container, sanity-csqtt-<id>, its image ours; a move into it is B13b's
+	cr_docker=0 cr_ctr=sanity-csqtt-$cr_id
+	[ "$(plan mode)" != docker ] || cr_docker=1
+	[ $cr_docker = 0 ] || [ $cr_move = 0 ] || run_result failed-cleaned "a move into Docker is not built yet" "update the app"
 	action_cleanup() {
 		# a move undone: its marker goes first, so a reboot from here on starts the stock install alone (B12 review F3)
 		if [ $cr_move = 1 ] && [ -f "$cr_state/moved" ]; then
@@ -809,6 +921,8 @@ action_create() {
 	cr_flags="--listen 0.0.0.0:$cr_udp --web-port $cr_web --config-dir $cr_state --instance sqc-$cr_id --iface $cr_iface"
 	cr_flags="$cr_flags --tun-addr ${cr_subnet%.0/24}.1/24 --instance-slot $cr_slot"
 	[ -z "$cr_bind" ] || cr_flags="$cr_flags --web-bind $cr_bind"
+	# (in a container /proc/sys is read-only: the host's values are this run's own host phase, as for a unit)
+	[ $cr_docker = 0 ] || cr_flags="$cr_flags --host-tuning off"
 	cr_open="$cr_udp/udp"
 	[ "$cr_bind" = 127.0.0.1 ] || cr_open="$cr_open $cr_web/tcp"
 
@@ -861,8 +975,8 @@ action_create() {
 		fi
 	fi
 	# a slot another instance of ours took since the plan (a second phone's create) would share its policy table and mark
-	for cr_u in /etc/systemd/system/sanity-csqtt-*.service; do
-		[ -f "$cr_u" ] || continue
+	for cr_u in /etc/systemd/system/sanity-csqtt-*.service /var/lib/sanityprotocol/csqtt/*/docker; do
+		[ -f "$cr_u" ] && [ "$cr_u" != "$cr_state/docker" ] || continue
 		if sed -n 's/^ExecStart=//p' "$cr_u" | grep -qE -- "--instance-slot $cr_slot( |\$)"; then
 			run_result failed-cleaned "slot $cr_slot is now ${cr_u##*/}'s" "check again: the app proposes another slot"
 		fi
@@ -891,6 +1005,18 @@ action_create() {
 	[ "${cr_nat:-}" != failed ] || cr_fail "this box's iptables cannot NAT (see the step's output)" "ask the hoster to enable NAT (iptable_nat, xt_TCPMSS)"
 	# the firewall the openings go through, known before the unit is written (a plain iptables box's are the unit's own)
 	cr_fw=$(host_fw_mode)
+	if [ $cr_docker = 1 ]; then
+		# Docker running and enabled, the root filesystem's image, ours from it, and its core asked to run inside it (M-129)
+		command -v docker >/dev/null 2>&1 || cr_fail "Docker is not installed here" "check again: systemd is offered"
+		dk_daemon
+		cr_rootfs=sanity-csqtt-rootfs:$(printf '%.8s' "$(plan rootfs_sha256)")
+		cr_image=sanity-csqtt:$cr_version-$(printf '%.8s' "$cr_sha")
+		dk_rootfs "$(plan rootfs_sha256)" "$(plan rootfs_url)"
+		dk_image "$cr_rootfs" "$cr_image" "$RUN_DIR/core"
+		# shellcheck disable=SC2086 # the flags are words of ours
+		cr_said=$(docker run --rm --network none "$cr_image" /usr/local/bin/csqtt-server $cr_flags --version 2>&1 | head -n 1)
+		[ "$cr_said" = "csqtt $cr_version CSQTT-WIRE-3" ] || cr_fail "the core does not run in its image: $cr_said" "check the box's architecture"
+	fi
 	run_safe_point
 
 	mkdir -p "${cr_state%/*}" || cr_fail "cannot make ${cr_state%/*}"
@@ -926,12 +1052,19 @@ action_create() {
 		cr_open_unit=$(inst_open_sh "$cr_id" "$cr_state" "$cr_open") || cr_fail "cannot write $cr_state/open.sh"
 	fi
 	# a move's unit starts only once the marker is there: until the switch, a boot starts the stock one
-	cr_cond=''
-	[ $cr_move = 0 ] || cr_cond="ConditionPathExists=$cr_state/moved"
-	mf_add unit "/etc/systemd/system/$cr_unit"
-	inst_unit_text "$cr_id" "$cr_root" "$cr_state" "$cr_flags" "$cr_open_unit" "$cr_cond" >"/etc/systemd/system/$cr_unit" ||
-		cr_fail "cannot write $cr_unit"
-	systemctl daemon-reload
+	if [ $cr_docker = 1 ]; then
+		# what the instance is in Docker, read by its removal, read-back, restart and journal: its container, its images, and
+		# its flags on an ExecStart= line, as a unit's (a kept store's flags are then read alike)
+		printf '# docker %s\n# image %s\n# rootfs %s\nExecStart=/usr/local/bin/csqtt-server %s\n' "$cr_ctr" "$cr_image" "$cr_rootfs" \
+			"$cr_flags" >"$cr_state/docker" || cr_fail "cannot write $cr_state/docker"
+	else
+		cr_cond=''
+		[ $cr_move = 0 ] || cr_cond="ConditionPathExists=$cr_state/moved"
+		mf_add unit "/etc/systemd/system/$cr_unit"
+		inst_unit_text "$cr_id" "$cr_root" "$cr_state" "$cr_flags" "$cr_open_unit" "$cr_cond" >"/etc/systemd/system/$cr_unit" ||
+			cr_fail "cannot write $cr_unit"
+		systemctl daemon-reload
+	fi
 	run_safe_point
 
 	# host: forwarding and the floors, then the openings (each recorded as made, undone by a failure from here on)
@@ -978,16 +1111,27 @@ action_create() {
 		sync
 		# the switch: one rename moves the box from theirs to ours
 		: >"$cr_state/moved.new" && mv -f "$cr_state/moved.new" "$cr_state/moved" || cr_fail "cannot switch"
-	else
+	elif [ $cr_docker = 0 ]; then
 		# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
 		run_cmd systemctl enable "$cr_unit" || cr_fail "$cr_unit could not be enabled"
 	fi
-	run_cmd systemctl start "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_start_lines "$cr_unit")"
+	if [ $cr_docker = 1 ]; then
+		mf_add container "$cr_ctr"
+		# shellcheck disable=SC2086 # the flags are words of ours
+		run_cmd dk_run "$cr_ctr" "$cr_image" "$cr_state" "$cr_fw" $cr_flags || cr_fail "Docker would not run $cr_ctr: $(dk_lines "$cr_ctr")"
+	else
+		run_cmd systemctl start "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_start_lines "$cr_unit")"
+	fi
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80
 	if [ $cr_move = 1 ]; then cr_secret=$(mv_secret); else cr_secret=$(sed -n 's/^secret_path=//p' "$RUN_DIR/secrets"); fi
-	cr_why=$(inst_verify "$cr_unit" "$cr_udp" "$cr_web" "$cr_iface" "$cr_secret")
+	if [ $cr_docker = 1 ]; then
+		cr_why=$(inst_verify "docker:$cr_ctr" "$cr_udp" "$cr_web" "$cr_iface" "$cr_secret")
+		[ -z "$cr_why" ] || cr_why="$cr_why: $(dk_lines "$cr_ctr")"
+	else
+		cr_why=$(inst_verify "$cr_unit" "$cr_udp" "$cr_web" "$cr_iface" "$cr_secret")
+	fi
 	[ -z "$cr_why" ] || cr_fail "$cr_why"
 	# a move ends in the plan's order: its unit without the condition, the stock install's objects, the marker last
 	[ $cr_move = 0 ] || mv_finish
@@ -1111,6 +1255,7 @@ action_update() {
 	case $up_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) run_result failed-cleaned "bad instance id $up_id" "update the app" ;; esac
 	up_root=/opt/sanityprotocol/csqtt/$up_id up_state=/var/lib/sanityprotocol/csqtt/$up_id up_unit=sanity-csqtt-$up_id.service
 	up_target=$up_root/releases/$up_version-$(printf '%.8s' "$up_sha") up_copy=$up_state/pre-update UP_PENDING=$up_state/update.pending
+	[ ! -f "$up_state/docker" ] || run_result failed-cleaned "an update of an instance in Docker is not built yet (P2 B13c)" "update the app"
 	[ -f "/etc/systemd/system/$up_unit" ] && [ -L "$up_root/current" ] || run_result failed-cleaned "sqc-$up_id is not installed here" "check again"
 	up_flags=$(sed -n "s|^ExecStart=$up_root/current/csqtt-server ||p" "/etc/systemd/system/$up_unit" | head -n 1)
 	up_udp=$(printf '%s\n' "$up_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
@@ -1198,6 +1343,10 @@ host_dropin_drop() {
 	for hd_u in /etc/systemd/system/sanity-csqtt-*.service /etc/systemd/system/csqtt.service /etc/systemd/system/csqtt25.service; do
 		[ -f "$hd_u" ] && return 0
 	done
+	# (an instance of ours in Docker counts while its container is there: a kept store's docker file alone does not, P2 B13a)
+	for hd_d in /var/lib/sanityprotocol/csqtt/*/docker; do
+		[ -f "$hd_d" ] && docker container inspect "$(sed -n 's/^# docker //p' "$hd_d")" >/dev/null 2>&1 && return 0
+	done
 	[ -f "$HOST_DROPIN" ] || return 0
 	! pgrep -x 'csqtt(25|-server|-swg)?' >/dev/null 2>&1 || return 0
 	sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1 \2/p' "$HOST_DROPIN" | while read -r hd_k hd_was; do
@@ -1246,13 +1395,26 @@ inst_found_host() {
 inst_take_down() {
 	MF=$in_state/manifest.json MF_ID=$1
 	# (a manifest lost by hand: its openings found by their names, so a later «Восстановить» opens them again, B11c review F2)
-	if [ -f "$MF" ]; then MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ')
+	# (Docker enabled or started by its create stays so: other containers may rely on it by now, P2 B13a)
+	if [ -f "$MF" ]; then MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ' | grep -v '^service-')
 	else MF_HOST=$(inst_found_host "$1"); fi
 	if [ -f "/etc/systemd/system/$in_unit" ]; then
 		run_cmd systemctl disable --now "$in_unit"
 		rm -f "/etc/systemd/system/$in_unit"
 		systemctl daemon-reload
 		systemctl reset-failed "$in_unit" >/dev/null 2>&1
+	fi
+	if [ -f "$in_state/docker" ]; then
+		# its container stopped gracefully (its server takes its own rules), then gone; our images once no container uses
+		# them (Docker refuses while one does: its own count), the instance's before the root filesystem's
+		in_ctr=$(sed -n 's/^# docker //p' "$in_state/docker")
+		if [ -n "$in_ctr" ] && docker container inspect "$in_ctr" >/dev/null 2>&1; then
+			run_cmd docker stop -t 15 "$in_ctr"
+			run_cmd docker rm -f "$in_ctr"
+		fi
+		for in_i in "$(sed -n 's/^# image //p' "$in_state/docker")" "$(sed -n 's/^# rootfs //p' "$in_state/docker")"; do
+			case $in_i in sanity-csqtt:* | sanity-csqtt-rootfs:*) docker image rm "$in_i" >/dev/null 2>&1 ;; esac
+		done
 	fi
 	inst_sweep "$1"
 	host_undo
@@ -1267,9 +1429,15 @@ action_remove() {
 	[ -e "$in_state" ] || [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rm_id is not here" "check again"
 	# its flags kept for «Восстановить» when the store stays, with the release it ran (a phone with an older core must not
 	# restore it: M-150, B11a review F6); nothing has changed if they cannot be
-	if [ "$rm_purge" != 1 ] && [ -d "$in_state" ] && [ -f "/etc/systemd/system/$in_unit" ]; then
-		{ printf '# release %s\n' "$(basename "$(readlink "$in_root/current" 2>/dev/null)" 2>/dev/null)"
-			cat "/etc/systemd/system/$in_unit"; } >"$in_state/unit.saved.new" && mv -f "$in_state/unit.saved.new" "$in_state/unit.saved" ||
+	# (a Docker instance's are its docker file's, its release its image's tag: P2 B13a)
+	rm_def='' rm_rel=''
+	if [ -f "/etc/systemd/system/$in_unit" ]; then
+		rm_def=/etc/systemd/system/$in_unit rm_rel=$(basename "$(readlink "$in_root/current" 2>/dev/null)" 2>/dev/null)
+	elif [ -f "$in_state/docker" ]; then
+		rm_def=$in_state/docker rm_rel=$(sed -n 's/^# image sanity-csqtt://p' "$in_state/docker")
+	fi
+	if [ "$rm_purge" != 1 ] && [ -d "$in_state" ] && [ -n "$rm_def" ]; then
+		{ printf '# release %s\n' "$rm_rel"; cat "$rm_def"; } >"$in_state/unit.saved.new" && mv -f "$in_state/unit.saved.new" "$in_state/unit.saved" ||
 			{ rm -f "$in_state/unit.saved.new"; run_result failed-cleaned "cannot keep sqc-$rm_id's flags in $in_state" "check the box's disk"; }
 	fi
 	run_phase stop 20
@@ -1296,6 +1464,7 @@ action_restore() {
 	rs_id=$(plan id) rs_version=$(plan version) rs_sha=$(plan core_sha)
 	inst_paths "$rs_id"
 	[ -f "$in_state/unit.saved" ] || run_result failed-cleaned "sqc-$rs_id has no kept store to restore" "check again"
+	! grep -q '^# docker ' "$in_state/unit.saved" || run_result failed-cleaned "a restore into Docker is not built yet (P2 B13c)" "update the app"
 	if [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ]; then
 		systemctl is-active --quiet "$in_unit" && run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
 		# a restore (or a removal) cut off before its end left part of it, its flags still kept: what it made goes first, by
@@ -1319,7 +1488,9 @@ action_restore() {
 		[ -z "$(ss -H -ltun "( sport = :$rs_p )" 2>/dev/null)" ] || run_result failed-cleaned "port $rs_p is held now" "free it, or remove the kept store"
 	done
 	! ip link show "$rs_iface" >/dev/null 2>&1 || run_result failed-cleaned "interface $rs_iface exists now" "check again"
-	for rs_u in /etc/systemd/system/sanity-csqtt-*.service; do
+	for rs_u in /etc/systemd/system/sanity-csqtt-*.service /var/lib/sanityprotocol/csqtt/*/docker; do
+		# (an instance of ours in Docker, or a kept store of one, by its docker file: P2 B13a)
+		[ "$rs_u" != "$in_state/docker" ] || continue
 		[ -f "$rs_u" ] && sed -n 's/^ExecStart=//p' "$rs_u" | grep -qE -- "--instance-slot $rs_slot( |\$)" &&
 			run_result failed-cleaned "slot $rs_slot is ${rs_u##*/}'s now" "remove the kept store, or that instance"
 	done
@@ -1386,15 +1557,27 @@ action_restore() {
 action_restart() {
 	rt_id=$(plan id)
 	inst_paths "$rt_id"
-	[ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rt_id is not installed here" "check again"
-	rt_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "/etc/systemd/system/$in_unit" | head -n 1)
-	run_phase switch 50
-	: >"$RUN_DIR/switching"
-	run_cmd systemctl enable "$in_unit"
-	run_cmd systemctl restart "$in_unit" ||
-		run_result failed-not-rolled-back "$in_unit did not start: $(inst_start_lines "$in_unit")" "read its journal («Журнал»)"
+	if [ -f "$in_state/docker" ] && [ ! -f "$in_state/unit.saved" ]; then
+		# a Docker instance's container (P2 B13a): restarted, or started when stopped
+		rt_ctr=$(sed -n 's/^# docker //p' "$in_state/docker") rt_check=docker:$(sed -n 's/^# docker //p' "$in_state/docker")
+		docker container inspect "$rt_ctr" >/dev/null 2>&1 || run_result failed-cleaned "sqc-$rt_id's container is gone" "check again"
+		rt_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$in_state/docker" | head -n 1)
+		run_phase switch 50
+		: >"$RUN_DIR/switching"
+		run_cmd docker restart -t 15 "$rt_ctr" ||
+			run_result failed-not-rolled-back "$rt_ctr did not start: $(dk_lines "$rt_ctr")" "read its journal («Журнал»)"
+	else
+		[ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rt_id is not installed here" "check again"
+		rt_check=$in_unit
+		rt_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "/etc/systemd/system/$in_unit" | head -n 1)
+		run_phase switch 50
+		: >"$RUN_DIR/switching"
+		run_cmd systemctl enable "$in_unit"
+		run_cmd systemctl restart "$in_unit" ||
+			run_result failed-not-rolled-back "$in_unit did not start: $(inst_start_lines "$in_unit")" "read its journal («Журнал»)"
+	fi
 	run_phase verify 80
-	rt_why=$(inst_verify "$in_unit" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')" \
+	rt_why=$(inst_verify "$rt_check" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')" \
 		"$(printf '%s\n' "$rt_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')" \
 		"$(inst_env "/var/lib/sanityprotocol/csqtt/$rt_id" CSQTT_WEB_SECRET_PATH)")
 	[ -z "$rt_why" ] || run_result failed-not-rolled-back "$rt_why" "read its journal («Журнал»)"
@@ -1622,7 +1805,12 @@ cmd_journal() {
 	case $1 in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) csqtt_emit JOURNAL "bad instance id"; csqtt_end; exit 2 ;; esac
 	jn_n=${2:-200}
 	case $jn_n in '' | *[!0-9]*) jn_n=200 ;; esac
-	jn_out=$(journalctl -u "sanity-csqtt-$1.service" -n "$jn_n" -o short-iso --no-pager 2>/dev/null)
+	if [ -f "/var/lib/sanityprotocol/csqtt/$1/docker" ]; then
+		# a Docker instance's: its container's log (P2 B13a)
+		jn_out=$(docker logs -t --tail "$jn_n" "$(sed -n 's/^# docker //p' "/var/lib/sanityprotocol/csqtt/$1/docker")" 2>&1)
+	else
+		jn_out=$(journalctl -u "sanity-csqtt-$1.service" -n "$jn_n" -o short-iso --no-pager 2>/dev/null)
+	fi
 	while IFS= read -r jn_l; do
 		[ -z "$jn_l" ] || csqtt_emit JOURNAL "$jn_l"
 	done <<EOF
@@ -1638,6 +1826,8 @@ cmd_readback() {
 	rb_id=$1
 	case $rb_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) csqtt_emit RB error "bad instance id"; csqtt_end; exit 2 ;; esac
 	rb_state=/var/lib/sanityprotocol/csqtt/$rb_id rb_unit=/etc/systemd/system/sanity-csqtt-$rb_id.service
+	# (a Docker instance's flags are its docker file's ExecStart= line, as a unit's: P2 B13a)
+	[ -f "$rb_unit" ] || [ ! -f "$rb_state/docker" ] || rb_unit=$rb_state/docker
 	rb_bin=/opt/sanityprotocol/csqtt/$rb_id/current/csqtt-server
 	if [ ! -f "$rb_unit" ] || [ ! -x "$rb_bin" ] || [ ! -f "$rb_state/env" ]; then
 		csqtt_emit RB error "sqc-$rb_id is not installed"

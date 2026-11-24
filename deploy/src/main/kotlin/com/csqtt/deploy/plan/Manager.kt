@@ -202,26 +202,28 @@ object Manager {
         val installed = Version.parse(install.build?.version.orEmpty())
         val update = !newer && installed != null && carried > installed
         val purge = Offer(Action.REMOVE_WITH_STORE, folded = true, confirm = "удалить ${install.name} вместе с базой")
+        // an instance of ours in Docker is run, connected to and removed; its update, repair and restore are B13c's
+        val inDocker = install.containers.isNotEmpty() || install.stores.any { it.keptDocker }
         // a newer instance (another phone's app) is run, connected to and removed, never rebuilt from our older core (F4)
         val offers = when (install.state) {
             InstallState.RUNNING -> listOfNotNull(
-                Offer(Action.CONNECT, recommended = !update),
-                if (update) Offer(Action.UPDATE, recommended = true) else null,
+                Offer(Action.CONNECT, recommended = !update || inDocker),
+                if (update && !inDocker) Offer(Action.UPDATE, recommended = true) else null,
                 Offer(Action.RESTART),
                 Offer(Action.REMOVE),
                 purge,
-                if (newer) null else Offer(Action.REINSTALL_CLEAN, folded = true, confirm = "удалить ${install.name} вместе с базой"),
+                if (newer || inDocker) null else Offer(Action.REINSTALL_CLEAN, folded = true, confirm = "удалить ${install.name} вместе с базой"),
             )
             InstallState.CRASH_LOOPING, InstallState.FAILED -> listOfNotNull(
-                if (newer) null else Offer(Action.REPAIR, recommended = true),
-                Offer(Action.JOURNAL, recommended = newer),
+                if (newer || inDocker) null else Offer(Action.REPAIR, recommended = true),
+                Offer(Action.JOURNAL, recommended = newer || inDocker),
                 Offer(Action.REMOVE),
                 purge,
             )
             InstallState.STOPPED, InstallState.DORMANT -> listOf(Offer(Action.START, recommended = true), Offer(Action.REMOVE), purge)
             // «Восстановить» needs the flags «Удалить» kept: a create cut off leaves a store without them («Продолжить» is its).
             // A store a newer build ran is another app's to restore: its removal is folded, never recommended (B11a verify N2)
-            InstallState.LEFTOVER -> (!newer && install.stores.any { it.keptFlags != null }).let { restorable ->
+            InstallState.LEFTOVER -> (!newer && !inDocker && install.stores.any { it.keptFlags != null }).let { restorable ->
                 listOfNotNull(
                     if (restorable) Offer(Action.RESTORE, recommended = true) else null,
                     Offer(Action.REMOVE_LEFTOVERS, recommended = !restorable && !newer, folded = newer,

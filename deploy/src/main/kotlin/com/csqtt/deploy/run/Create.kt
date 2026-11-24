@@ -79,7 +79,12 @@ object CreateRun {
 
     /** The run «Создать новый» starts: the proposal's facts in the plan, the passwords and the panel's path in its secrets. */
     /** [resumeOf]: the run a reboot or a kill cut off, which this one continues («Продолжить»): only what it left is undone. */
-    fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials, resumeOf: String? = null): RunPlan = RunPlan(
+    /**
+     * [rootfs]: Docker mode's root filesystem and where the box gets it (C3), required with [Proposal.docker]: the run fetches
+     * it from the URL, finds its image already there, or takes the client's copy uploaded with the run.
+     */
+    fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials, resumeOf: String? = null,
+        rootfs: RootfsChoice? = null): RunPlan = RunPlan(
         action = "create",
         values = linkedMapOf(
             "id" to p.id, "iface" to p.iface, "subnet" to p.subnet, "udp" to p.udpPort.toString(), "web" to p.webPort.toString(),
@@ -87,10 +92,17 @@ object CreateRun {
             "public_ip" to publicIp, "web_user" to credentials.webUser,
             // what the run re-checks before it makes anything (§1.4): still free, or it fails cleaned
             "ports" to "${p.udpPort} ${p.webPort}",
-        ) + if (resumeOf != null) mapOf("resume" to "1", "resume_of" to resumeOf) else emptyMap(),
+        ) + (if (resumeOf != null) mapOf("resume" to "1", "resume_of" to resumeOf) else emptyMap()) +
+            if (p.docker) dockerKeys(checkNotNull(rootfs) { "a Docker create needs its root filesystem" }) else emptyMap(),
         secrets = linkedMapOf("main_password" to credentials.mainPassword, "web_pass" to credentials.webPass,
             "secret_path" to credentials.secretPath),
         core = core.bytes,
+        rootfs = (rootfs?.source as? DockerMode.Source.Upload)?.bytes?.takeIf { p.docker },
+    )
+
+    private fun dockerKeys(rootfs: RootfsChoice): Map<String, String> = linkedMapOf(
+        "mode" to "docker", "rootfs_sha256" to rootfs.pin.sha256,
+        "rootfs_url" to ((rootfs.source as? DockerMode.Source.Fetch)?.url ?: ""),
     )
 }
 
@@ -130,7 +142,8 @@ fun proposalOfKeptPlan(text: String): Proposal? {
     val v = text.lines().filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
     if (v["action"] != "create") return null
     return Proposal(v["id"] ?: return null, v["iface"] ?: return null, v["subnet"] ?: return null, v["udp"]?.toIntOrNull() ?: return null,
-        v["web"]?.toIntOrNull() ?: return null, v["slot"]?.toIntOrNull() ?: return null, v["web_bind"]?.takeIf { it.isNotEmpty() })
+        v["web"]?.toIntOrNull() ?: return null, v["slot"]?.toIntOrNull() ?: return null, v["web_bind"]?.takeIf { it.isNotEmpty() },
+        docker = v["mode"] == "docker")
 }
 
 /** An instance of ours to another build, or the same one again («Починить»): P2-PLAN §3 B10. */

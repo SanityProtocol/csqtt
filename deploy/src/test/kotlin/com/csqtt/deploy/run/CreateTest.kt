@@ -83,8 +83,9 @@ class CreateTest {
         // and the create action reads only keys the plan has
         val create = script.substringAfter("action_create() {").substringBefore("\n}\n")
         val used = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(create).map { it.groupValues[1] }.toSet()
-        // (resume only on a continuation: «Продолжить», B8 review F1; the move's keys only on a move, B12)
-        for (key in used - setOf("resume", "resume_of", "move_role", "move_unit", "move_store")) {
+        // (resume only on a continuation: «Продолжить», B8 review F1; the move's keys only on a move, B12; Docker's only in its
+        // mode, B13a: DockerTest)
+        for (key in used - setOf("resume", "resume_of", "move_role", "move_unit", "move_store", "mode", "rootfs_sha256", "rootfs_url")) {
             assertTrue("create reads $key", "\n$key=" in "\n$plan")
         }
     }
@@ -135,7 +136,7 @@ class CreateTest {
         val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
         val reads = listOf("action_create", "mv_finish", "mv_settle").flatMap { f ->
             Regex("\\$\\(plan ([a-z_]+)\\)").findAll(script.substringAfter("$f() {").substringBefore("\n}\n")).map { it.groupValues[1] }.toList()
-        }.toSet() - setOf("resume", "resume_of")
+        }.toSet() - setOf("resume", "resume_of", "mode", "rootfs_sha256", "rootfs_url")
         for (key in reads) assertTrue("the move reads $key", key in v)
         // a non-stock installation has no move
         val ours = fixture("handmade-systemd-noble")

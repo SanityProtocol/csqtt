@@ -390,7 +390,9 @@ object Classifier {
         // (a stock unit file counts, running or not, by the test the run's host_dropin_drop makes: slim and the side tool write
         // no sysctl file of their own and refuse to start with forwarding off, B18; MRTT's beta runs under the same unit name;
         // B11c review F3, verify N1)
-        if (inv.files.any { it.path == dropIn } && installs.none { it.owner == Owner.OURS && it.units.isNotEmpty() } &&
+        // (an instance of ours counts by its unit or its container: P2 B13a)
+        if (inv.files.any { it.path == dropIn } &&
+            installs.none { it.owner == Owner.OURS && (it.units.isNotEmpty() || it.containers.isNotEmpty()) } &&
             inv.files.none { it.path == "/etc/systemd/system/csqtt.service" || it.path == "/etc/systemd/system/csqtt25.service" } &&
             inv.procs.none { it.comm in setOf("csqtt", "csqtt25", "csqtt-server", "csqtt-swg") }) {
             problems += BoxProblem("S1", "our sysctl drop-in is left with no instance of ours: it turns forwarding on at every boot", dropIn)

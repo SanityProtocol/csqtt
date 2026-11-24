@@ -1,0 +1,6 @@
+# Docker mode's root filesystem per architecture (P2 B13a): ci/build-rootfs.sh's output, reproducible; CI builds the three
+# and fails on a line that does not match. <arch> <sha256 of csqtt-rootfs-<arch>.tar.gz> <bytes>
+alpine 3.24.4
+amd64 163ffb4af70d768fc9be2d57d99a889aa206d3a00a115dc1d5eef66aa7e859d9 4834505
+arm64 9d28fce278158675ed9e5beb59b7b843bc98a299280062c3e66d6ed185e8c4f8 5323591
+armv7 7ec601c6e79b46db5b3e2627be7f63cb32ca89575d60febb087909c85aed9b8c 4212889

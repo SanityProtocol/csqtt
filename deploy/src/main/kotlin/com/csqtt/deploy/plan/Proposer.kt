@@ -15,7 +15,9 @@ import kotlin.random.Random
 /** A new instance: id (6 hex), its instance name `sqc-<id>`, interface, /24, ports, local-proxy slot, web bind. */
 data class Proposal(val id: String, val iface: String, val subnet: String, val udpPort: Int, val webPort: Int, val slot: Int,
     /** null: every address; "127.0.0.1": behind the user's own reverse proxy (D22). */
-    val webBind: String? = null) {
+    val webBind: String? = null,
+    /** Docker mode (D4; P2 B13a): the instance a container of our own image, not a systemd unit. */
+    val docker: Boolean = false) {
     val instance: String get() = "sqc-$id"
     val unit: String get() = "sanity-csqtt-$id.service"
 }

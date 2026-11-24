@@ -66,11 +66,14 @@ private const val USAGE = """usage: deploy-cli <command>
   attach <target>         follow the run <target>.state names (or say what state it holds)
   cancel <target>         ask that run to stop at its next safe point
   runs <target>           the runs the box keeps: id, live, result (none and not live: interrupted)
-  create <target> [id=… iface=… subnet=… udp=… web=… slot=… bind=127.0.0.1 | resume=<run id>]   «Создать новый» (B8): inspect as root,
+  create <target> [id=… iface=… subnet=… udp=… web=… slot=… bind=127.0.0.1 mode=docker | resume=<run id>]   «Создать новый» (B8): inspect as root,
                           propose a new instance that collides with nothing (the words override the proposal), run it,
                           read the connection back and check it from here: a DTLS ClientHello on its UDP port and the
                           panel over HTTPS, its certificate pinned. The core is the target's core=<file>, core_version=…
                           resume=<run id>: «Продолжить» a create a reboot or a kill cut off, from the plan its run kept
+                          mode=docker (B13a): the instance a container of our own image; its root filesystem the box
+                          has, fetches (the release, or the target's rootfs_url=) or is given (the target's rootfs=<file>);
+                          rootfs_source=fetch|upload forces one
   readback <target> <id>  «Подключиться» to an instance of ours: its connection read back, then the same outside check
   remove <target> <id> [purge]   an instance of ours removed (B11): its store kept for «Восстановить», or with purge, gone
   restore <target> <id>   «Восстановить» a kept store with the target's core: its clients come back
@@ -450,17 +453,20 @@ private fun rootOf(session: SshSession, p: Properties): RootRunner {
 private fun create(session: SshSession, p: Properties, target: File, words: List<String>): Int {
     val edits = words.associate { it.substringBefore('=') to it.substringAfter('=', "") }
     // every word known and every number a number (B8 review F7: a typo must not fall back to the proposal)
-    val unknown = edits.keys - setOf("id", "iface", "subnet", "udp", "web", "slot", "bind", "resume")
+    val unknown = edits.keys - setOf("id", "iface", "subnet", "udp", "web", "slot", "bind", "resume", "mode")
     val notNumbers = listOf("udp", "web", "slot").filter { it in edits && edits.getValue(it).toIntOrNull() == null }
-    if (unknown.isNotEmpty() || notNumbers.isNotEmpty()) {
-        println("unknown words: ${unknown.joinToString()}; not numbers: ${notNumbers.joinToString()}")
+    if (unknown.isNotEmpty() || notNumbers.isNotEmpty() || edits["mode"].let { it != null && it !in setOf("systemd", "docker") }) {
+        println("unknown words: ${unknown.joinToString()}; not numbers: ${notNumbers.joinToString()}; mode: systemd or docker")
         return 2
     }
     val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
     val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
     val remote = session.asRemote()
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
-    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    // Docker mode (P2 B13a): the inspection also checks the box reaches where the root filesystem is published (C3)
+    val docker = edits["mode"] == "docker"
+    val reach = if (docker) listOf(com.csqtt.deploy.run.Rootfs.HOST) else emptyList()
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), reach, deadlineMs = 60_000)
     val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
     val preflight = Preflight.from(report.lines)
     val verdicts = PreflightRules.verdicts(preflight, System.currentTimeMillis() / 1000)
@@ -481,7 +487,8 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
         val proposal = runner.keptPlan(resumeOf)?.let { proposalOfKeptPlan(it) }
             ?: return 2.also { println("no create plan kept for run $resumeOf on the box") }
         println("will: «Продолжить» ${proposal.instance} from run $resumeOf: what it left goes, the create runs again")
-        return runCreate(remote, root, runner, target, proposal, preflight, core, p, resumeOf = resumeOf)
+        val rootfs = if (proposal.docker) rootfsChoice(preflight, inventory, core, p) ?: return 2 else null
+        return runCreate(remote, root, runner, target, proposal, preflight, core, p, resumeOf = resumeOf, rootfs = rootfs)
     }
     val proposed = try {
         Proposer.propose(classification, inventory)
@@ -497,23 +504,54 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
         webPort = edits["web"]?.toIntOrNull() ?: proposed.webPort,
         slot = edits["slot"]?.toIntOrNull() ?: proposed.slot,
         webBind = if ("bind" in edits) edits["bind"]?.ifEmpty { null } else proposed.webBind,
+        docker = docker,
     )
     val problems = Proposer.problems(proposal, classification, inventory)
     if (problems.isNotEmpty()) {
         problems.forEach { println("problem ${it.field}: ${it.reason}") }
         return 2
     }
+    val rootfs = if (docker) {
+        com.csqtt.deploy.run.DockerMode.refusal(preflight)?.let { return 2.also { _ -> println("refused: Docker: $it; systemd is offered") } }
+        rootfsChoice(preflight, inventory, core, p) ?: return 2
+    } else null
     val plan = Proposer.createPlan(proposal, classification)
-    (plan.will + CreateRun.hostChanges(preflight, proposal)).forEach { println("will: $it") }
+    val dockerWill = if (rootfs != null) com.csqtt.deploy.run.DockerMode.hostChanges(preflight) + when (val source = rootfs.source) {
+        is com.csqtt.deploy.run.DockerMode.Source.Present -> "Файловая система образа уже на сервере"
+        is com.csqtt.deploy.run.DockerMode.Source.Fetch -> "Сервер скачает файловую систему образа: ${source.url}"
+        is com.csqtt.deploy.run.DockerMode.Source.Upload -> "Файловая система образа уйдёт на сервер отсюда (${rootfs.pin.bytes / 1024} КБ)"
+    } else emptyList()
+    (plan.will + CreateRun.hostChanges(preflight, proposal) + dockerWill).forEach { println("will: $it") }
     plan.unchanged.forEach { println("unchanged: $it") }
-    return runCreate(remote, root, runner, target, proposal, preflight, core, p, resumeOf = null)
+    return runCreate(remote, root, runner, target, proposal, preflight, core, p, resumeOf = null, rootfs = rootfs)
+}
+
+/**
+ * Docker mode's root filesystem for this box (C3; P2 B13a): its architecture's pin, and where the box gets it. The target may
+ * name a local copy (rootfs=<file>), another URL (rootfs_url=) and force a source (rootfs_source=fetch|upload: the zoo's guests
+ * reach no release); null, said why, when the box can neither fetch it nor be given it.
+ */
+private fun rootfsChoice(preflight: Preflight, inventory: Inventory, core: Core, p: Properties): com.csqtt.deploy.run.RootfsChoice? {
+    val machine = preflight.facts("arch")["machine"]
+    val pin = com.csqtt.deploy.run.Rootfs.archOf(machine)?.let { com.csqtt.deploy.run.Rootfs.pin(it) }
+        ?: return null.also { println("refused: Docker: no root filesystem for $machine") }
+    val url = p.prop("rootfs_url") ?: com.csqtt.deploy.run.Rootfs.url(core.version, pin)
+    val copy = p.prop("rootfs")?.let { File(it).readBytes() }
+    val forced = p.prop("rootfs_source")
+    val source = when {
+        forced == "fetch" && inventory.images.none { it.ref == pin.tag } -> com.csqtt.deploy.run.DockerMode.Source.Fetch(url)
+        else -> com.csqtt.deploy.run.DockerMode.source(pin, url, preflight, inventory, copy, fetch = forced != "upload")
+    }
+    return source?.let { com.csqtt.deploy.run.RootfsChoice(pin, it) }
+        ?: null.also { println("refused: Docker: the box cannot fetch its root filesystem and the target names no copy of it (rootfs=<file>)") }
 }
 
 private fun runCreate(remote: com.csqtt.deploy.ssh.Remote, root: RootRunner, runner: Runner, target: File,
-    proposal: com.csqtt.deploy.plan.Proposal, preflight: Preflight, core: Core, p: Properties, resumeOf: String?): Int {
+    proposal: com.csqtt.deploy.plan.Proposal, preflight: Preflight, core: Core, p: Properties, resumeOf: String?,
+    rootfs: com.csqtt.deploy.run.RootfsChoice? = null): Int {
     val credentials = Credentials.generate()
     val sshHost = p.prop("host").orEmpty()
-    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials, resumeOf)
+    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials, resumeOf, rootfs)
     val coordinator = coordinator(target)
     val runId = Runner.newRunId()
     val before = coordinator.state
