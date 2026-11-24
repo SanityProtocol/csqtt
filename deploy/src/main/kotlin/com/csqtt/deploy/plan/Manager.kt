@@ -260,8 +260,12 @@ object Manager {
         // the server goes, the store stays (§6.10), typed: it is someone else's install
         val remove = Offer(Action.REMOVE, folded = true, confirm = confirm)
         val blocking = install.broken.filterNot { it in MOVABLE }
+        val domain = install.stores.firstOrNull { it.domain.isNotEmpty() }?.domain
         val noMove = when {
             !database -> "База клиентов не найдена: переносить нечего"
+            // PR3's domain mode (never released, fixtures only: C5): ours certifies an IP alone (domains are M-136, later), so a
+            // move would drop its domain's certificate and renewal: named, never offered (P2 B14)
+            domain != null -> "Панель на домене $domain: переезд её сертификат по домену не сохранит, он пока не поддерживается"
             blocking.isNotEmpty() -> "Сначала нужно разобраться: ${blocking.joinToString()}"
             classification.installations.count { it.owner == Owner.OURS } >= MAX_OURS -> "На сервере уже $MAX_OURS наших экземпляров"
             // the instance the move becomes must be possible (no free /24 under a 10/8 route…): named, not offered (N3)

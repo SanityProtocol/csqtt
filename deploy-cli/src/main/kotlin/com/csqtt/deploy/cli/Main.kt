@@ -90,6 +90,9 @@ private const val USAGE = """usage: deploy-cli <command>
                           checked from here. resume=<run id>: «Продолжить» a move a reboot or a kill cut off, with its kept plan
   update <target> <id>    an instance of ours to the target's core (B10): stage, switch, verify, rolled back on a failure;
                           then its connection read back (the same passwords and pin) and checked from here
+  le <target> <id>        «Сертификат» (B14): the panel's certificate from Let's Encrypt (renewed by our timer), then the
+                          connection read back; run by itself after a create, a move or a restore unless the target says le=0.
+                          The target's acme_url=, acme_ca=<file> and pip_find_links= point it elsewhere (the zoo's Pebble)
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
       · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed) · 7 a run failed (its result
       printed) · 8 another run holds the box · 9 the run was interrupted · 11 no such run on the box (it never started,
@@ -131,6 +134,10 @@ private fun dispatch(args: Array<String>): Int {
         args.size in 3..4 && args[0] == "journal" -> withSession(File(args[1])) { session, p ->
             com.csqtt.deploy.run.Maintenance.journal(rootOf(session, p), args[2], args.getOrNull(3)?.toIntOrNull() ?: 200).forEach { println(it) }
             0
+        }
+        args.size == 3 && args[0] == "le" -> withSession(File(args[1])) { session, p ->
+            val root = rootOf(session, p)
+            runLe(root, Runner(session.asRemote(), root), File(args[1]), args[2], p).let { if (it != 0) it else readBack(root, args[2], p.prop("host").orEmpty(), null) }
         }
         args.size == 3 && args[0] == "readback" ->
             withSession(File(args[1])) { session, p -> readBack(rootOf(session, p), args[2], p.prop("host").orEmpty(), null) }
@@ -570,7 +577,44 @@ private fun runCreate(remote: com.csqtt.deploy.ssh.Remote, root: RootRunner, run
     }
     val code = follow(runner, coordinator, runId, before)
     if (code != 0) return code
-    return readBack(root, proposal.id, sshHost, credentials)
+    val le = if (p.prop("le") == "0") 0 else runLe(root, runner, target, proposal.id, p)
+    return readBack(root, proposal.id, sshHost, credentials).let { if (it != 0) it else le }
+}
+
+/** A plan started and followed to its end, its state kept in <target>.state (the start's outcomes said as every verb says them). */
+private fun startAndFollow(runner: Runner, target: File, plan: RunPlan): Int {
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    return when (val outcome = runner.start(runId, plan)) {
+        is StartOutcome.Started -> follow(runner, coordinator, runId, before)
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            7
+        }
+    }
+}
+
+/**
+ * «Сертификат» (P2 B14): the box inspected again (its :80 and Python as they are now), its «Будет», the run. It ends ok when the
+ * server keeps its own certificate, the cause in its result; the target's acme_url, acme_ca and pip_find_links for the zoo.
+ */
+private fun runLe(root: RootRunner, runner: Runner, target: File, id: String, p: Properties): Int {
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    val preflight = Preflight.from(report.lines)
+    val publicIp = CreateRun.publicAddress(preflight, p.prop("host").orEmpty())
+    com.csqtt.deploy.run.LeRun.will(preflight, publicIp).forEach { println("will: $it") }
+    val acme = com.csqtt.deploy.run.LeRun.Acme(p.prop("acme_url").orEmpty(), p.prop("acme_ca")?.let { File(it).readBytes() },
+        p.prop("pip_find_links").orEmpty())
+    return startAndFollow(runner, target, com.csqtt.deploy.run.LeRun.plan(id, publicIp, acme))
 }
 
 /** The connection read back (never printed: its passwords are compared with what was set, if anything was), then the check. */
@@ -585,6 +629,7 @@ private fun readBack(root: RootRunner, id: String, sshHost: String, set: Credent
     val masked = if (connection.secretPath.isEmpty()) connection.panelUrl else connection.panelUrl.replace(connection.panelPath, "/***/")
     println("connection host=${connection.host} udp=${connection.udpPort} web=${connection.webPort} panel=$masked " +
         "login=${connection.webUser} cert=${connection.certSha256 ?: "-"} main_password_sha8=${sha8(connection.mainPassword)}")
+    println("certificate le=${connection.certLe ?: "-"} until=${connection.certNotAfter ?: "-"} issuer=${connection.certIssuer ?: "-"}")
     if (set != null) {
         println("readback main_password " + if (connection.mainPassword == set.mainPassword) "matches the one set" else "DIFFERS from the one set")
         println("readback panel_password " + if (connection.webPass == set.webPass) "matches the one set" else "DIFFERS from the one set")
@@ -714,7 +759,9 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
     }
     val code = follow(runner, coordinator, runId, before)
     if (code != 0 || verb == "remove" || verb == "purge" || verb == "rebuild-manifest") return code
-    return readBack(root, id, p.prop("host").orEmpty(), null)
+    // (a restored store gets its certificate again: a kept store dropped its Let's Encrypt reference, P2 B14)
+    val le = if (verb != "restore" || p.prop("le") == "0") 0 else runLe(root, runner, target, id, p)
+    return readBack(root, id, p.prop("host").orEmpty(), null).let { if (it != 0) it else le }
 }
 
 /** «Исправить» a box problem (P2 B11c): inspected, the problem with that code found, its repair run. */
@@ -883,5 +930,7 @@ private fun move(session: SshSession, p: Properties, target: File, name: String,
     }
     val code = follow(runner, coordinator, runId, before)
     if (code != 0) return code
-    return readBack(root, id, sshHost, null)
+    // (ours gets its own certificate: the stock one copied with the store serves until then, P2 B14)
+    val le = if (p.prop("le") == "0") 0 else runLe(root, runner, target, id, p)
+    return readBack(root, id, sshHost, null).let { if (it != 0) it else le }
 }

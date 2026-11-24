@@ -288,7 +288,9 @@ object BoxRepair {
 
 /** What the app needs to connect to an instance and to open its panel; [certSha256] pins the panel (null: not readable). */
 class Connection(val host: String, val udpPort: Int, val webPort: Int, val webBind: String?, val mainPassword: String,
-    val webUser: String, val webPass: String, val secretPath: String, val certSha256: String?) {
+    val webUser: String, val webPass: String, val secretPath: String, val certSha256: String?,
+    /** Who issued the panel's certificate and until when, and the Let's Encrypt lineage it follows (P2 B14): null when unknown. */
+    val certIssuer: String? = null, val certNotAfter: String? = null, val certLe: String? = null) {
     val panelPath: String get() = "/" + secretPath.trim('/').let { if (it.isEmpty()) "" else "$it/" }
     val panelUrl: String get() = "https://${if (':' in host) "[$host]" else host}:$webPort$panelPath"
 
@@ -323,6 +325,9 @@ object ReadBack {
             webPass = need("web_pass"),
             secretPath = f["secret_path"].orEmpty(),
             certSha256 = f["cert_sha256"]?.takeIf { it.length == 64 },
+            certIssuer = f["cert_issuer"]?.takeIf { it.isNotEmpty() },
+            certNotAfter = f["cert_not_after"]?.takeIf { it.isNotEmpty() },
+            certLe = f["cert_le"]?.takeIf { it.isNotEmpty() },
         )
     }
 }

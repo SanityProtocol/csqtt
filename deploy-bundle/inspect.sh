@@ -320,6 +320,24 @@ docker_live() {
 		[ "$(systemctl is-active snap.docker.dockerd 2>/dev/null)" = active ]
 }
 
+# what a Let's Encrypt certificate needs (P2 B14): python3 and its version (certbot 5 needs 3.10), venv importable (else
+# python3-venv is installed), our certbot's version in its venv, our renewal timer's state, and our lineages with their end
+pre_le() {
+	ple_py='' ple_venv=0 ple_certbot='' ple_timer='' ple_lineages=''
+	if have python3; then
+		ple_py=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
+		! python3 -c 'import ensurepip, venv' 2>/dev/null || ple_venv=1
+	fi
+	[ ! -x /opt/sanityprotocol/certbot/bin/certbot ] || ple_certbot=$(tmo /opt/sanityprotocol/certbot/bin/certbot --version 2>&1 | sed -n 's/^certbot //p')
+	! have systemctl || ple_timer=$(systemctl is-active sanity-csqtt-le.timer 2>/dev/null || true)
+	for ple_c in /var/lib/sanityprotocol/letsencrypt/live/*/cert.pem; do
+		[ -f "$ple_c" ] && have openssl || continue
+		ple_n=${ple_c%/cert.pem}
+		ple_lineages="$ple_lineages${ple_lineages:+,}${ple_n##*/}:$(openssl x509 -noout -enddate -in "$ple_c" 2>/dev/null | sed 's/^notAfter=//' | tr ' ' '_')"
+	done
+	csqtt_emit PRE le "python=$ple_py" "venv=$ple_venv" "certbot=$ple_certbot" "timer=$ple_timer" "lineages=$ple_lineages"
+}
+
 pre_docker() {
 	pdk_bin='' pdk_version='' pdk_flavour='' pdk_enabled='' pdk_active='' pdk_rootless=0
 	if have docker; then
@@ -785,5 +803,6 @@ pre_clock
 pre_reach "$@"
 pre_rundir
 pre_docker
+pre_le
 inv_all
 csqtt_end

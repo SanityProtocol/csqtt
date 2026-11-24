@@ -1662,6 +1662,8 @@ inst_take_down() {
 	host_dropin_drop
 	rm -rf "$in_root"
 	rm -f "$in_state/open.sh"
+	# (its Let's Encrypt reference: with the last one, our timer, venv and ACME state, P2 B14)
+	le_drop "$in_state"
 }
 
 action_remove() {
@@ -2068,6 +2070,206 @@ action_remove_foreign() {
 	run_result ok "" "the stock $fr_role install is gone; its store stays in ${fr_store:-its place}"
 }
 
+# ── le: the panel's certificate from Let's Encrypt (P2 B14; P2-PLAN B14 "as designed"; M-119, M-135) ───────────────────────
+# An IP certificate on the short-lived profile for an instance's panel, in a run of its own after a create, a move or a restore
+# ended ok (a cut here never undoes a verified instance), and again at will. Our ACME state is ours alone: the distro's
+# certbot.timer renews /etc/letsencrypt with its own config and hooks, and a stock removal takes csqtt-ip-* there. One lineage
+# per IP for all our instances on it; our timer renews it, and the server reloads it on SIGUSR1: no client is cut.
+LE_DIR=/var/lib/sanityprotocol/letsencrypt
+LE_VENV=/opt/sanityprotocol/certbot
+LE_HOOK=$LE_VENV/le-hook.sh
+LE_CERTBOT=5.10.0
+
+# the hook our issuance and our timer share (it runs with no run.sh beside it): TCP 80 opened for a challenge where the box's
+# INPUT is closed and closed again after (only what was closed), a lineage copied into every live instance that uses it with its
+# server told to reload, and the renewal itself, isolated from the host's certbot setup (M-135)
+le_hook_text() {
+	cat <<'EOF'
+#!/bin/sh
+# SanityProtocol csqtt (P2 B14): our Let's Encrypt certificates, renewed by sanity-csqtt-le.timer
+LE_DIR=${LE_DIR:-/var/lib/sanityprotocol/letsencrypt}
+SQC_DIR=${SQC_DIR:-/var/lib/sanityprotocol/csqtt}
+[ ! -f "$LE_DIR/acme-ca.pem" ] || export REQUESTS_CA_BUNDLE="$LE_DIR/acme-ca.pem"
+fw() {
+	if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -n 1 | grep -q 'Status: active'; then echo ufw
+	elif [ "$(systemctl is-active firewalld 2>/dev/null)" = active ]; then echo firewalld
+	elif iptables -w 5 -S INPUT 2>/dev/null | awk '$1 == "-P" && ($3 == "DROP" || $3 == "REJECT") {d = 1}
+		$1 == "-A" && $3 == "-j" && ($4 == "DROP" || $4 == "REJECT") {d = 1} END {exit !d}'; then echo iptables
+	else echo none; fi
+}
+case ${1:-} in
+open)
+	[ ! -f "$LE_DIR/port80" ] || exit 0
+	case $(fw) in
+	ufw) ufw status 2>/dev/null | grep -qE '^80/tcp[[:space:]]+ALLOW' ||
+		{ ufw allow 80/tcp comment sanity-csqtt-le >/dev/null && echo ufw >"$LE_DIR/port80"; } ;;
+	firewalld) z=$(firewall-cmd --get-default-zone 2>/dev/null)
+		firewall-cmd -q --zone="$z" --query-port=80/tcp 2>/dev/null ||
+			{ firewall-cmd -q --zone="$z" --add-port=80/tcp && echo "firewalld $z" >"$LE_DIR/port80"; } ;;
+	iptables) iptables -w 5 -I INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT && echo iptables >"$LE_DIR/port80" ;;
+	esac
+	exit 0 ;;
+close)
+	[ -f "$LE_DIR/port80" ] || exit 0
+	read -r m z <"$LE_DIR/port80"
+	case $m in
+	ufw) ufw delete allow 80/tcp >/dev/null 2>&1 ;;
+	firewalld) firewall-cmd -q --zone="$z" --remove-port=80/tcp 2>/dev/null ;;
+	iptables) while iptables -w 5 -D INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT 2>/dev/null; do :; done ;;
+	esac
+	rm -f "$LE_DIR/port80"
+	exit 0 ;;
+deploy)
+	n=${RENEWED_LINEAGE:-${2:-}}
+	n=${n##*/}
+	[ -n "$n" ] && [ -s "$LE_DIR/live/$n/fullchain.pem" ] && [ -s "$LE_DIR/live/$n/privkey.pem" ] || exit 1
+	for d in "$SQC_DIR"/*/; do
+		d=${d%/}
+		[ "$(cat "$d/le" 2>/dev/null)" = "$n" ] && [ ! -f "$d/unit.saved" ] || continue
+		{ cp "$LE_DIR/live/$n/fullchain.pem" "$d/web_cert.pem.new" && (umask 077 && cat "$LE_DIR/live/$n/privkey.pem" >"$d/web_key.pem.new") &&
+			mv -f "$d/web_key.pem.new" "$d/web_key.pem" && mv -f "$d/web_cert.pem.new" "$d/web_cert.pem"; } ||
+			{ logger -t sanity-csqtt-le "cannot install $n into $d"; continue; }
+		i=${d##*/}
+		if [ -f "$d/docker" ]; then docker kill -s USR1 "sanity-csqtt-$i" >/dev/null 2>&1
+		else systemctl kill -s USR1 --kill-whom=main "sanity-csqtt-$i.service" >/dev/null 2>&1; fi
+	done
+	exit 0 ;;
+renew)
+	exec /opt/sanityprotocol/certbot/bin/certbot --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
+		--work-dir "$LE_DIR/work" --logs-dir "$LE_DIR/logs" renew --non-interactive \
+		--pre-hook "$0 open" --post-hook "$0 close" --deploy-hook "$0 deploy" ;;
+esac
+exit 2
+EOF
+}
+
+# le_venv: our certbot in its venv (one per box), pinned when it is made; one there that works with --ip-address stays (the venv
+# holds the renewal's hook too: made again only when it does not work, never under the other instances' renewals); its cause
+# on stdout when it cannot be had
+le_venv() {
+	[ ! -x "$LE_VENV/bin/certbot" ] || ! "$LE_VENV/bin/certbot" certonly --help all 2>&1 | grep -q -- --ip-address || return 0
+	command -v python3 >/dev/null 2>&1 || { echo "python3 is not installed"; return 1; }
+	python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null ||
+		{ echo "$(python3 -V 2>&1) is older than 3.10, which certbot $LE_CERTBOT needs"; return 1; }
+	if ! python3 -c 'import ensurepip, venv' 2>/dev/null; then
+		# python3-venv by the package manager, kept as B9's iptables is (a package installed stays)
+		if command -v apt-get >/dev/null 2>&1; then
+			host_lock_wait || { echo "the package lock stays held ($(apt_lock_holder))"; return 1; }
+			run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3-venv </dev/null ||
+				{ run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q </dev/null &&
+					run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3-venv </dev/null; }
+		elif command -v dnf >/dev/null 2>&1; then
+			run_cmd dnf install -y -q python3 </dev/null
+		fi
+		python3 -c 'import ensurepip, venv' 2>/dev/null || { echo "python3-venv could not be installed"; return 1; }
+	fi
+	# (a venv is not relocatable: made in its place, removed whole when it fails)
+	rm -rf "$LE_VENV"
+	python3 -m venv "$LE_VENV" >"$RUN_DIR/pip.log" 2>&1 || { rm -rf "$LE_VENV"; echo "python3 could not make a venv"; return 1; }
+	le_src=''
+	[ -z "$(plan pip_find_links)" ] || le_src="--no-index --find-links $(plan pip_find_links)"
+	# shellcheck disable=SC2086 # the source's words
+	if ! timeout 600 "$LE_VENV/bin/pip" install --disable-pip-version-check --no-cache-dir --timeout 60 $le_src \
+		"certbot==$LE_CERTBOT" >>"$RUN_DIR/pip.log" 2>&1; then
+		echo "certbot $LE_CERTBOT could not be installed: $(tail -n 2 "$RUN_DIR/pip.log" | tr '\n' ' ' | cut -c1-240)"
+		rm -rf "$LE_VENV"
+		return 1
+	fi
+	"$LE_VENV/bin/certbot" certonly --help all 2>&1 | grep -q -- --ip-address ||
+		{ rm -rf "$LE_VENV"; echo "certbot $LE_CERTBOT has no --ip-address"; return 1; }
+}
+
+# le_drop <state dir>: the instance's lineage reference gone; with the last live one our timer, its units, the venv and the
+# ACME state go (as the drop-in's rule: nothing of ours stays behind for nobody). A kept store drops it too: «Восстановить»
+# gets its certificate again
+le_drop() {
+	rm -f "$1/le"
+	for ld_f in /var/lib/sanityprotocol/csqtt/*/le; do [ -f "$ld_f" ] && return 0; done
+	[ -e /etc/systemd/system/sanity-csqtt-le.timer ] || [ -e "$LE_VENV" ] || [ -e "$LE_DIR" ] || return 0
+	systemctl disable --now sanity-csqtt-le.timer >/dev/null 2>&1
+	systemctl stop sanity-csqtt-le.service >/dev/null 2>&1
+	[ ! -x "$LE_HOOK" ] || "$LE_HOOK" close
+	rm -f /etc/systemd/system/sanity-csqtt-le.timer /etc/systemd/system/sanity-csqtt-le.service
+	systemctl daemon-reload
+	systemctl reset-failed sanity-csqtt-le.service sanity-csqtt-le.timer >/dev/null 2>&1
+	rm -rf "$LE_VENV" "$LE_DIR"
+	return 0
+}
+
+action_le() {
+	le_id=$(plan id) le_ip=$(plan public_ip) le_url=$(plan acme_url)
+	inst_paths "$le_id"
+	le_def=/etc/systemd/system/$in_unit
+	[ -f "$le_def" ] || le_def=$in_state/docker
+	[ -f "$le_def" ] && [ -f "$in_state/env" ] && [ ! -f "$in_state/unit.saved" ] ||
+		run_result failed-cleaned "sqc-$le_id is not installed here" "check again"
+	le_keep="the panel keeps its own certificate"
+	# a panel bound to loopback is reached through the tunnel alone: no certificate to get for it
+	! grep -q -- '--web-bind 127\.0\.0\.1' "$le_def" || run_result ok "$le_keep: the panel listens on 127.0.0.1 only" ""
+	case $le_ip in
+	'' | *[!0-9.]* | *..* | .* | *.) run_result ok "$le_keep: no public IPv4 address to certify" "" ;;
+	10.* | 127.* | 169.254.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].* | 100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].*)
+		# (a private one only against a directory the plan names: the zoo's Pebble)
+		[ -n "$le_url" ] || run_result ok "$le_keep: $le_ip is no public address (Let's Encrypt certifies public ones)" "" ;;
+	esac
+	run_phase prepare 10
+	[ -z "$(ss -Hltn 'sport = :80' 2>/dev/null)" ] ||
+		run_result ok "$le_keep: TCP 80 is taken (Let's Encrypt checks the address there)" "free TCP 80, then get the certificate again"
+	le_why=$(le_venv) || run_result ok "$le_keep: $le_why" "get the certificate again later"
+	mkdir -p "$LE_DIR" && chmod 700 "$LE_DIR" && le_hook_text >"$LE_HOOK.new" && chmod 755 "$LE_HOOK.new" && mv -f "$LE_HOOK.new" "$LE_HOOK" ||
+		run_result failed-cleaned "cannot write $LE_HOOK" "check the box's disk"
+	if [ -n "$(plan acme_ca)" ]; then plan acme_ca | base64 -d >"$LE_DIR/acme-ca.pem" || run_result failed-cleaned "the plan's ACME CA is damaged" "update the app"
+	else rm -f "$LE_DIR/acme-ca.pem"; fi
+	run_phase issue 40
+	le_name=ip-$(printf '%s' "$le_ip" | tr . -)
+	"$LE_HOOK" open
+	# (the directory the plan names, trusted through its CA, else Let's Encrypt's own; short-lived: the only profile it issues IP
+	# certificates on)
+	le_env=''
+	[ ! -f "$LE_DIR/acme-ca.pem" ] || le_env=REQUESTS_CA_BUNDLE=$LE_DIR/acme-ca.pem
+	# shellcheck disable=SC2086 # an empty word or one assignment; the server's two words when named
+	timeout 180 env $le_env "$LE_VENV/bin/certbot" --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
+		--work-dir "$LE_DIR/work" --logs-dir "$LE_DIR/logs" certonly --standalone --non-interactive --agree-tos \
+		--register-unsafely-without-email --preferred-profile shortlived --ip-address "$le_ip" --cert-name "$le_name" \
+		--keep-until-expiring ${le_url:+--server "$le_url"} >"$RUN_DIR/certbot.log" 2>&1
+	le_rc=$?
+	"$LE_HOOK" close
+	[ $le_rc = 0 ] && [ -s "$LE_DIR/live/$le_name/fullchain.pem" ] ||
+		run_result ok "$le_keep: Let's Encrypt gave none: $(grep -v '^ *$' "$RUN_DIR/certbot.log" | tail -n 3 | tr '\n' ' ' | cut -c1-300)" \
+			"get the certificate again later"
+	# renewed below 3 days left (a short-lived certificate lives about 6: two days of retries on a 12-hour timer)
+	grep -q '^renew_before_expiry' "$LE_DIR/renewal/$le_name.conf" 2>/dev/null ||
+		sed -i '1i renew_before_expiry = 3 days' "$LE_DIR/renewal/$le_name.conf"
+	run_phase install 70
+	printf '%s\n' "$le_name" >"$in_state/le.new" && mv -f "$in_state/le.new" "$in_state/le" ||
+		run_result failed-cleaned "cannot write $in_state/le" "check the box's disk"
+	"$LE_HOOK" deploy "$le_name" || run_result failed-not-rolled-back "the certificate could not be put in place" "get the certificate again"
+	printf '[Unit]\nDescription=SanityProtocol csqtt: Let'"'"'s Encrypt renewal (P2 B14)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=%s renew\n' \
+		"$LE_HOOK" >/etc/systemd/system/sanity-csqtt-le.service &&
+		printf '[Unit]\nDescription=SanityProtocol csqtt: Let'"'"'s Encrypt renewal, twice a day (P2 B14)\n\n[Timer]\nOnCalendar=*-*-* 00,12:00:00\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
+			>/etc/systemd/system/sanity-csqtt-le.timer || run_result failed-not-rolled-back "cannot write our renewal timer" "check the box's disk"
+	systemctl daemon-reload
+	run_cmd systemctl enable --now sanity-csqtt-le.timer ||
+		run_result failed-not-rolled-back "our renewal timer would not start" "get the certificate again"
+	# the server reloads on SIGUSR1: it serves the lineage's certificate now, or the reload failed
+	run_phase verify 90
+	le_want=$(openssl x509 -noout -fingerprint -sha256 -in "$LE_DIR/live/$le_name/fullchain.pem" 2>/dev/null)
+	le_web=$(sed -n 's/.*--web-port \([0-9]*\).*/\1/p' "$le_def" | head -n 1)
+	le_at=$(sed -n 's/.*--web-bind \([^ ]*\).*/\1/p' "$le_def" | head -n 1)
+	case ${le_at:-0.0.0.0} in 0.0.0.0 | ::) le_at=127.0.0.1 ;; esac
+	le_i=0 le_got=''
+	while [ $le_i -lt 10 ]; do
+		le_got=$(echo | timeout 5 openssl s_client -connect "$le_at:$le_web" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null)
+		[ -z "$le_want" ] || [ "$le_got" != "$le_want" ] || break
+		le_i=$((le_i + 1))
+		sleep 1
+	done
+	[ -z "$le_want" ] || [ "$le_got" = "$le_want" ] ||
+		run_result failed-not-rolled-back "the server did not take the new certificate (it keeps the one it had)" "«Перезапустить», then read the connection back"
+	run_phase "done" 100
+	run_result ok "" "read the connection back"
+}
+
 # ── repair-box: «Исправить» for B14/B24 and B15 (P2-PLAN §1.3 "Box problems"; P2 B11c) ───────────────────────────────────
 # Only the named unit, only while its condition still holds
 action_repair_box() {
@@ -2186,6 +2388,12 @@ cmd_readback() {
 		base64 -d 2>/dev/null | sha256sum | cut -d' ' -f1)
 	[ "$rb_cert" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] && rb_cert=
 	csqtt_emit RB cert_sha256 "$rb_cert"
+	# who issued it and until when (P2 B14: Let's Encrypt's, renewed by our timer, or the server's own), the lineage it follows
+	if command -v openssl >/dev/null 2>&1 && [ -n "$rb_cert" ]; then
+		csqtt_emit RB cert_issuer "$(openssl x509 -noout -issuer -nameopt RFC2253 -in "$rb_state/web_cert.pem" 2>/dev/null | sed 's/^issuer=//')"
+		csqtt_emit RB cert_not_after "$(openssl x509 -noout -enddate -in "$rb_state/web_cert.pem" 2>/dev/null | sed 's/^notAfter=//')"
+	fi
+	csqtt_emit RB cert_le "$(cat "$rb_state/le" 2>/dev/null)"
 	# the store is copied, so the live one is never opened by a second process; the server's line is escaped already
 	rb_copy=$(mktemp -d) || { csqtt_emit RB error "no temporary directory"; csqtt_end; exit 1; }
 	for rb_f in csqtt.db csqtt.db-wal csqtt.db-shm passwords.json passwords.json.imported; do
@@ -2219,6 +2427,7 @@ cmd_exec() {
 	restart) action_restart ;;
 	remove-foreign) action_remove_foreign ;;
 	repair-box) action_repair_box ;;
+	le) action_le ;;
 	rebuild-manifest) action_rebuild_manifest ;;
 	*) run_result failed-cleaned "unknown action $(plan action)" "update the app" ;;
 	esac
