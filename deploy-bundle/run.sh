@@ -2166,8 +2166,12 @@ le_venv() {
 	# (a venv is not relocatable: made in its place, removed whole when it fails)
 	rm -rf "$LE_VENV"
 	python3 -m venv "$LE_VENV" >"$RUN_DIR/pip.log" 2>&1 || { rm -rf "$LE_VENV"; echo "python3 could not make a venv"; return 1; }
-	le_src=''
-	[ -z "$(plan pip_find_links)" ] || le_src="--no-index --find-links $(plan pip_find_links)"
+	# (a source the plan names: the zoo's wheelhouse; pip ignores a plain-HTTP one unless its host is named trusted)
+	le_src='' le_links=$(plan pip_find_links)
+	if [ -n "$le_links" ]; then
+		le_src="--no-index --find-links $le_links"
+		case $le_links in http://*) le_host=${le_links#http://} && le_src="$le_src --trusted-host ${le_host%%[:/]*}" ;; esac
+	fi
 	# shellcheck disable=SC2086 # the source's words
 	if ! timeout 600 "$LE_VENV/bin/pip" install --disable-pip-version-check --no-cache-dir --timeout 60 $le_src \
 		"certbot==$LE_CERTBOT" >>"$RUN_DIR/pip.log" 2>&1; then
