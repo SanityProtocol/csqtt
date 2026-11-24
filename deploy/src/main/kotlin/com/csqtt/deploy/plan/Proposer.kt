@@ -26,8 +26,13 @@ data class ProposalProblem(val field: String, val reason: String)
 /** A proposal could not be made: why (a seventh instance of ours, no free /24 left). */
 class ProposalRefused(val reason: String) : Exception(reason)
 
-/** What the run re-checks first (§1.4): it fails cleaned, and the engine inspects again, if the box moved since. */
-data class Expect(val freePorts: Set<Int>, val freeIface: String?, val freeSubnet: String?, val unit: String?, val binarySha: String?)
+/**
+ * What the run re-checks first (§1.4): it fails cleaned, and the engine inspects again, if the box moved since. [ownPorts]
+ * may be held, but only by this installation's own server (a move's stock ports); [binaryPath] and [binarySha] are its
+ * unit's binary on disk, [container] its Docker container (B6 review F8).
+ */
+data class Expect(val freePorts: Set<Int>, val freeIface: String?, val freeSubnet: String?, val unit: String?, val binarySha: String?,
+    val binaryPath: String? = null, val container: String? = null, val ownPorts: Set<Int> = emptySet())
 
 /** A choice made: what runs, on what, what it will change and what it will not, and what the user types to confirm. */
 data class Plan(val action: Action, val target: String?, val proposal: Proposal?, val expect: Expect, val will: List<String>,
@@ -39,6 +44,12 @@ object Proposer {
 
     /** The family's own ports (main, side, the diagnostics): a stock install may come back on them. */
     val FAMILY_PORTS = setOf(46_000, 46_002, 46_003, 46_004, 46_100, 46_102)
+
+    /** swg-panel's own pools (§1.5): its dial-in exits' 42821–42899, WireGuard's 51820, its WDTT and csqtt defaults from 56000. */
+    val SWG_PORTS = (42_821..42_899).toSet() + 51_820 + (56_000..56_009)
+
+    /** Interface names the family's own helpers own or delete (stock deletes csqtt1 at every start, B17). */
+    private val FAMILY_IFACE = Regex("^(csqtt|csqtp|mrtt|mrtx)")
 
     /** Local-proxy slots: 0 is the stock default instance's (and swg's), 1 the stock side's. */
     val SLOTS = 2..7
@@ -73,10 +84,16 @@ object Proposer {
         if (!ID.matches(p.id)) out += ProposalProblem("id", "6 шестнадцатеричных цифр")
         else if (p.id in ourIds(classification, inv)) out += ProposalProblem("id", "уже занят")
         if (!IFACE.matches(p.iface)) out += ProposalProblem("iface", "1–15 латинских букв и цифр, с буквы")
+        else if (FAMILY_IFACE.containsMatchIn(p.iface)) out += ProposalProblem("iface", "имя занято программами csqtt и MRTT")
         else if (p.iface in takenIfaces(classification, inv)) out += ProposalProblem("iface", "уже есть на сервере")
         val net = parse(p.subnet)
-        if (net == null || net.second != 24) out += ProposalProblem("subnet", "нужна подсеть /24, например 10.77.0.0/24")
-        else if (overlaps(p.subnet, takenNets(classification, inv))) out += ProposalProblem("subnet", "пересекается с занятой")
+        val network = net?.let { (n, _) -> "${n ushr 24 and 255}.${n ushr 16 and 255}.${n ushr 8 and 255}.${n and 255}/24" }
+        when {
+            net == null || net.second != 24 -> out += ProposalProblem("subnet", "нужна подсеть /24, например 10.77.0.0/24")
+            p.subnet != network -> out += ProposalProblem("subnet", "адрес сети: $network")
+            !isPrivate(net.first) || inStock(net.first) -> out += ProposalProblem("subnet", "частная сеть вне 10.66.0.0/16, например 10.77.0.0/24")
+            overlaps(p.subnet, takenNets(classification, inv)) -> out += ProposalProblem("subnet", "пересекается с занятой")
+        }
         val ports = takenPorts(classification, inv)
         for ((field, port) in listOf("udpPort" to p.udpPort, "webPort" to p.webPort)) {
             if (port !in 1024..65_535) out += ProposalProblem(field, "1024–65535")
@@ -101,23 +118,50 @@ object Proposer {
         confirm = null,
     )
 
-    /** The plan for an offer on an installation: the installation's unit and binary are what the run expects to find. */
-    fun offerPlan(entry: Entry, offer: Offer, classification: Classification): Plan {
+    /**
+     * The plan for an offer on an installation. The run expects to find the installation's unit, its binary on disk and its
+     * container as they were; a move (a stock install into our layout) carries the new instance it becomes: a fresh id,
+     * interface, /24 and slot, its client-facing ports kept, held only by the server it replaces (§1.7; B6 review F7).
+     */
+    fun offerPlan(entry: Entry, offer: Offer, classification: Classification, inv: Inventory, carried: Version,
+        random: Random = Random.Default): Plan {
         val install = entry.installation
         val others = classification.installations.filter { it !== install }.map { "${it.name} — без изменений" }
-        val sha = install.procs.firstOrNull()?.sha?.takeIf { it.isNotEmpty() }
+        val unit = install.units.firstOrNull()
+        val binary = unit?.exec?.takeIf { it.isNotEmpty() }?.let { path -> inv.exeAt(path)?.let { path to it.sha } }
+        val move = install.owner != Owner.OURS && offer.action in setOf(Action.UPDATE, Action.REPAIR, Action.UPDATE_FROM_21)
+        val proposal = if (move) proposeMove(install, classification, inv, random) else null
+        val stockPorts = setOfNotNull(install.claims.udpPort, install.claims.webPort)
+        val installed = Version.parse(install.build?.version.orEmpty())
+        val db = install.stores.firstOrNull()?.dir
         val will = when (offer.action) {
             Action.CONNECT -> listOf("Чтение настроек подключения ${install.name} (на сервере ничего не меняется)")
-            Action.UPDATE, Action.REPAIR -> if (install.owner == Owner.OURS) listOf("${install.name}: тот же экземпляр, новая сборка, клиенты сохранятся")
-            else listOf("${install.name} переедет в наш формат: клиенты, пароли и панель сохранятся, старая установка будет удалена после проверки")
-            Action.UPDATE_FROM_21 -> listOf("${install.name} переедет на 2.6: клиенты 2.1 перестанут подключаться")
-            Action.REMOVE, Action.REINSTALL_CLEAN, Action.REMOVE_LEFTOVERS -> listOf("${install.name} будет удалён" +
-                if (install.stores.isNotEmpty()) " вместе с клиентами и настройками" else "")
-            else -> listOf("${install.name}: ${offer.action.name.lowercase()}")
+            Action.UPDATE, Action.REPAIR -> if (install.owner == Owner.OURS) {
+                if (installed != null && carried > installed) listOf("${install.name}: тот же экземпляр, сборка $carried вместо $installed, клиенты сохранятся")
+                else listOf("${install.name}: тот же экземпляр, та же сборка заново, клиенты сохранятся")
+            } else listOf("${install.name} переедет в наш формат как ${proposal?.instance}: клиенты, пароли, панель и порты сохранятся, " +
+                "старая установка будет удалена после проверки")
+            Action.UPDATE_FROM_21 -> listOf("${install.name} переедет на $carried как ${proposal?.instance}: клиенты 2.1 перестанут подключаться")
+            Action.REMOVE -> listOf("${install.name} будет удалён" + (db?.let { "; база $it останется" + if (install.owner == Owner.OURS) " — «Восстановить» вернёт клиентов" else "" } ?: ""))
+            Action.REMOVE_WITH_STORE, Action.REINSTALL_CLEAN, Action.REMOVE_LEFTOVERS -> listOf("${install.name} будет удалён" +
+                if (install.stores.isNotEmpty()) " вместе с клиентами и настройками" else "") +
+                if (offer.action == Action.REINSTALL_CLEAN) listOf("на его месте — новый, пустой") else emptyList()
+            Action.RESTART -> listOf("${install.name} будет перезапущен: клиенты переподключатся")
+            Action.START -> listOf("${install.name} будет запущен")
+            Action.JOURNAL -> listOf("Журнал ${install.name} (на сервере ничего не меняется)")
+            Action.RESTORE -> listOf("${install.name} вернётся под тем же именем, с сохранённой базой клиентов")
+            Action.CREATE -> listOf("Новый сервер")
         }
-        return Plan(offer.action, install.name, null,
-            Expect(emptySet(), null, null, install.units.firstOrNull()?.id, sha), will,
-            if (offer.action == Action.CONNECT) emptyList() else others, offer.confirm)
+        return Plan(offer.action, install.name, proposal,
+            Expect(emptySet(), proposal?.iface, proposal?.subnet, unit?.id, binary?.second,
+                binary?.first, install.containers.firstOrNull()?.id, if (move) stockPorts else emptySet()),
+            will, if (offer.action in setOf(Action.CONNECT, Action.JOURNAL)) emptyList() else others, offer.confirm)
+    }
+
+    /** The instance a move becomes: our resources, the stock install's client-facing ports (its clients keep dialling them). */
+    fun proposeMove(install: Installation, classification: Classification, inv: Inventory, random: Random = Random.Default): Proposal {
+        val fresh = propose(classification, inv, random)
+        return fresh.copy(udpPort = install.claims.udpPort ?: fresh.udpPort, webPort = install.claims.webPort ?: fresh.webPort)
     }
 
     private fun ourIds(c: Classification, inv: Inventory): Set<String> {
@@ -133,7 +177,13 @@ object Proposer {
         (inv.addrs.map { it.cidr } + inv.routes.map { it.dst } + c.installations.mapNotNull { it.claims.subnet }).mapNotNull { parse(it) }
 
     private fun takenPorts(c: Classification, inv: Inventory): Set<Int> =
-        FAMILY_PORTS + c.installations.flatMap { listOfNotNull(it.claims.udpPort, it.claims.webPort) } + inv.listens.mapNotNull { it.port }
+        FAMILY_PORTS + SWG_PORTS + c.installations.flatMap { listOfNotNull(it.claims.udpPort, it.claims.webPort) } + inv.listens.mapNotNull { it.port }
+
+    /** RFC 1918 space: 10/8, 172.16/12, 192.168/16. */
+    private fun isPrivate(n: Int): Boolean = (n ushr 24) == 10 || (n ushr 20) == (172 shl 4 or 1) || (n ushr 16) == (192 shl 8 or 168)
+
+    /** The stock family's 10.66.0.0/16 (10.66.67/24 the main's, 10.66.68/24 the side's). */
+    private fun inStock(n: Int): Boolean = (n ushr 16) == (10 shl 8 or 66)
 
     /** Every slot an instance of ours uses (its --instance-slot), running or not. */
     private fun usedSlots(c: Classification): Set<Int> = c.installations.filter { it.owner == Owner.OURS }.flatMap { install ->

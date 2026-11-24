@@ -98,7 +98,8 @@ class ManagerTest {
         assertEquals(listOf(BoxIssue("B14", Manager.boxIssues(fixture("v253main-systemd-noble+B14").first).single().detail, true)),
             Manager.boxIssues(fixture("v253main-systemd-noble+B14").first))
         assertFalse(Manager.boxIssues(fixture("v253main-systemd-noble+B9").first).single().repairable)
-        assertTrue(Manager.boxIssues(fixture("v253main-systemd-noble+B11").first).isEmpty())
+        // the rest are named, never dropped (B6 review F10)
+        assertEquals(listOf("B11" to false), Manager.boxIssues(fixture("v253main-systemd-noble+B11").first).map { it.code to it.repairable })
     }
 
     @Test
@@ -156,12 +157,108 @@ class ManagerTest {
         assertEquals(Action.CREATE, create.action)
         assertEquals(listOf("csqtt.service — без изменений"), create.unchanged)
         val entry = Manager.entries(c, carried).single()
-        val move = Proposer.offerPlan(entry, entry.offers.first(), c)
+        val move = Proposer.offerPlan(entry, entry.offers.first(), c, inv, carried)
         assertTrue(move.will.single(), "переедет в наш формат" in move.will.single())
+        // the move becomes an instance of ours that keeps the stock install's ports, held by nothing but that install
+        val becomes = move.proposal!!
+        assertEquals(46000 to 46002, becomes.udpPort to becomes.webPort)
+        assertEquals("sqc0" to "10.77.0.0/24", becomes.iface to becomes.subnet)
+        assertEquals(setOf(46000, 46002), move.expect.ownPorts)
+        assertEquals("/usr/local/bin/csqtt", move.expect.binaryPath)
         // the run finds the unit and the binary it was planned on, or fails cleaned and the engine inspects again
         assertEquals("csqtt.service", move.expect.unit)
         assertEquals(64, move.expect.binarySha?.length)
-        val remove = Proposer.offerPlan(entry, entry.offers.last(), c)
+        val remove = Proposer.offerPlan(entry, entry.offers.last(), c, inv, carried)
         assertEquals("удалить csqtt.service", remove.confirm)
+        assertTrue(remove.will.single(), "база /etc/csqtt останется" in remove.will.single())
+    }
+
+    private fun ours(id: String, slot: Int, state: String, version: String = "2.6.0", sub: String = if (state == "active") "running" else "dead") = arrayOf(
+        "CSQTT_INV|exe|sha=${id}000000000000000000000000000000000000000000000000000000000|path=/opt/sanityprotocol/csqtt/$id/current/csqtt-server|" +
+            "size=1|label=v$version|caption=1|startup=$version|swg=1|mrtt=0",
+        "CSQTT_INV|bin|path=/opt/sanityprotocol/csqtt/$id/current/csqtt-server|sha=${id}000000000000000000000000000000000000000000000000000000000",
+        "CSQTT_INV|unit|id=sanity-csqtt-$id.service|load=loaded|active=$state|sub=$sub|result=${if (state == "failed") "exit-code" else "success"}|" +
+            "status=0|restarts=${if (state == "activating") 5 else 0}|pid=0|file_state=enabled|fragment=/etc/systemd/system/sanity-csqtt-$id.service|" +
+            "exec=/opt/sanityprotocol/csqtt/$id/current/csqtt-server|exec_ok=1|flags=--listen 0.0.0.0:4${slot}111 " +
+            "--config-dir /var/lib/sanityprotocol/csqtt/$id --instance sqc-$id --iface sqc$slot --instance-slot $slot|pre=|pre_status=|env=",
+        "CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/$id|files=csqtt.db,env,manifest.json|lock=none|schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=",
+    )
+
+    private fun stockMain(active: String = "active", label: String = "v2.5.3", fileState: String = "enabled") = arrayOf(
+        "CSQTT_INV|exe|sha=${"5".repeat(64)}|path=/usr/local/bin/csqtt|size=1|label=$label|caption=0|startup=${label.removePrefix("v")}|swg=1|mrtt=0",
+        "CSQTT_INV|bin|path=/usr/local/bin/csqtt|sha=${"5".repeat(64)}",
+        "CSQTT_INV|unit|id=csqtt.service|load=loaded|active=$active|sub=${if (active == "active") "running" else "dead"}|result=success|status=0|" +
+            "restarts=0|pid=0|file_state=$fileState|fragment=/etc/systemd/system/csqtt.service|exec=/usr/local/bin/csqtt|exec_ok=1|flags=|pre=|pre_status=|env=",
+        "CSQTT_INV|store|dir=/etc/csqtt|files=csqtt.db,csqtt.env|lock=none|schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=",
+    )
+
+    @Test
+    fun aServerSwgPanelTookOverIsNeverStartedAgain() {
+        // swg-panel adopted the stock install: csqtt.service disabled and stopped, swg's server on 46000 and csqtt1
+        val (c, _) = box(*stockMain(active = "inactive", fileState = "disabled"),
+            "CSQTT_INV|proc|pid=70|exe=/usr/local/bin/csqtt-swg|deleted=0|comm=csqtt-swg|unit=swg-csqtt-csqtt1.service|ctr=|tun=csqtt1|sha=|" +
+                "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1",
+            "CSQTT_INV|unit|id=swg-csqtt-csqtt1.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=70|" +
+                "file_state=enabled|fragment=/etc/systemd/system/swg-csqtt-csqtt1.service|exec=/usr/local/bin/csqtt-swg|exec_ok=1|" +
+                "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1|pre=|pre_status=|env=")
+        val stock = Manager.entries(c, carried).single { it.installation.name == "csqtt.service" }
+        assertEquals(listOf(Action.REMOVE), stock.offers.map { it.action })
+        assertTrue(stock.offers.single().folded && stock.offers.single().confirm != null)
+        assertEquals("Порт или интерфейс занят: swg-csqtt-csqtt1.service", stock.note)
+    }
+
+    @Test
+    fun anInstallCutOffIsRepairedAndAStoreWithoutItsDatabaseIsNot() {
+        // B2: the binary with no unit, an install cut off: the move, not deletion (B6 review F2)
+        assertEquals(Action.REPAIR, offers("v253main-systemd-noble+B2").second.first())
+        // B8: the WAL without its database: nothing to move or read (F6)
+        offers("v253main-systemd-noble+B8").let { (entry, actions) ->
+            assertFalse(Action.REPAIR in actions || Action.UPDATE in actions || Action.CONNECT in actions)
+            assertTrue(entry.note.orEmpty(), entry.note.orEmpty().isNotEmpty())
+        }
+    }
+
+    @Test
+    fun noBuildNewerThanOursIsEverRebuiltFromOurs() {
+        // any line: a 2.7 or a 2.10 stock build is newer, never moved (F3)
+        for (label in listOf("v2.7.0", "v2.10.0", "v3.0.0")) {
+            val entry = Manager.entries(box(*stockMain(label = label)).first, carried).single()
+            assertEquals(label, Compatibility.NEWER_THAN_APP, entry.compatibility)
+            assertEquals(label, listOf(Action.CONNECT, Action.REMOVE), entry.offers.map { it.action })
+        }
+        // ours from another phone's newer app: run, read, removed; never repaired or reinstalled from our older core (F4)
+        for ((state, sub) in listOf("activating" to "auto-restart", "active" to "running", "failed" to "failed")) {
+            val entry = Manager.entries(box(*ours("0a1b2c", 2, state, version = "2.6.1", sub = sub)).first, carried).single()
+            val actions = entry.offers.map { it.action }
+            assertFalse(state, actions.any { it in setOf(Action.REPAIR, Action.UPDATE, Action.REINSTALL_CLEAN, Action.RESTORE) })
+            assertEquals("Обновить нельзя: установлена более новая версия", entry.note)
+        }
+        assertEquals(null, Version.parse("99999999999.1"))
+    }
+
+    @Test
+    fun removalKeepsTheStoreAndPurgingIsTyped() {
+        val (c, inv) = box(*ours("0a1b2c", 2, "active"))
+        val entry = Manager.entries(c, carried).single()
+        val remove = entry.offers.single { it.action == Action.REMOVE }
+        assertEquals(null, remove.confirm)
+        assertTrue(Proposer.offerPlan(entry, remove, c, inv, carried).will.single().contains("«Восстановить» вернёт клиентов"))
+        assertEquals("удалить sanity-csqtt-0a1b2c.service вместе с базой", entry.offers.single { it.action == Action.REMOVE_WITH_STORE }.confirm)
+    }
+
+    @Test
+    fun anEditedProposalStaysClearOfTheFamilyAndOfPublicSpace() {
+        val (c, inv) = fixture("v253main-systemd-noble")
+        val p = Proposer.propose(c, inv, Random(5))
+        val fields = { q: Proposal -> Proposer.problems(q, c, inv).map { it.field to it.reason } }
+        assertEquals(listOf("iface" to "имя занято программами csqtt и MRTT"), fields(p.copy(iface = "csqtt7")))
+        for (net in listOf("1.1.1.0/24", "224.0.0.0/24", "10.66.70.0/24")) assertEquals(net, "subnet", fields(p.copy(subnet = net)).single().first)
+        assertEquals(listOf("subnet" to "адрес сети: 10.77.5.0/24"), fields(p.copy(subnet = "10.77.5.9/24")))
+        assertEquals(emptyList<Pair<String, String>>(), fields(p.copy(subnet = "192.168.240.0/24")))
+        // swg-panel's pools are never proposed
+        repeat(300) { seed ->
+            val q = Proposer.propose(c, inv, Random(seed))
+            for (port in listOf(q.udpPort, q.webPort)) assertFalse("$port", port in Proposer.SWG_PORTS)
+        }
     }
 }

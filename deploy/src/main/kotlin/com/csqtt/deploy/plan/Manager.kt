@@ -26,7 +26,7 @@ data class Version(val major: Int, val minor: Int, val patch: Int, val build: In
         private val SHAPE = Regex("^(\\d+)\\.(\\d+)(?:\\.(\\d+))?(?:-(\\d+))?")
 
         fun parse(text: String): Version? = SHAPE.find(text.trim())?.destructured?.let { (a, b, c, d) ->
-            Version(a.toInt(), b.toInt(), c.toIntOrNull() ?: 0, d.toIntOrNull() ?: 0)
+            Version(a.toIntOrNull() ?: return null, b.toIntOrNull() ?: return null, c.toIntOrNull() ?: 0, d.toIntOrNull() ?: 0)
         }
     }
 }
@@ -52,7 +52,11 @@ enum class Action {
     /** «Починить»: ours, the same release again with the store kept; a broken stock 2.5 install, the same move as UPDATE. */
     REPAIR,
     JOURNAL,
+    /** «Удалить»: the server goes, its store stays (M-110; APP-PLAN §6.10): ours comes back by «Восстановить». */
     REMOVE,
+
+    /** «Удалить вместе с базой»: ours and its store, typed (M-134). */
+    REMOVE_WITH_STORE,
     REINSTALL_CLEAN,
 
     /** «Восстановить»: our leftovers brought back under the same id, the store kept. */
@@ -76,34 +80,49 @@ data class BoxIssue(val code: String, val detail: String, val repairable: Boolea
 object Manager {
     private val STOCK = setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL)
 
-    fun entries(classification: Classification, carried: Version): List<Entry> =
-        classification.installations.map { entry(it, carried) }
+    /** §1.3's stock «Починить» list (B1, B2, B5, B6, B11, B18), with a crash loop and an exited container: the move fixes them. */
+    private val MOVABLE = setOf("B1", "B2", "B3", "B4", "B5", "B6", "B11", "B18")
 
-    fun boxIssues(classification: Classification): List<BoxIssue> = classification.problems.mapNotNull { problem ->
-        when (problem.code) {
-            "B14", "B24", "B15" -> BoxIssue(problem.code, problem.detail, repairable = true)
-            "B9", "B17" -> BoxIssue(problem.code, problem.detail, repairable = false)
-            else -> null
-        }
+    /** Instances of ours one box holds: the local-proxy slots 2–7. */
+    const val MAX_OURS = 6
+
+    fun entries(classification: Classification, carried: Version): List<Entry> =
+        classification.installations.map { entry(it, classification, carried) }
+
+    /**
+     * Every box problem, named (B6 review F10): B14, B24 and B15 get «Исправить»; the rest are said, never dropped, so the
+     * user learns why an offer is missing (B10's foreign holder of a claimed port, B11's interrupted install…).
+     */
+    fun boxIssues(classification: Classification): List<BoxIssue> = classification.problems.map { problem ->
+        BoxIssue(problem.code, problem.detail, repairable = problem.code in setOf("B14", "B24", "B15"))
     }
 
+    /** M-150 first, whatever the line (B6 review F3): a build newer than the carried one is never updated or repaired. */
     fun compatibility(install: Installation, carried: Version): Compatibility {
         val build = install.build ?: return Compatibility.UNKNOWN
+        if (build.line == ProtocolLine.MRTT) return Compatibility.OTHER_PROTOCOL
+        val version = Version.parse(build.version)
+        if (version != null && version > carried) return Compatibility.NEWER_THAN_APP
         return when (build.line) {
-            ProtocolLine.MRTT -> Compatibility.OTHER_PROTOCOL
             ProtocolLine.V20, ProtocolLine.V21 -> Compatibility.OUTDATED_21
-            ProtocolLine.V25, ProtocolLine.V26 -> {
-                val version = Version.parse(build.version)
-                if (version != null && version > carried) Compatibility.NEWER_THAN_APP else Compatibility.COMPATIBLE
-            }
-            ProtocolLine.UNKNOWN -> Compatibility.UNKNOWN
+            ProtocolLine.V25, ProtocolLine.V26 -> Compatibility.COMPATIBLE
+            else -> Compatibility.UNKNOWN
         }
     }
 
-    private fun entry(install: Installation, carried: Version): Entry {
+    /** A live installation that claims this one's UDP port or interface: swg-panel's take-over of a stock install (F1). */
+    fun heldBy(install: Installation, classification: Classification): Installation? = classification.installations.firstOrNull { other ->
+        other !== install && other.state in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING) &&
+            ((install.claims.udpPort != null && other.claims.udpPort == install.claims.udpPort) ||
+                (install.claims.iface != null && other.claims.iface == install.claims.iface))
+    }
+
+    /** A store with clients in it: what a move carries and «Подключиться» reads (B8's WAL without its database is none, F6). */
+    fun hasDatabase(install: Installation): Boolean =
+        install.stores.any { store -> store.files.any { it in setOf("csqtt.db", "passwords.json", "passwords.json.imported") } }
+
+    private fun entry(install: Installation, classification: Classification, carried: Version): Entry {
         val compatibility = compatibility(install, carried)
-        val name = install.name
-        val clients = "удалить $name"
         // Docker stopped: what it holds is unseen. A move would race its container back onto the port, a removal would delete
         // the store of an install that only waits for its daemon (B5 review F1)
         if (install.dockerUnseen) return Entry(install, compatibility, emptyList(), "Docker остановлен: запустите Docker и проверьте заново")
@@ -111,53 +130,88 @@ object Manager {
             Owner.SWG_BARE, Owner.SWG_DOCKER -> Entry(install, compatibility, emptyList(), "Управляется swg-panel")
             Owner.MRTT, Owner.MRTT_BETA -> Entry(install, compatibility, emptyList(), "Другой протокол (MRTT)")
             Owner.HANDMADE, Owner.UNKNOWN -> Entry(install, compatibility, emptyList(), "Чужая установка")
-            Owner.OURS -> Entry(install, compatibility, ours(install, compatibility, carried, clients), null)
-            in STOCK -> stock(install, compatibility, clients)
+            Owner.OURS -> ours(install, compatibility, classification, carried)
+            in STOCK -> stock(install, compatibility, classification)
             else -> Entry(install, compatibility, emptyList(), "Чужая установка")
         }
     }
 
-    private fun ours(install: Installation, compatibility: Compatibility, carried: Version, confirm: String): List<Offer> {
-        val newerCarried = Version.parse(install.build?.version.orEmpty())?.let { carried > it } == true
-        return when (install.state) {
+    /** Another live server has this one's port or interface: nothing that would start this one again; removal, which B11
+     *  bounds to this installation's own objects, folded and typed. */
+    private fun held(install: Installation, compatibility: Compatibility, holder: Installation) = Entry(install, compatibility,
+        listOf(Offer(Action.REMOVE, folded = true, confirm = "удалить ${install.name}",
+            warning = "порт и интерфейс заняты ${holder.name}: удаление их не тронет")),
+        "Порт или интерфейс занят: ${holder.name}")
+
+    private fun ours(install: Installation, compatibility: Compatibility, classification: Classification, carried: Version): Entry {
+        heldBy(install, classification)?.let { return held(install, compatibility, it) }
+        val newer = compatibility == Compatibility.NEWER_THAN_APP
+        val installed = Version.parse(install.build?.version.orEmpty())
+        val update = !newer && installed != null && carried > installed
+        val purge = Offer(Action.REMOVE_WITH_STORE, folded = true, confirm = "удалить ${install.name} вместе с базой")
+        // a newer instance (another phone's app) is run, connected to and removed, never rebuilt from our older core (F4)
+        val offers = when (install.state) {
             InstallState.RUNNING -> listOfNotNull(
-                Offer(Action.CONNECT, recommended = !newerCarried),
-                if (newerCarried) Offer(Action.UPDATE, recommended = true) else null,
+                Offer(Action.CONNECT, recommended = !update),
+                if (update) Offer(Action.UPDATE, recommended = true) else null,
                 Offer(Action.RESTART),
-                Offer(Action.REMOVE, confirm = confirm),
-                Offer(Action.REINSTALL_CLEAN, folded = true, confirm = confirm),
-            ).sortedByDescending { it.recommended }
-            InstallState.CRASH_LOOPING, InstallState.FAILED ->
-                listOf(Offer(Action.REPAIR, recommended = true), Offer(Action.JOURNAL), Offer(Action.REMOVE, confirm = confirm))
-            InstallState.STOPPED, InstallState.DORMANT -> listOf(Offer(Action.START, recommended = true), Offer(Action.REMOVE, confirm = confirm))
-            InstallState.LEFTOVER -> listOf(Offer(Action.RESTORE, recommended = true),
-                Offer(Action.REMOVE_LEFTOVERS, confirm = if (install.stores.isNotEmpty()) confirm else null))
-        }.filterNot { it.action == Action.UPDATE && compatibility == Compatibility.NEWER_THAN_APP }
+                Offer(Action.REMOVE),
+                purge,
+                if (newer) null else Offer(Action.REINSTALL_CLEAN, folded = true, confirm = "удалить ${install.name} вместе с базой"),
+            )
+            InstallState.CRASH_LOOPING, InstallState.FAILED -> listOfNotNull(
+                if (newer) null else Offer(Action.REPAIR, recommended = true),
+                Offer(Action.JOURNAL, recommended = newer),
+                Offer(Action.REMOVE),
+                purge,
+            )
+            InstallState.STOPPED, InstallState.DORMANT -> listOf(Offer(Action.START, recommended = true), Offer(Action.REMOVE), purge)
+            InstallState.LEFTOVER -> listOfNotNull(
+                if (newer) null else Offer(Action.RESTORE, recommended = true),
+                Offer(Action.REMOVE_LEFTOVERS, recommended = newer, confirm = if (install.stores.isNotEmpty()) "удалить ${install.name}" else null),
+            )
+        }.sortedByDescending { it.recommended }
+        return Entry(install, compatibility, offers, if (newer) "Обновить нельзя: установлена более новая версия" else null)
     }
 
-    private fun stock(install: Installation, compatibility: Compatibility, confirm: String): Entry {
-        if (install.state == InstallState.LEFTOVER && install.units.isEmpty() && install.containers.isEmpty()) {
-            return Entry(install, compatibility, listOf(Offer(Action.REMOVE_LEFTOVERS, recommended = true,
-                confirm = if (install.stores.isNotEmpty()) confirm else null)), null)
+    private fun stock(install: Installation, compatibility: Compatibility, classification: Classification): Entry {
+        heldBy(install, classification)?.let { return held(install, compatibility, it) }
+        val confirm = "удалить ${install.name}"
+        val database = hasDatabase(install)
+        // a leftover with nothing to repair is removed, its every object listed and typed (§1.3); B2's binary with no unit is
+        // an install cut off, and gets the move (B6 review F2)
+        if (install.state == InstallState.LEFTOVER && install.units.isEmpty() && install.containers.isEmpty() &&
+            install.broken.none { it in MOVABLE }) {
+            return Entry(install, compatibility, listOf(Offer(Action.REMOVE_LEFTOVERS, recommended = true, confirm = confirm)), null)
+        }
+        val connect = if (database) Offer(Action.CONNECT) else null
+        // the server goes, the store stays (§6.10), typed: it is someone else's install
+        val remove = Offer(Action.REMOVE, folded = true, confirm = confirm)
+        val blocking = install.broken.filterNot { it in MOVABLE }
+        val noMove = when {
+            !database -> "База клиентов не найдена: переносить нечего"
+            blocking.isNotEmpty() -> "Сначала нужно разобраться: ${blocking.joinToString()}"
+            classification.installations.count { it.owner == Owner.OURS } >= MAX_OURS -> "На сервере уже $MAX_OURS наших экземпляров"
+            else -> null
         }
         return when (compatibility) {
             // never downgrade (M-150): a newer build than ours is connected to or removed, never «updated»
-            Compatibility.NEWER_THAN_APP -> Entry(install, compatibility,
-                listOf(Offer(Action.CONNECT, recommended = true), Offer(Action.REMOVE, confirm = confirm)),
+            Compatibility.NEWER_THAN_APP -> Entry(install, compatibility, listOfNotNull(connect?.copy(recommended = true), remove),
                 "Обновить нельзя: установлена более новая версия")
-            Compatibility.OUTDATED_21 -> Entry(install, compatibility, listOf(
-                Offer(Action.UPDATE_FROM_21, recommended = true, warning = "Клиенты 2.1 перестанут подключаться"),
-                Offer(Action.REMOVE, folded = true, confirm = confirm),
-            ), null)
+            Compatibility.UNKNOWN -> Entry(install, compatibility, listOfNotNull(connect?.copy(recommended = true), remove),
+                "Сборка не определена: обновлять её не будем")
+            Compatibility.OUTDATED_21 -> Entry(install, compatibility, listOfNotNull(
+                if (noMove == null) Offer(Action.UPDATE_FROM_21, recommended = true, warning = "Клиенты 2.1 перестанут подключаться") else null,
+                remove,
+            ), noMove)
             else -> {
                 val broken = install.state != InstallState.RUNNING || install.broken.isNotEmpty()
-                val first = if (broken) Offer(Action.REPAIR, recommended = true) else Offer(Action.UPDATE, recommended = true)
-                Entry(install, compatibility, listOfNotNull(
-                    first,
-                    // read back from a copy of its store, which needs no running server
-                    if (install.stores.isNotEmpty()) Offer(Action.CONNECT) else null,
-                    Offer(Action.REMOVE, folded = true, confirm = confirm),
-                ), null)
+                val move = when {
+                    noMove != null -> null
+                    broken -> Offer(Action.REPAIR, recommended = true)
+                    else -> Offer(Action.UPDATE, recommended = true)
+                }
+                Entry(install, compatibility, listOfNotNull(move, connect?.copy(recommended = move == null), remove), noMove)
             }
         }
     }
