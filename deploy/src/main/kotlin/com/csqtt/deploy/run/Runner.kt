@@ -18,11 +18,26 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import kotlin.random.Random
 
-/** What a run does: its action and its facts (no secret: the plan file is readable), and its secrets apart (0600). */
-class RunPlan(val action: String, val values: Map<String, String> = emptyMap(), val secrets: Map<String, String> = emptyMap()) {
+/**
+ * What a run does: its action and its facts (no secret: the plan file is readable), its secrets apart (0600), and the
+ * release it installs, if any (create, update: root's only, its sha256 checked again before use).
+ */
+class RunPlan(val action: String, val values: Map<String, String> = emptyMap(), val secrets: Map<String, String> = emptyMap(),
+    val core: ByteArray? = null) {
+    init {
+        // one key=value line each: a key is a word, and no value may start another line
+        for ((key, value) in values + secrets) {
+            require(KEY.matches(key) && '\n' !in value && '\r' !in value) { "the plan cannot carry $key" }
+        }
+    }
+
     internal fun planText(): String = (mapOf("action" to action) + values).entries.joinToString("") { "${it.key}=${it.value}\n" }
 
     internal fun secretsText(): String = secrets.entries.joinToString("") { "${it.key}=${it.value}\n" }
+
+    private companion object {
+        val KEY = Regex("^[a-z][a-z0-9_]*$")
+    }
 }
 
 sealed interface RunEvent {
@@ -96,9 +111,10 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
 
     fun start(runId: String, plan: RunPlan): StartOutcome {
         val script = script()
-        val dir = Uploads.privateDir(remote, script.size.toLong())
+        val dir = Uploads.privateDir(remote, script.size.toLong() + (plan.core?.size ?: 0))
         try {
             Uploads.writeFile(remote, "$dir/run.sh", script)
+            plan.core?.let { Uploads.writeFile(remote, "$dir/core", it) }
             Uploads.writeFile(remote, "$dir/plan", plan.planText().toByteArray())
             // the private directory is the login user's, 0700; run.sh installs the secrets 0600 for root and the directory goes
             if (plan.secrets.isNotEmpty()) Uploads.writeFile(remote, "$dir/secrets", plan.secretsText().toByteArray())

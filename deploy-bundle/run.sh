@@ -60,6 +60,8 @@ cmd_start() {
 		# the upload's copy goes here, on the box: the engine's own removal needs a link that may be gone
 		rm -f "$rs_up/secrets"
 	fi
+	# a release the run installs (create, update): root's only, its sha checked again before use
+	[ ! -f "$rs_up/core" ] || install -m 700 "$rs_up/core" "$rs_dir/core"
 	: >"$rs_dir/log" && chown "$rs_uid" "$rs_dir/log" && chmod 600 "$rs_dir/log"
 	# the last KEEP runs are kept (the newest by name: run ids start with their UTC time)
 	ls -1 "$RUNS" 2>/dev/null | sort | awk -v keep=$KEEP '{a[NR] = $0} END {for (i = 1; i <= NR - keep; i++) print a[i]}' |
@@ -97,6 +99,11 @@ cmd_cancel() {
 	# a run that has ended has nothing to stop: say so, rather than leave a flag nobody reads (B7b review F3)
 	if grep -q '^CSQTT_RESULT|' "$rc_dir/log" 2>/dev/null || [ "$(systemctl is-active "sanity-csqtt-deploy-$1" 2>/dev/null)" != active ]; then
 		csqtt_emit CANCEL ended "$1"
+		csqtt_end
+		exit 0
+	fi
+	if [ -e "$rc_dir/switching" ]; then
+		csqtt_emit CANCEL refused "the switch has begun: the run finishes or undoes itself"
 		csqtt_end
 		exit 0
 	fi
@@ -172,7 +179,7 @@ apt_lock_holder() {
 
 # runs a step's command with its output in the log, redacted, and returns its status
 run_cmd() {
-	run_emit STEP "$RUN_STEP" "$*"
+	run_emit STEP "$RUN_STEP" "$(printf '%s\n' "$*" | run_redact)"
 	rc_status=0
 	# made 0600 first: the raw output may hold a secret until it is redacted (the command keeps its own umask)
 	(umask 077 && : >"$RUN_DIR/out")
@@ -184,7 +191,7 @@ run_cmd() {
 
 run_result() {  # run_result <kind> <cause> <next action>
 	run_beat_stop
-	run_emit RESULT "$1" "$RUN_STEP" "$2" "$3"
+	run_emit RESULT "$1" "$RUN_STEP" "$(printf '%s\n' "$2" | run_redact)" "$(printf '%s\n' "$3" | run_redact)"
 	# the kind alone (no secret) where every login reads it: the log is its starting login's own (B7 verify N2)
 	printf '%s\n' "$1" >"$RUN_DIR/result" && chmod 644 "$RUN_DIR/result"
 	rm -f "$RUN_DIR/secrets"
@@ -261,6 +268,224 @@ action_selftest() {
 	run_result ok "" ""
 }
 
+# ── create: a new instance of ours (P2-PLAN §1.5; P2 B8) ─────────────────────────────────────────────────────────────
+# manifest.json is written first and names each object as it is made, so a failure or a cancel removes exactly those. Its
+# four fields: schema, the instance id, the objects (kind and path, in the order made), the host changes (B9's).
+mf_write() {
+	{
+		printf '{"schema":1,"id":"%s","objects":[' "$MF_ID"
+		mf_sep=
+		while read -r mf_kind mf_path; do
+			[ -n "$mf_kind" ] || continue
+			printf '%s{"kind":"%s","path":"%s"}' "$mf_sep" "$mf_kind" "$mf_path"
+			mf_sep=,
+		done <<EOF
+$MF_OBJECTS
+EOF
+		printf '],"host":[]}\n'
+	} >"$MF.new" && chmod 600 "$MF.new" && mv -f "$MF.new" "$MF"
+}
+
+mf_add() {  # mf_add <kind> <path>: named before it is made
+	MF_OBJECTS="$MF_OBJECTS
+$1 $2"
+	[ ! -d "${MF%/*}" ] || mf_write
+}
+
+# removes what this run made, newest first: the unit before the files it runs, then any parent left empty
+mf_undo() {
+	mu_list=$(printf '%s\n' "$MF_OBJECTS" | awk 'NF {l[++n] = $0} END {for (i = n; i > 0; i--) print l[i]}')
+	while read -r mu_kind mu_path; do
+		case $mu_kind in
+		unit)
+			systemctl disable --now "${mu_path##*/}" >/dev/null 2>&1
+			rm -f "$mu_path"
+			systemctl daemon-reload
+			systemctl reset-failed "${mu_path##*/}" >/dev/null 2>&1
+			;;
+		dir) rm -rf "$mu_path" ;;
+		esac
+	done <<EOF
+$mu_list
+EOF
+	return 0
+}
+
+action_create() {
+	cr_id=$(plan id) cr_iface=$(plan iface) cr_subnet=$(plan subnet) cr_udp=$(plan udp) cr_web=$(plan web)
+	cr_slot=$(plan slot) cr_bind=$(plan web_bind) cr_version=$(plan version) cr_sha=$(plan core_sha)
+	case $cr_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) run_result failed-cleaned "bad instance id $cr_id" "update the app" ;; esac
+	cr_root=/opt/sanityprotocol/csqtt/$cr_id cr_state=/var/lib/sanityprotocol/csqtt/$cr_id
+	cr_unit=sanity-csqtt-$cr_id.service
+	cr_release=$cr_root/releases/$cr_version-$(printf '%.8s' "$cr_sha")
+	MF=$cr_state/manifest.json MF_ID=$cr_id MF_OBJECTS=
+	# the parents this run makes are its own, never the manifest's (another instance may come to share them): removed when
+	# the run is undone and they are empty
+	cr_parents=
+	for cr_d in /opt/sanityprotocol /opt/sanityprotocol/csqtt /var/lib/sanityprotocol/csqtt; do
+		[ -e "$cr_d" ] || cr_parents="$cr_d $cr_parents"
+	done
+	action_cleanup() {
+		mf_undo
+		for cr_d in $cr_parents; do rmdir "$cr_d" 2>/dev/null; done
+		return 0
+	}
+	cr_fail() { action_cleanup; run_result failed-cleaned "$1" "${2:-check again}"; }
+	cr_flags="--listen 0.0.0.0:$cr_udp --web-port $cr_web --config-dir $cr_state --instance sqc-$cr_id --iface $cr_iface"
+	cr_flags="$cr_flags --tun-addr ${cr_subnet%.0/24}.1/24 --instance-slot $cr_slot"
+	[ -z "$cr_bind" ] || cr_flags="$cr_flags --web-bind $cr_bind"
+
+	# stage: nothing is made until the box and the binary have answered, and every object the manifest will name is new, so
+	# undoing this run can remove only what it made
+	run_phase stage 10
+	if [ -e "$cr_state" ] || [ -e "$cr_root" ] || [ -e "/etc/systemd/system/$cr_unit" ]; then
+		run_result failed-cleaned "sqc-$cr_id exists already" "check again"
+	fi
+	# a slot another instance of ours took since the plan (a second phone's create) would share its policy table and mark
+	for cr_u in /etc/systemd/system/sanity-csqtt-*.service; do
+		[ -f "$cr_u" ] || continue
+		if sed -n 's/^ExecStart=//p' "$cr_u" | grep -qE -- "--instance-slot $cr_slot( |\$)"; then
+			run_result failed-cleaned "slot $cr_slot is now ${cr_u##*/}'s" "check again: the app proposes another slot"
+		fi
+	done
+	[ "$(sha256sum "$RUN_DIR/core" 2>/dev/null | cut -d' ' -f1)" = "$cr_sha" ] || cr_fail "the uploaded core is damaged" "try again"
+	# its own answer with the flags this unit uses: an unknown flag or value fails here, not in a crash loop (M-129)
+	# shellcheck disable=SC2086 # the flags are words of ours
+	cr_said=$("$RUN_DIR/core" $cr_flags --version 2>&1 | head -n 1)
+	[ "$cr_said" = "csqtt $cr_version CSQTT-WIRE-3" ] || cr_fail "the core does not run here: $cr_said" "check the box's architecture"
+	# the TUN and the NAT the server needs, tried for real (M-130), as inspect.sh does: in a network namespace of their own
+	# where the box allows one, so what they make goes with it (iptables-nft's nat table included); else undone here
+	cr_probe=sqcp$cr_id
+	cr_ns=0
+	unshare -n true 2>/dev/null && cr_ns=1
+	cr_in_ns() { if [ $cr_ns = 1 ]; then unshare -n "$@"; else "$@"; fi; }
+	run_cmd cr_in_ns ip tuntap add mode tun name "$cr_probe" || cr_fail "this box cannot make a TUN interface" "ask the hoster to enable TUN/TAP"
+	[ $cr_ns = 1 ] || ip link del "$cr_probe" 2>/dev/null
+	command -v iptables >/dev/null 2>&1 || cr_fail "iptables is not installed (the server's NAT needs it)" "install iptables and try again"
+	# shellcheck disable=SC2016 # expanded by the sh that runs it, with the chain as $1
+	run_cmd cr_in_ns sh -c 'iptables -w 5 -t nat -N "$1" && iptables -w 5 -t nat -A "$1" -j MASQUERADE &&
+		iptables -w 5 -t mangle -N "$1" && iptables -w 5 -t mangle -A "$1" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' \
+		sh "$cr_probe" || cr_nat=failed
+	if [ $cr_ns = 0 ]; then
+		for cr_t in nat mangle; do iptables -w 5 -t $cr_t -F "$cr_probe" 2>/dev/null; iptables -w 5 -t $cr_t -X "$cr_probe" 2>/dev/null; done
+	fi
+	[ "${cr_nat:-}" != failed ] || cr_fail "this box's iptables cannot NAT (see the step's output)" "ask the hoster to enable NAT (iptable_nat, xt_TCPMSS)"
+	run_safe_point
+
+	mkdir -p "${cr_state%/*}" || cr_fail "cannot make ${cr_state%/*}"
+	mf_add dir "$cr_state"
+	mkdir -m 700 "$cr_state" || cr_fail "cannot make $cr_state"
+	mf_write
+	mf_add dir "$cr_root"
+	mkdir -p "$cr_release" && chmod 755 "$cr_root" "$cr_root/releases" "$cr_release" || cr_fail "cannot make $cr_release"
+	install -m 755 "$RUN_DIR/core" "$cr_release/csqtt-server" && ln -sfn "$cr_release" "$cr_root/current" || cr_fail "cannot install the core"
+	run_phase "state and unit" 30
+	# env (0600): the panel login, its secret path, the public address; never the main password, which env would apply over
+	# the store at every start (undoing a change made in the panel): it goes in the one-shot overrides the server consumes
+	{
+		printf 'CSQTT_WEB_USER=%s\n' "$(plan web_user)"
+		sed -n 's/^web_pass=/CSQTT_WEB_PASS=/p; s/^secret_path=/CSQTT_WEB_SECRET_PATH=/p' "$RUN_DIR/secrets"
+		printf 'CSQTT_PUBLIC_IP=%s\n' "$(plan public_ip)"
+	} >"$cr_state/env" && chmod 600 "$cr_state/env" || cr_fail "cannot write $cr_state/env"
+	( umask 077 && printf '{"main_password":"%s"}\n' "$(sed -n 's/^main_password=//p' "$RUN_DIR/secrets" | sed 's/[\\"]/\\&/g')" \
+		>"$cr_state/deploy-overrides.json" ) || cr_fail "cannot write the main password"
+	mf_add unit "/etc/systemd/system/$cr_unit"
+	cat >"/etc/systemd/system/$cr_unit" <<EOF || cr_fail "cannot write $cr_unit"
+[Unit]
+Description=csqtt server sqc-$cr_id (SanityProtocol)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# no CSQTT_SERVICE_MANAGER: the panel's «Перезапустить» then ends the server, and Restart=always starts it again (the
+# systemd route would restart a unit named after the instance, sqc-$cr_id.service, which is not this one)
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+EnvironmentFile=$cr_state/env
+ExecStart=$cr_root/current/csqtt-server $cr_flags
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl daemon-reload
+	run_safe_point
+
+	# switch: nothing ran before, so it is the start (Type=notify: it returns once the server said READY=1). From here a
+	# cancel is refused (D4): the run ends in ok or undoes itself
+	run_phase switch 60
+	: >"$RUN_DIR/switching"
+	run_cmd systemctl enable --now "$cr_unit" || cr_fail "$cr_unit did not start: $(journalctl -u "$cr_unit" -n 1 -o cat --no-pager 2>/dev/null | run_redact)"
+
+	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
+	run_phase verify 80
+	[ "$(systemctl is-active "$cr_unit")" = active ] || cr_fail "$cr_unit is not active"
+	cr_pid=$(systemctl show -p MainPID --value "$cr_unit")
+	for cr_check in "u $cr_udp UDP" "t $cr_web TCP"; do
+		set -- $cr_check
+		cr_holders=$(ss -H -l"$1"np "( sport = :$2 )" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
+		[ "$cr_holders" = "$cr_pid " ] || cr_fail "$3 $2 is held by pids ${cr_holders:-none} (ours: $cr_pid)"
+	done
+	ip link show "$cr_iface" >/dev/null 2>&1 || cr_fail "the server made no $cr_iface"
+	if command -v curl >/dev/null 2>&1; then
+		# the secret path only on curl's stdin, never in a process's arguments
+		cr_try=0
+		until printf 'url = "https://127.0.0.1:%s/%s/"\n' "$cr_web" "$(sed -n 's/^secret_path=//p' "$RUN_DIR/secrets")" |
+			curl -sk -K - -o /dev/null -m 3 -w '%{http_code}' 2>/dev/null | grep -qE '^(200|301|302|401)$'; do
+			cr_try=$((cr_try + 1))
+			[ $cr_try -lt 10 ] || cr_fail "the panel does not answer on 127.0.0.1:$cr_web"
+			sleep 1
+		done
+	fi
+	run_phase "done" 100
+	run_result ok "" "read the connection back"
+}
+
+# readback <instance id>: the connection to an instance of ours, for the engine alone (stdout; never a log): the ports and
+# the panel's bind from its unit, the panel's login from its env, the main password from a copy of its store read by its
+# own binary (the panel may have changed it), and the sha256 of the panel's certificate (DER) for the app's pin.
+cmd_readback() {
+	rb_id=$1
+	case $rb_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) csqtt_emit RB error "bad instance id"; csqtt_end; exit 2 ;; esac
+	rb_state=/var/lib/sanityprotocol/csqtt/$rb_id rb_unit=/etc/systemd/system/sanity-csqtt-$rb_id.service
+	rb_bin=/opt/sanityprotocol/csqtt/$rb_id/current/csqtt-server
+	if [ ! -f "$rb_unit" ] || [ ! -x "$rb_bin" ] || [ ! -f "$rb_state/env" ]; then
+		csqtt_emit RB error "sqc-$rb_id is not installed"
+		csqtt_end
+		exit 1
+	fi
+	rb_exec=$(sed -n 's/^ExecStart=//p' "$rb_unit" | head -n 1)
+	rb_env() { sed -n "s/^$1=//p" "$rb_state/env" | head -n 1; }
+	csqtt_emit RB public_ip "$(rb_env CSQTT_PUBLIC_IP)"
+	csqtt_emit RB udp_port "$(printf '%s\n' "$rb_exec" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')"
+	csqtt_emit RB web_port "$(printf '%s\n' "$rb_exec" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')"
+	csqtt_emit RB web_bind "$(printf '%s\n' "$rb_exec" | sed -n 's/.*--web-bind \([^ ]*\).*/\1/p')"
+	csqtt_emit RB web_user "$(rb_env CSQTT_WEB_USER)"
+	csqtt_emit RB web_pass "$(rb_env CSQTT_WEB_PASS)"
+	csqtt_emit RB secret_path "$(rb_env CSQTT_WEB_SECRET_PATH)"
+	rb_cert=$(awk '/-----BEGIN CERTIFICATE-----/ {f = 1; next} /-----END CERTIFICATE-----/ {exit} f' "$rb_state/web_cert.pem" 2>/dev/null |
+		base64 -d 2>/dev/null | sha256sum | cut -d' ' -f1)
+	[ "$rb_cert" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] && rb_cert=
+	csqtt_emit RB cert_sha256 "$rb_cert"
+	# the store is copied, so the live one is never opened by a second process; the server's line is escaped already
+	rb_copy=$(mktemp -d) || { csqtt_emit RB error "no temporary directory"; csqtt_end; exit 1; }
+	for rb_f in csqtt.db csqtt.db-wal csqtt.db-shm passwords.json passwords.json.imported; do
+		[ ! -f "$rb_state/$rb_f" ] || cp -p "$rb_state/$rb_f" "$rb_copy/"
+	done
+	rb_main=$("$rb_bin" --read-store "$rb_copy" 2>/dev/null | grep '^CSQTT_RB|main_password|' | head -n 1)
+	rm -rf "$rb_copy"
+	if [ -n "$rb_main" ]; then
+		printf '%s\n' "$rb_main"
+		csqtt_marker_count=$((csqtt_marker_count + 1))
+	else
+		csqtt_emit RB error "the main password could not be read from the store"
+	fi
+	csqtt_end
+}
+
 cmd_exec() {
 	RUN_ID=$1
 	RUN_DIR=$(run_dir "$RUN_ID")
@@ -270,6 +495,7 @@ cmd_exec() {
 	run_recheck
 	case $(plan action) in
 	selftest) action_selftest ;;
+	create) action_create ;;
 	*) run_result failed-cleaned "unknown action $(plan action)" "update the app" ;;
 	esac
 }
@@ -280,5 +506,6 @@ tail) cmd_tail "${2:?run id}" "${3:-0}" ;;
 cancel) cmd_cancel "${2:?run id}" ;;
 status) cmd_status ;;
 exec) cmd_exec "${2:?run id}" ;;
+readback) cmd_readback "${2:?instance id}" ;;
 *) csqtt_emit RUN error "unknown verb: ${1:-}"; csqtt_end; exit 2 ;;
 esac

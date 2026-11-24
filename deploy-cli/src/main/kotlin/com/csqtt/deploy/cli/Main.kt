@@ -4,7 +4,19 @@ package com.csqtt.deploy.cli
 
 import com.csqtt.deploy.bundle.Bundle
 import com.csqtt.deploy.inspect.Preflight
+import com.csqtt.deploy.inspect.Classifier
+import com.csqtt.deploy.inspect.Inventory
+import com.csqtt.deploy.plan.Proposer
+import com.csqtt.deploy.plan.ProposalRefused
 import com.csqtt.deploy.run.Attached
+import com.csqtt.deploy.run.Connection
+import com.csqtt.deploy.run.Core
+import com.csqtt.deploy.run.CreateRun
+import com.csqtt.deploy.run.Credentials
+import com.csqtt.deploy.run.Outside
+import com.csqtt.deploy.run.PanelAnswer
+import com.csqtt.deploy.run.ReadBack
+import com.csqtt.deploy.run.ReadBackFailed
 import com.csqtt.deploy.run.CancelOutcome
 import com.csqtt.deploy.run.Coordinator
 import com.csqtt.deploy.run.DeployState
@@ -53,10 +65,16 @@ private const val USAGE = """usage: deploy-cli <command>
   attach <target>         follow the run <target>.state names (or say what state it holds)
   cancel <target>         ask that run to stop at its next safe point
   runs <target>           the runs the box keeps: id, live, result (none and not live: interrupted)
+  create <target> [id=… iface=… subnet=… udp=… web=… slot=… bind=127.0.0.1]   «Создать новый» (B8): inspect as root,
+                          propose a new instance that collides with nothing (the words override the proposal), run it,
+                          read the connection back and check it from here: a DTLS ClientHello on its UDP port and the
+                          panel over HTTPS, its certificate pinned. The core is the target's core=<file>, core_version=…
+  readback <target> <id>  «Подключиться» to an instance of ours: its connection read back, then the same outside check
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
       · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed) · 7 a run failed (its result
       printed) · 8 another run holds the box · 9 the run was interrupted · 11 no such run on the box (it never started,
-      or was pruned), or for cancel, the run had already ended"""
+      or was pruned), or for cancel, the run had already ended · 10 the run is ok but its server does not answer from
+      here (the cause printed)"""
 
 fun main(args: Array<String>) {
     val code = try {
@@ -79,6 +97,9 @@ private fun dispatch(args: Array<String>): Int {
         args.size >= 2 && args[0] == "inspect" -> withSession(File(args[1])) { session, p -> inspect(session, p, args.drop(2)) }
         args.size >= 3 && args[0] == "run" && args[2] == "selftest" ->
             withSession(File(args[1])) { session, p -> runSelftest(session, p, File(args[1]), args.drop(3)) }
+        args.size >= 2 && args[0] == "create" -> withSession(File(args[1])) { session, p -> create(session, p, File(args[1]), args.drop(2)) }
+        args.size == 3 && args[0] == "readback" ->
+            withSession(File(args[1])) { session, p -> readBack(rootOf(session, p), args[2], p.prop("host").orEmpty(), null) }
         args.size == 2 && args[0] in setOf("attach", "cancel", "runs") ->
             withSession(File(args[1])) { session, p -> runVerb(session, p, File(args[1]), args[0]) }
         args.size == 3 && args[0] == "login-key" && args[2] in setOf("add", "remove") ->
@@ -387,4 +408,105 @@ private fun runVerb(session: SshSession, p: Properties, target: File, verb: Stri
         }
     }
     return follow(runner, coordinator, runId)
+}
+
+private fun rootOf(session: SshSession, p: Properties): RootRunner {
+    val remote = session.asRemote()
+    return RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+}
+
+/** «Создать новый»: inspect, propose, run, read back, check from outside (P2 B8). */
+private fun create(session: SshSession, p: Properties, target: File, words: List<String>): Int {
+    val edits = words.associate { it.substringBefore('=') to it.substringAfter('=', "") }
+    val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
+    val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
+    val remote = session.asRemote()
+    val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    val preflight = Preflight.from(report.lines)
+    val verdicts = PreflightRules.verdicts(preflight, System.currentTimeMillis() / 1000)
+    verdicts.filter { it.level.name != "OK" }.forEach { println("${it.level} ${it.finding}" + if (it.detail.isEmpty()) "" else " ${it.detail}") }
+    if (PreflightRules.stops(verdicts).isNotEmpty()) return 6
+    val inventory = Inventory.from(report.lines)
+    val classification = Classifier.classify(inventory)
+    val proposed = try {
+        Proposer.propose(classification, inventory)
+    } catch (refused: ProposalRefused) {
+        println("refused: ${refused.reason}")
+        return 6
+    }
+    val proposal = proposed.copy(
+        id = edits["id"] ?: proposed.id,
+        iface = edits["iface"] ?: proposed.iface,
+        subnet = edits["subnet"] ?: proposed.subnet,
+        udpPort = edits["udp"]?.toIntOrNull() ?: proposed.udpPort,
+        webPort = edits["web"]?.toIntOrNull() ?: proposed.webPort,
+        slot = edits["slot"]?.toIntOrNull() ?: proposed.slot,
+        webBind = if ("bind" in edits) edits["bind"]?.ifEmpty { null } else proposed.webBind,
+    )
+    val problems = Proposer.problems(proposal, classification, inventory)
+    if (problems.isNotEmpty()) {
+        problems.forEach { println("problem ${it.field}: ${it.reason}") }
+        return 2
+    }
+    val plan = Proposer.createPlan(proposal, classification)
+    plan.will.forEach { println("will: $it") }
+    plan.unchanged.forEach { println("unchanged: $it") }
+    val credentials = Credentials.generate()
+    val sshHost = p.prop("host").orEmpty()
+    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials)
+    val runner = Runner(remote, root)
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    when (val outcome = runner.start(runId, runPlan)) {
+        is StartOutcome.Started -> {}
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            return 8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            return 7
+        }
+    }
+    val code = follow(runner, coordinator, runId, before)
+    if (code != 0) return code
+    return readBack(root, proposal.id, sshHost, credentials)
+}
+
+/** The connection read back (never printed: its passwords are compared with what was set, if anything was), then the check. */
+private fun readBack(root: RootRunner, id: String, sshHost: String, set: Credentials?): Int {
+    val connection: Connection = try {
+        ReadBack.read(root, id, sshHost)
+    } catch (failed: ReadBackFailed) {
+        println("readback failed: ${failed.reason}")
+        return 7
+    }
+    println("connection host=${connection.host} udp=${connection.udpPort} web=${connection.webPort} panel=${connection.panelUrl} " +
+        "login=${connection.webUser} cert=${connection.certSha256 ?: "-"}")
+    if (set != null) {
+        println("readback main_password " + if (connection.mainPassword == set.mainPassword) "matches the one set" else "DIFFERS from the one set")
+        println("readback panel_password " + if (connection.webPass == set.webPass) "matches the one set" else "DIFFERS from the one set")
+    }
+    val outside = Outside.check(connection)
+    val panel = when (val answer = outside.panel) {
+        null -> "local-only"
+        is PanelAnswer.Status -> "http-${answer.code}"
+        PanelAnswer.WrongCertificate -> "wrong-certificate"
+        is PanelAnswer.NoAnswer -> "no-answer (${answer.reason})"
+    }
+    println("outside udp=${if (outside.udp) "answers" else "silent"} panel=$panel")
+    val cause = outside.cause(connection)
+    return if (cause == null) {
+        println("outcome ok")
+        0
+    } else {
+        println("outcome ok-unreachable-from-outside: $cause")
+        10
+    }
 }

@@ -197,7 +197,7 @@ object PreflightRules {
         }
     }
 
-    private fun isPrivate(address: String): Boolean {
+    internal fun isPrivate(address: String): Boolean {
         val o = address.split('.').mapNotNull { it.toIntOrNull() }
         if (o.size != 4) return false
         return o[0] == 10 || (o[0] == 172 && o[1] in 16..31) || (o[0] == 192 && o[1] == 168) || (o[0] == 100 && o[1] in 64..127)
