@@ -150,13 +150,19 @@ pre_forwarding() {
 pre_ipv4() {
 	p4_dev='' p4_via='' p4_src=''
 	if have ip; then
-		# the uplink is the first default route through no tunnel: a VPN client on the box (csqtt, sqc, mrtt, wg, awg, tun)
-		# would otherwise give its own address as the box's (M-118); its source is the uplink's own first global address
-		p4_line=$(ip -4 route show default 2>/dev/null | awk '{d = ""; for (i = 1; i < NF; i++) if ($i == "dev") d = $(i + 1)}
+		# the uplink is the first default route through no tunnel: a VPN client on the box (csqtt, sqc, mrtt, wg, awg)
+		# would otherwise give its own address as the box's (M-118); a box whose only uplink is a ppp or tun device (PPPoE)
+		# keeps it (B9 review F4)
+		p4_all=$(ip -4 route show default 2>/dev/null)
+		p4_line=$(printf '%s\n' "$p4_all" | awk '{d = ""; for (i = 1; i < NF; i++) if ($i == "dev") d = $(i + 1)}
 			d != "" && d !~ /^(csqtt|sqc|mrtt|mrtx|wg|awg|tun|tap|ppp)/ {print; exit}')
+		[ -n "$p4_line" ] || p4_line=$(printf '%s\n' "$p4_all" | awk '/ dev / && !/ dev (csqtt|sqc|mrtt|mrtx|wg|awg)/ {print; exit}')
 		p4_dev=$(printf '%s\n' "$p4_line" | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
 		p4_via=$(printf '%s\n' "$p4_line" | awk '{for (i = 1; i < NF; i++) if ($i == "via") print $(i + 1)}')
-		[ -z "$p4_dev" ] || p4_src=$(ip -4 -o addr show dev "$p4_dev" scope global 2>/dev/null | awk 'NR == 1 {sub(/\/.*/, "", $4); print $4}')
+		# its source: the route's own, else what the kernel would pick through it, else its first global address
+		p4_src=$(printf '%s\n' "$p4_line" | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+		[ -n "$p4_src" ] || [ -z "$p4_dev" ] || p4_src=$(ip -4 route get 1.1.1.1 oif "$p4_dev" 2>/dev/null | awk 'NR == 1 {for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+		[ -n "$p4_src" ] || [ -z "$p4_dev" ] || p4_src=$(ip -4 -o addr show dev "$p4_dev" scope global 2>/dev/null | awk 'NR == 1 {sub(/\/.*/, "", $4); print $4}')
 	fi
 	p4_addrs=''
 	have ip && p4_addrs=$(ip -4 -o addr show scope global 2>/dev/null | awk '{printf "%s ", $4}')

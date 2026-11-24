@@ -347,6 +347,8 @@ host_lock_wait() {
 	while [ -n "$(apt_lock_holder)" ]; do
 		hl_i=$((hl_i + 1))
 		[ $hl_i -le 240 ] || { run_beat_stop; return 1; }
+		# a cancel is honoured while waiting: nothing is made yet (B9 review F2)
+		run_safe_point
 		sleep 5
 	done
 	run_beat_stop
@@ -355,21 +357,30 @@ host_lock_wait() {
 # iptables, which the server's NAT needs (Alma ships without it): installed, never removed by an undo
 host_iptables() {
 	command -v iptables >/dev/null 2>&1 && return 0
+	run_safe_point
+	hi_step=$RUN_STEP
 	run_phase packages 12
 	if command -v apt-get >/dev/null 2>&1; then
 		host_lock_wait || cr_fail "the package lock is held by $(apt_lock_holder)" "wait for it to finish, then try again"
 		# a dpkg run cut off before leaves packages half-configured, and apt refuses until they are: once (DE-O4)
 		[ -z "$(dpkg --audit 2>/dev/null)" ] || run_cmd env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold </dev/null
 		hi_apt="env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends -o Dpkg::Options::=--force-confold iptables"
+		run_beat_start "the package manager"
 		# shellcheck disable=SC2086 # the words of ours
 		run_cmd $hi_apt </dev/null || { run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q </dev/null && run_cmd $hi_apt </dev/null; } ||
-			cr_fail "iptables could not be installed" "check the box's package sources, then try again"
+			{ run_beat_stop; cr_fail "iptables could not be installed" "check the box's package sources, then try again"; }
+		run_beat_stop
 	elif command -v dnf >/dev/null 2>&1; then
-		run_cmd dnf install -y -q iptables-nft </dev/null || cr_fail "iptables could not be installed" "check the box's package sources, then try again"
+		# EL 9 and Fedora name it iptables-nft, EL 8 iptables (B9 review F3; 2.5.3's deploy tried both)
+		run_beat_start "the package manager"
+		run_cmd dnf install -y -q iptables-nft </dev/null || run_cmd dnf install -y -q iptables </dev/null ||
+			{ run_beat_stop; cr_fail "iptables could not be installed" "check the box's package sources, then try again"; }
+		run_beat_stop
 	else
 		cr_fail "iptables is not installed (the server's NAT needs it)" "install iptables and try again"
 	fi
 	host_add package name=iptables
+	RUN_STEP=$hi_step
 }
 
 # the floors, each raised only when lower and not in our drop-in already (another instance of ours set it), with what it
@@ -396,10 +407,18 @@ host_sysctl() {
 		# writing ip_forward resets accept_redirects to !forwarding (the kernel's devinet): kept to put back beside it
 		hs_redir=''
 		[ "$hs_key" != net.ipv4.ip_forward ] || hs_redir="redirects=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null)"
+		if [ "$hs_now" != "$hs_set" ]; then
+			run_cmd sysctl -w "$hs_key=$hs_set"
+			# procps answers 0 for a write the kernel refused (a container's read-only /proc/sys): read back (B9 review F6)
+			if [ "$(sysctl -n "$hs_key" 2>/dev/null | tr -s '\t ' '  ')" != "$hs_set" ]; then
+				[ "$hs_key" != net.ipv4.ip_forward ] || cr_fail "this box refuses forwarding (net.ipv4.ip_forward)" "ask the hoster to allow it"
+				run_emit OUT "$hs_key stays $hs_now: the box refuses it; the server works with what it has"
+				continue
+			fi
+		fi
 		host_add sysctl "key=$hs_key" "was=$(printf '%s' "$hs_now" | tr ' ' ,)" "set=$(printf '%s' "$hs_set" | tr ' ' ,)" $hs_redir
 		[ -f "$HOST_DROPIN" ] || printf '# SanityProtocol csqtt (APP-PLAN §6.9): forwarding and raise-only floors; each raised from the value above it\n' >"$HOST_DROPIN"
 		printf '# %s was %s\n%s = %s\n' "$hs_key" "$hs_now" "$hs_key" "$hs_set" >>"$HOST_DROPIN"
-		[ "$hs_now" = "$hs_set" ] || run_cmd sysctl -w "$hs_key=$hs_set" || cr_fail "cannot set $hs_key"
 	done <<EOF
 $HOST_FLOORS
 EOF
@@ -427,13 +446,21 @@ host_firewall() {
 		run_cmd firewall-cmd -q --permanent --new-zone="sqc$cr_id" &&
 			run_cmd firewall-cmd -q --permanent --zone="sqc$cr_id" --add-interface="$cr_iface" ||
 			cr_fail "firewalld would not take $cr_iface into a zone of its own"
+		# its clients reach the instance's own ports through the tunnel too (its panel); every other host port stays closed
+		# to them (M-122), which also closes the panel's «Локальный прокси» route on this box: named in the plan (B9 review F1)
+		for hf_r in $cr_open; do
+			run_cmd firewall-cmd -q --permanent --zone="sqc$cr_id" --add-port="$hf_r" || cr_fail "firewalld would not open $hf_r to $cr_iface"
+		done
 		host_add firewalld-policy "policy=sqc$cr_id-fwd"
 		run_cmd firewall-cmd -q --permanent --new-policy="sqc$cr_id-fwd" ||
 			cr_fail "this firewalld has no policies (0.9 or newer is needed)" "update firewalld, then try again"
 		run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --add-ingress-zone="sqc$cr_id" &&
 			run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --add-egress-zone=ANY &&
-			run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --set-target=ACCEPT &&
-			run_cmd firewall-cmd -q --reload || cr_fail "firewalld would not let $cr_iface forward"
+			run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --set-target=ACCEPT ||
+			cr_fail "firewalld would not let $cr_iface forward"
+		# the reload drops firewalld's runtime-only rules (fail2ban's bans): named in the plan; an undo reloads only after it
+		host_add firewalld-reload
+		run_cmd firewall-cmd -q --reload || cr_fail "firewalld would not reload"
 		;;
 	esac
 }
@@ -458,9 +485,11 @@ host_undo() {
 			grep -q '^[a-z]' "$HOST_DROPIN" 2>/dev/null || rm -f "$HOST_DROPIN"
 			;;
 		ufw) ufw delete allow "$hu_rule" >/dev/null 2>&1 ;;
-		firewalld-port) firewall-cmd -q --permanent --zone="$hu_zone" --remove-port="$hu_port" 2>/dev/null; hu_reload=1 ;;
-		firewalld-zone) firewall-cmd -q --permanent --delete-zone="$hu_zone" 2>/dev/null; hu_reload=1 ;;
-		firewalld-policy) firewall-cmd -q --permanent --delete-policy="$hu_policy" 2>/dev/null; hu_reload=1 ;;
+		firewalld-port) firewall-cmd -q --permanent --zone="$hu_zone" --remove-port="$hu_port" 2>/dev/null ;;
+		firewalld-zone) firewall-cmd -q --permanent --delete-zone="$hu_zone" 2>/dev/null ;;
+		firewalld-policy) firewall-cmd -q --permanent --delete-policy="$hu_policy" 2>/dev/null ;;
+		# this run reloaded: its permanent changes went live, so taking them back needs a reload too (B9 review F5)
+		firewalld-reload) hu_reload=1 ;;
 		esac
 	done <<EOF
 $hu_list
@@ -586,6 +615,12 @@ action_create() {
 			# stopped, its rules with it), and the create runs again from the start with this run's credentials
 			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
 			MF_HOST=$(mf_host_of "$cr_state/manifest.json")
+			# the floors are the box's: while another instance of ours stands, they stay (it may have skipped what this one set)
+			for cr_m in /var/lib/sanityprotocol/csqtt/*/manifest.json; do
+				[ -f "$cr_m" ] && [ "$cr_m" != "$cr_state/manifest.json" ] || continue
+				MF_HOST=$(printf '%s\n' "$MF_HOST" | grep -v '^sysctl ')
+				break
+			done
 			run_cmd systemctl stop "$cr_unit"
 			mf_undo
 			cr_server_undo

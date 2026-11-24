@@ -69,7 +69,9 @@ object CreateRun {
             when {
                 firewall["ufw"] == "active" -> "Откроет в ufw: ${ports.joinToString(", ")}"
                 firewall["firewalld"] == "active" ->
-                    "Откроет в firewalld: ${ports.joinToString(", ")}; интерфейс ${p.iface} получит свою зону с выходом наружу (порты сервера ему закрыты)"
+                    "Откроет в firewalld: ${ports.joinToString(", ")}; интерфейс ${p.iface} получит свою зону с выходом наружу " +
+                        "(другие порты сервера клиентам закрыты, поэтому маршрут «Локальный прокси» здесь работать не будет); " +
+                        "firewalld перечитает настройки, и его временные правила (например, баны fail2ban) сбросятся"
                 else -> "Откроет ${ports.joinToString(" и ")} в iptables, если входящие там закрыты"
             },
         )
