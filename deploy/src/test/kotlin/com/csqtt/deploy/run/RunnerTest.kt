@@ -57,11 +57,45 @@ class RunnerTest {
         }
         val events = mutableListOf<RunEvent>()
         val result = Runner(box, RootRunner(box, Privilege.Root)).attach("r1", pollMs = 1) { e, _ -> events += e }
-        assertEquals(RunResult("failed-cleaned", "recheck", "port 41000 is now held by nginx", "check again"), result)
+        assertEquals(Attached.Done(RunResult("failed-cleaned", "recheck", "port 41000 is now held by nginx", "check again")), result)
         assertEquals(listOf(RunEvent.Phase("stage"), RunEvent.Percent(10)), events.take(2))
         // a log that ends with no result: interrupted (a reboot, a kill)
         val cut = Box { _, _ -> ok("CSQTT_TAIL|ended|30\nCSQTT_RUN|r2|selftest\nCSQTT_PHASE|step 1\n") }
-        assertNull(Runner(cut, RootRunner(cut, Privilege.Root)).attach("r2", pollMs = 1))
+        assertEquals(Attached.Interrupted, Runner(cut, RootRunner(cut, Privilege.Root)).attach("r2", pollMs = 1))
+        // no run.sh or no log on the box: a run that never started there, never one to «Продолжить» (B7b review F1)
+        for (answer in listOf("", "sh: 0: cannot open /var/lib/sanityprotocol/csqtt-deploy/r3/run.sh\n", "CSQTT_TAIL|missing|0\n")) {
+            val none = Box { _, _ -> ok(answer) }
+            assertEquals(Attached.NotFound, Runner(none, RootRunner(none, Privilege.Root)).attach("r3", pollMs = 1))
+        }
+    }
+
+    @Test
+    fun aCancelSaysWhatItDid() {
+        for ((answer, outcome) in listOf(
+            "CSQTT_CANCEL|requested|r1\nCSQTT_END|1\n" to CancelOutcome.Requested,
+            "CSQTT_CANCEL|ended|r1\nCSQTT_END|1\n" to CancelOutcome.Ended,
+            "CSQTT_CANCEL|missing|r1\nCSQTT_END|1\n" to CancelOutcome.NotFound,
+            "sh: 0: cannot open run.sh\n" to CancelOutcome.NotFound,
+            "CSQTT_CANCEL|refused|the switch has begun\nCSQTT_END|1\n" to CancelOutcome.Refused("the switch has begun"),
+        )) {
+            val box = Box { _, _ -> ok(answer) }
+            assertEquals(answer, outcome, Runner(box, RootRunner(box, Privilege.Root)).cancel("r1"))
+        }
+    }
+
+    @Test
+    fun theCoordinatorSavesChangesOnly() {
+        var saves = 0
+        val store = object : StateStore {
+            override fun load(): DeployState? = null
+            override fun save(state: DeployState?) {
+                saves++
+            }
+        }
+        val coordinator = Coordinator(store)
+        repeat(3) { coordinator.move(DeployState.Running("r1", "stage", 10)) }
+        coordinator.move(DeployState.Running("r1", "stage", 20))
+        assertEquals(2, saves)
     }
 
     @Test

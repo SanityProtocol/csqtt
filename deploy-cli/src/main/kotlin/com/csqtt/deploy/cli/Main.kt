@@ -4,6 +4,8 @@ package com.csqtt.deploy.cli
 
 import com.csqtt.deploy.bundle.Bundle
 import com.csqtt.deploy.inspect.Preflight
+import com.csqtt.deploy.run.Attached
+import com.csqtt.deploy.run.CancelOutcome
 import com.csqtt.deploy.run.Coordinator
 import com.csqtt.deploy.run.DeployState
 import com.csqtt.deploy.run.FileStateStore
@@ -53,7 +55,8 @@ private const val USAGE = """usage: deploy-cli <command>
   runs <target>           the runs the box keeps: id, live, result (none and not live: interrupted)
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
       · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed) · 7 a run failed (its result
-      printed) · 8 another run holds the box · 9 the run was interrupted"""
+      printed) · 8 another run holds the box · 9 the run was interrupted · 11 no such run on the box (it never started,
+      or was pruned), or for cancel, the run had already ended"""
 
 fun main(args: Array<String>) {
     val code = try {
@@ -300,7 +303,7 @@ private fun coordinator(target: File) = Coordinator(FileStateStore(File(target.p
 /** Follows a run to its result, keeping the coordinator's Running state current (the pendingRunId is in it from the start). */
 private fun follow(runner: Runner, coordinator: Coordinator, runId: String): Int {
     var running = DeployState.Running(runId)
-    val result = runner.attach(runId) { event, _ ->
+    val attached = runner.attach(runId) { event, _ ->
         when (event) {
             is RunEvent.Phase -> running = running.copy(phase = event.name, waitingFor = null)
             is RunEvent.Percent -> running = running.copy(percent = event.value)
@@ -317,13 +320,22 @@ private fun follow(runner: Runner, coordinator: Coordinator, runId: String): Int
             is RunEvent.Result -> "result ${event.result.kind} at ${event.result.step}: ${event.result.cause} ${event.result.next}".trim()
         })
     }
-    return if (result == null) {
-        coordinator.move(DeployState.Interrupted(runId))
-        println("interrupted: the run ended with no result")
-        9
-    } else {
-        coordinator.move(DeployState.Finished(result))
-        if (result.ok) 0 else 7
+    return when (attached) {
+        is Attached.Done -> {
+            coordinator.move(DeployState.Finished(attached.result))
+            if (attached.result.ok) 0 else 7
+        }
+        Attached.Interrupted -> {
+            coordinator.move(DeployState.Interrupted(runId))
+            println("interrupted: the run ended with no result")
+            9
+        }
+        Attached.NotFound -> {
+            // its id was kept before the start, and the start never reached the box: back to before it (B7b review F1)
+            coordinator.move(DeployState.Idle)
+            println("no such run on the box: $runId never started there, or was pruned")
+            11
+        }
     }
 }
 
@@ -334,16 +346,18 @@ private fun runSelftest(session: SshSession, p: Properties, target: File, args: 
     val plan = RunPlan("selftest", mapOf("steps" to (args.getOrNull(0) ?: "3"), "step_seconds" to (args.getOrNull(1) ?: "2"),
         "ports" to args.drop(2).joinToString(" ")), mapOf("zoo_secret" to "ZooSecretValue26"))
     // the pendingRunId is kept before the start: a death in between finds the run by it, or finds no run at all
+    val before = coordinator.state
     coordinator.move(DeployState.Running(runId))
     return when (val outcome = runner.start(runId, plan)) {
         is StartOutcome.Started -> follow(runner, coordinator, runId)
         is StartOutcome.Busy -> {
-            coordinator.move(DeployState.Idle)
-            println("busy: run ${outcome.activeRunId} holds the box (attach to watch it)")
+            // the box's own run is the one to watch; with no id, what was kept before stays (B7b review F2)
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
             8
         }
         is StartOutcome.Refused -> {
-            coordinator.move(DeployState.Idle)
+            coordinator.move(before)
             println("refused: ${outcome.reason}")
             7
         }
@@ -364,9 +378,12 @@ private fun runVerb(session: SshSession, p: Properties, target: File, verb: Stri
         return 2
     }
     if (verb == "cancel") {
-        runner.cancel(runId)
-        println("cancel asked for $runId")
-        return 0
+        return when (val outcome = runner.cancel(runId)) {
+            CancelOutcome.Requested -> { println("cancel asked for $runId"); 0 }
+            CancelOutcome.Ended -> { println("nothing to cancel: $runId had already ended"); 11 }
+            CancelOutcome.NotFound -> { println("no such run on the box: $runId"); 11 }
+            is CancelOutcome.Refused -> { println("cancel refused: ${outcome.reason}"); 7 }
+        }
     }
     return follow(runner, coordinator, runId)
 }

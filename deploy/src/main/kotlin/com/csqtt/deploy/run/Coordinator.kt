@@ -56,6 +56,9 @@ class Coordinator(private val store: StateStore) {
     }
 
     fun move(next: DeployState) {
+        // a run's every log line moves it to the state it is already in: nothing to save or tell (B7b review H15, a store
+        // write per line)
+        if (next == state) return
         state = next
         store.save(next.takeIf { it.persisted })
         listeners.forEach { it(next) }

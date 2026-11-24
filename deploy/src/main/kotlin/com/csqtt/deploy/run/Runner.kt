@@ -52,6 +52,31 @@ data class Tail(val events: List<RunEvent>, val nextOffset: Long, val state: Str
     val active: Boolean get() = state == "active"
 }
 
+/** How following a run ended (B7b review F1): its result; cut off with none; or no such run on the box at all. */
+sealed interface Attached {
+    data class Done(val result: RunResult) : Attached
+
+    /** The run's unit ended with no result: a reboot, a kill. «Продолжить» runs it again. */
+    data object Interrupted : Attached
+
+    /** The box has no such run: it never started (a death between keeping its id and starting it), or it was pruned. */
+    data object NotFound : Attached
+}
+
+/** What a cancel did (B7b review F3). */
+sealed interface CancelOutcome {
+    /** The run stops at its next safe point. */
+    data object Requested : CancelOutcome
+
+    /** The run had already ended: nothing to stop. */
+    data object Ended : CancelOutcome
+
+    data object NotFound : CancelOutcome
+
+    /** The run is past the point where a cancel could undo it (B8's switch), or the box said why not. */
+    data class Refused(val reason: String) : CancelOutcome
+}
+
 data class RunInfo(val id: String, val active: Boolean, val result: String, val action: String) {
     /** A log with no result and no live unit: the run was cut off (a reboot, an OOM kill). */
     val interrupted: Boolean get() = !active && result.isEmpty()
@@ -123,28 +148,39 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
     }
 
     /**
-     * Follows a run to its result, from [offset]: every event to [onEvent], a tail every [pollMs]. null when the run ended
-     * with no result (interrupted: a reboot, a kill) or is not on the box.
+     * Follows a run to its result, from [offset]: every event to [onEvent], a tail every [pollMs]. A run that ended with no
+     * result was interrupted; a run the box does not have was never started there (or was pruned): the two are told apart.
      */
-    fun attach(runId: String, offset: Long = 0, pollMs: Long = 2_000, onEvent: (RunEvent, Long) -> Unit = { _, _ -> }): RunResult? {
+    fun attach(runId: String, offset: Long = 0, pollMs: Long = 2_000, onEvent: (RunEvent, Long) -> Unit = { _, _ -> }): Attached {
         var at = offset
         while (true) {
             val tail = tail(runId, at)
+            // no log, or no run.sh to ask: cmd_start makes both before the unit, so this run never started here
+            if (tail.state == "missing") return Attached.NotFound
             at = tail.nextOffset
             tail.events.forEach { onEvent(it, at) }
-            tail.events.filterIsInstance<RunEvent.Result>().lastOrNull()?.let { return it.result }
+            tail.events.filterIsInstance<RunEvent.Result>().lastOrNull()?.let { return Attached.Done(it.result) }
             if (!tail.active) {
                 // the unit is gone: one more read for lines written just before it ended, then it is interrupted
                 val last = tail(runId, at)
                 last.events.forEach { onEvent(it, last.nextOffset) }
-                return last.events.filterIsInstance<RunEvent.Result>().lastOrNull()?.result
+                return last.events.filterIsInstance<RunEvent.Result>().lastOrNull()?.let { Attached.Done(it.result) } ?: Attached.Interrupted
             }
             Thread.sleep(pollMs)
         }
     }
 
-    fun cancel(runId: String) {
-        root.run(RemoteCommand.of("/bin/sh", "$RUNS/$runId/run.sh", "cancel", runId))
+    fun cancel(runId: String): CancelOutcome {
+        val result = root.run(RemoteCommand.of("/bin/sh", "$RUNS/$runId/run.sh", "cancel", runId))
+        // no run.sh to run: no such run
+        val line = (LineCodec.parse(result.stdoutText) as? Report.Complete)?.lines?.singleOrNull { it.kind == "CANCEL" }
+            ?: return CancelOutcome.NotFound
+        return when (line.fields.firstOrNull()) {
+            "requested" -> CancelOutcome.Requested
+            "ended" -> CancelOutcome.Ended
+            "missing" -> CancelOutcome.NotFound
+            else -> CancelOutcome.Refused(line.fields.drop(1).joinToString(" ").ifEmpty { line.fields.firstOrNull().orEmpty() })
+        }
     }
 
     /** The runs the box keeps, read with run.sh on stdin (no run needs to exist), as the login user. */

@@ -92,6 +92,12 @@ cmd_tail() {
 cmd_cancel() {
 	rc_dir=$(run_dir "$1")
 	[ -d "$rc_dir" ] || { csqtt_emit CANCEL missing "$1"; csqtt_end; exit 2; }
+	# a run that has ended has nothing to stop: say so, rather than leave a flag nobody reads (B7b review F3)
+	if grep -q '^CSQTT_RESULT|' "$rc_dir/log" 2>/dev/null || [ "$(systemctl is-active "sanity-csqtt-deploy-$1" 2>/dev/null)" != active ]; then
+		csqtt_emit CANCEL ended "$1"
+		csqtt_end
+		exit 0
+	fi
 	: >"$rc_dir/cancel"
 	csqtt_emit CANCEL requested "$1"
 	csqtt_end
