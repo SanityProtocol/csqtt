@@ -35,19 +35,44 @@ class ClassifierBoxesTest {
         "store|dir=$dir|files=$files|lock=none|schema=$schema|env_keys=CSQTT_WEB_PASS|public_ip=|domain="
 
     @Test
+    fun aStoppedDockerHidesOnlyWhatItHolds() {
+        // Docker installed and stopped, and a store with no sign of Docker (a stock uninstall's leftover, a podman box's): it
+        // is the leftover it looks like, removal offered (B5 verify N1)
+        val plain = classify(store("/etc/csqtt"), "docker|daemon=inactive")
+        assertEquals(InstallState.LEFTOVER, plain.installations.single().state)
+        assertEquals(listOf(com.csqtt.deploy.plan.Action.REMOVE_LEFTOVERS), Manager.entries(plain, Version(2, 6, 0)).single().offers.map { it.action })
+        // a 2.0.0 Docker install's own docker dir is such a sign
+        assertTrue(classify(store("/etc/csqtt", files = "csqtt.db,docker"), "docker|daemon=inactive").installations.single().dockerUnseen)
+    }
+
+    @Test
+    fun aCrashLoopingContainerIsACrashLoopBesideItsDeadUnit() {
+        // B16 with its container restarting, its server caught alive between two restarts (B5 verify N2)
+        val c = classify(
+            unit("csqtt.service", "/usr/local/bin/csqtt", active = "inactive", sub = "dead", fileState = "disabled"),
+            "ctr|id=0123456789ab|name=csqtt|image=csqtt:2.5.3|state=restarting|pid=0|restarts=14|exit=1|policy=unless-stopped|net=host|labels=|flags=|mounts=/etc/csqtt:/etc/csqtt|runtime=docker",
+            proc(51, "/usr/local/bin/csqtt", ctr = "0123456789ab", tun = "csqtt1"),
+            store("/etc/csqtt"),
+        )
+        assertEquals(InstallState.CRASH_LOOPING, c.installations.single().state)
+    }
+
+    @Test
     fun aStoppedDockerIsNeverALeftover() {
-        val lines = arrayOf(store("/etc/csqtt"), "file|path=/usr/local/bin/csqtt|type=f")
+        // the family's prereq unit: a Docker-mode stock install that waits for its daemon
+        val lines = arrayOf(store("/etc/csqtt"), "file|path=/usr/local/bin/csqtt|type=f",
+            unit("csqtt-docker-prereq.service", "/usr/local/lib/csqtt/docker-prereq.sh", active = "inactive", sub = "dead"))
         // Docker installed and stopped: the install may be its container's, unseen — B4, no B2, and nothing offered
-        val unseen = classify(*lines, "docker|daemon=inactive").installations.single()
+        val unseen = classify(*lines, "docker|daemon=inactive").installations.single { it.name == "/etc/csqtt" }
         assertEquals(InstallState.STOPPED, unseen.state)
         assertEquals(setOf("B4"), unseen.broken)
         assertTrue(unseen.dockerUnseen)
-        Manager.entries(classify(*lines, "docker|daemon=inactive"), Version(2, 6, 0)).single().let {
+        Manager.entries(classify(*lines, "docker|daemon=inactive"), Version(2, 6, 0)).single { it.installation.name == "/etc/csqtt" }.let {
             assertTrue(it.offers.isEmpty())
             assertEquals("Docker остановлен: запустите Docker и проверьте заново", it.note)
         }
         // no Docker on the box: a store and a binary with nothing to run them are what an install cut off leaves
-        val leftover = classify(*lines).installations.single()
+        val leftover = classify(*lines).installations.single { it.name == "/etc/csqtt" }
         assertEquals(InstallState.LEFTOVER, leftover.state)
         assertEquals(setOf("B2"), leftover.broken)
     }

@@ -167,16 +167,32 @@ object Classifier {
         }
         val (unitState, unitDetail) = stateOf(runtime, units.firstOrNull(), containers.firstOrNull())
         // what serves wins over what its unit says: a running container beside a dead unit (B16), a server started by hand
-        // (B5 review F13); a crash loop's process between two restarts does not
-        val serving = containers.any { it.state == "running" } || (procs.isNotEmpty() && runtime != Runtime.DOCKER)
-        val (state0, detail0) = if (serving && unitState !in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING))
-            InstallState.RUNNING to "serving outside its unit" else unitState to unitDetail
-        // Docker installed and stopped: a store nothing visible runs may be a Docker install waiting for its daemon (F1)
-        val unseen = runtime == Runtime.NONE && inv.dockerStopped && stores.isNotEmpty()
+        // (B5 review F13). Each process on its own (verify N2): one inside a container serves only while its container runs,
+        // so a crash-looping container's server caught between two restarts is the crash loop it is
+        val serving = containers.any { it.state == "running" } || procs.any { it.container.isEmpty() }
+        val (state0, detail0) = when {
+            unitState in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING) -> unitState to unitDetail
+            serving -> InstallState.RUNNING to "serving outside its unit"
+            containers.any { it.state == "restarting" } ->
+                InstallState.CRASH_LOOPING to "container ${containers.first { it.state == "restarting" }.restarts ?: 0} restarts"
+            else -> unitState to unitDetail
+        }
+        // Docker installed and stopped: a store nothing visible runs, with a sign of a Docker install, may be its container's
+        // waiting for the daemon (F1); with none it is the leftover it looks like (verify N1)
+        val unseen = runtime == Runtime.NONE && inv.dockerStopped && stores.isNotEmpty() && dockerMode(inv, stores)
         val (state, detail) = if (unseen) InstallState.STOPPED to "Docker остановлен" else state0 to detail0
         val broken = brokenOf(inv, owner, build, state, units, containers, stores, unseen)
         return Installation(owner, build, runtime, state, detail, broken, claimsOf(owner, flags, procs, units, containers, stores),
             units, containers, procs, stores)
+    }
+
+    /**
+     * A sign that a store belongs to a Docker install: the family's prereq unit for it (or docker.service's link to one),
+     * which a live Docker-mode 2.1.9+/2.5.x install keeps and its uninstall removes, or a 2.0.0 Docker install's docker dir.
+     */
+    private fun dockerMode(inv: Inventory, stores: List<Store>): Boolean = stores.any { store ->
+        val prereq = "${store.dir.substringAfterLast('/')}-docker-prereq.service"
+        "docker" in store.files || inv.units.any { it.id == prereq } || prereq in inv.dockerRequires || prereq in inv.dockerWants
     }
 
     private fun buildOf(exe: Exe?, containers: List<Ctr>, schema: Set<String>, mrtt: Boolean): Build? {
