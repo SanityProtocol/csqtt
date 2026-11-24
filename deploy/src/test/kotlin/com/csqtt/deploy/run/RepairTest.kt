@@ -15,6 +15,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.util.concurrent.TimeUnit
 
 class RepairTest {
     private fun inventory(lines: List<String>): Inventory =
@@ -118,5 +120,54 @@ class RepairTest {
         val whole = inventory(ours("0a1b2c", "csqtt.db,env,manifest.json"))
         assertFalse(Manager.entries(Classifier.classify(whole), Version(2, 6, 0), whole).single().offers.map { it.action }
             .any { it == Action.REBUILD_MANIFEST || it == Action.REPAIR })
+    }
+
+    private fun function(name: String): String {
+        val at = script.indexOf("\n$name() {") + 1
+        return script.substring(at, script.indexOf("\n}\n", at) + 3)
+    }
+
+    @Test
+    fun aCorruptManifestsHostListTakesNothingButTheInstancesOwn() {
+        // the zoo's corrupt cell (P2-PLAN §2.4, tier A): a removal closed whatever the manifest's host list named, an admin's ufw
+        // rule or another instance's; now only what is this instance's by its own names, the manifest trusted for nothing else
+        val dir = kotlin.io.path.createTempDirectory("csqtt-corrupt").toFile()
+        try {
+            // its flags as «Восстановить» keeps them (a unit's and a container's read alike)
+            File(dir, "unit.saved").writeText("# release 2.6.0-1abc2def\n[Service]\n" +
+                "ExecStart=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server --listen 0.0.0.0:49784 --web-port 45734 --iface sqc0\n")
+            val added = "Added user rules (see 'ufw status' for running firewall):\nufw allow 22/tcp\n" +
+                "ufw allow 49784/udp comment 'sqc-0a1b2c'\nufw allow 45734/tcp comment 'sqc-0a1b2c'\nufw allow 8080/tcp comment 'admin'\n" +
+                "ufw allow 51000/udp comment 'sqc-9f8e7d'\n"
+            val named = listOf(
+                "ufw rule=49784/udp", "ufw rule=45734/tcp", "ufw rule=8080/tcp", "ufw rule=22/tcp", "ufw rule=51000/udp",
+                "firewalld-port zone=public port=49784/udp", "firewalld-port zone=public port=22/tcp",
+                "firewalld-port zone=sqc0a1b2c port=45734/tcp", "firewalld-port zone=public port=",
+                "firewalld-zone zone=sqc0a1b2c", "firewalld-zone zone=public", "firewalld-zone zone=sqc9f8e7d",
+                "firewalld-policy policy=sqc0a1b2c-fwd", "firewalld-policy policy=allow-host-ipv6", "firewalld-reload",
+                "iptables-input ports=22/tcp")
+            fun ours(ufw: String): List<String> {
+                val sh = File(dir, "check.sh")
+                sh.writeText(ufw + "in_unit=sanity-csqtt-zz-no-such-unit.service in_state=${dir.path}\n" + function("inst_ours_only") +
+                    "inst_ours_only 0a1b2c <<'EOF'\n" + named.joinToString("\n") + "\nEOF\n")
+                val proc = ProcessBuilder("sh", sh.path).redirectErrorStream(true).start()
+                assertTrue(proc.waitFor(30, TimeUnit.SECONDS))
+                return proc.inputStream.bufferedReader().readText().lines().filter { it.isNotEmpty() }
+            }
+            val firewalld = listOf("firewalld-port zone=public port=49784/udp", "firewalld-port zone=sqc0a1b2c port=45734/tcp",
+                "firewalld-zone zone=sqc0a1b2c", "firewalld-policy policy=sqc0a1b2c-fwd", "firewalld-reload")
+            // ufw's: only its own, commented sqc-0a1b2c (ufw keeps them so on or off)
+            val stub = "ufw() { [ \"\$1 \$2\" = 'show added' ] && cat ${dir.path}/added; }\n"
+            File(dir, "added").writeText(added)
+            assertEquals(listOf("ufw rule=49784/udp", "ufw rule=45734/tcp") + firewalld, ours(stub))
+            // none of its own left in ufw: none taken, whatever the manifest names
+            File(dir, "added").writeText(added.lines().filter { "sqc-0a1b2c" !in it }.joinToString("\n"))
+            assertEquals(firewalld, ours(stub))
+        } finally {
+            dir.deleteRecursively()
+        }
+        // removal reads the manifest's host list through it (a lost manifest's are found by their names already)
+        val takeDown = function("inst_take_down")
+        assertTrue(takeDown, "grep -v '^service-' | inst_ours_only \"\$1\")" in takeDown)
     }
 }

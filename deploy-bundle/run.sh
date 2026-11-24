@@ -1624,6 +1624,49 @@ inst_found_host() {
 	return 0
 }
 
+# inst_ours_only <id> (after inst_paths; stdin: the host changes a manifest names, its sysctl and service- ones taken out): those
+# that are this instance's own by their names. A manifest is trusted for what its create recorded, never for another's: a
+# corrupt one naming an admin's ufw rule, or another instance's, must not take it (P2-PLAN §2.4 «a corrupt manifest», the
+# zoo's corrupt cell). ufw's rules commented sqc-<id>, as ufw keeps them whether it is on or off; firewalld's zone sqc<id>, its
+# policy sqc<id>-fwd, a port in that zone or one of the instance's own ports in another, and the reload
+inst_ours_only() {
+	io_ufw=''
+	! command -v ufw >/dev/null 2>&1 || io_ufw=$(ufw show added 2>/dev/null)
+	# its own ports, from its flags: its unit's, its container's, or those kept for «Восстановить»
+	io_ports=''
+	for io_f in "/etc/systemd/system/$in_unit" "$in_state/docker" "$in_state/unit.saved"; do
+		[ -f "$io_f" ] || continue
+		io_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$io_f" | head -n 1)
+		io_ports="$(printf '%s\n' "$io_flags" | sed -n 's/.*--listen [^ ]*:\([0-9][0-9]*\).*/\1/p')/udp"
+		io_ports="$io_ports $(printf '%s\n' "$io_flags" | sed -n 's/.*--web-port \([0-9][0-9]*\).*/\1/p')/tcp"
+		break
+	done
+	while read -r io_kind io_rest; do
+		[ -n "$io_kind" ] || continue
+		io_zone='' io_port='' io_rule='' io_policy=''
+		for io_kv in $io_rest; do
+			case $io_kv in
+			zone=*) io_zone=${io_kv#zone=} ;; port=*) io_port=${io_kv#port=} ;; rule=*) io_rule=${io_kv#rule=} ;;
+			policy=*) io_policy=${io_kv#policy=} ;;
+			esac
+		done
+		case $io_kind in
+		ufw) printf '%s\n' "$io_ufw" | grep -qxF "ufw allow $io_rule comment 'sqc-$1'" || continue ;;
+		firewalld-zone) [ "$io_zone" = "sqc$1" ] || continue ;;
+		firewalld-policy) [ "$io_policy" = "sqc$1-fwd" ] || continue ;;
+		firewalld-port)
+			io_own=0
+			case " $io_ports " in *" $io_port "*) [ -z "$io_port" ] || io_own=1 ;; esac
+			[ "$io_zone" = "sqc$1" ] || [ $io_own = 1 ] || continue
+			;;
+		firewalld-reload) ;;
+		*) continue ;;
+		esac
+		printf '%s\n' "$io_kind${io_rest:+ $io_rest}"
+	done
+	return 0
+}
+
 # inst_take_down <id> (after inst_paths): an instance of ours stopped and taken off the box by its id alone: its unit, its
 # tagged rules, its openings (ufw's and firewalld's through their tool; the iptables ones go with its unit's stop), the drop-in
 # with the last instance, its release. The state dir stays as it is
@@ -1631,7 +1674,7 @@ inst_take_down() {
 	MF=$in_state/manifest.json MF_ID=$1
 	# (a manifest lost by hand: its openings found by their names, so a later «Восстановить» opens them again, B11c review F2)
 	# (Docker enabled or started by its create stays so: other containers may rely on it by now, P2 B13a)
-	if [ -f "$MF" ]; then MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ' | grep -v '^service-')
+	if [ -f "$MF" ]; then MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ' | grep -v '^service-' | inst_ours_only "$1")
 	else MF_HOST=$(inst_found_host "$1"); fi
 	if [ -f "/etc/systemd/system/$in_unit" ]; then
 		run_cmd systemctl disable --now "$in_unit"
