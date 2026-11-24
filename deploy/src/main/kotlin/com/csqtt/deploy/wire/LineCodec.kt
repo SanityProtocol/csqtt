@@ -58,7 +58,9 @@ object LineCodec {
                 i = end
             }
         }
-        return out.toString(Charsets.UTF_8)
+        // String(bytes, charset), not ByteArrayOutputStream.toString(Charset): the app runs this code from API 26, and that
+        // member exists only from API 33, with no desugaring backport
+        return String(out.toByteArray(), Charsets.UTF_8)
     }
 
     /** The line the bundle would print for these values (tests, and the engine's own fixtures). */

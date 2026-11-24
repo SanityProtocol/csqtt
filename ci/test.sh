@@ -5,15 +5,16 @@
 #   client: cargo test of rust-client on the host target (its sni.rs includes the tree's root domains.txt)
 #   app:    the Gradle unit tests (testDebugUnitTest; AGP 9 has no release unit-test task)
 #   deploy: deploy v3's engine and command line (pure JVM): :deploy's unit tests, which also run the bundle's POSIX half on
-#           the image's sh, and deploy-cli's installDist (its packaging)
-#   bundle: deploy-bundle/'s scripts: shellcheck on each, in the dialect its `shellcheck shell=` line names, and BusyBox ash's
-#           parser on the POSIX ones (`shell=dash`), which must run on whatever box inspect.sh meets
+#           the image's sh (dash), then deploy-cli's installDist and one run of the laid-out command (bundle-check)
+#   bundle: deploy-bundle/'s scripts: shellcheck on each, in the dialect its `shellcheck shell=` line names, BusyBox ash's
+#           parser on the POSIX ones (`shell=dash`), which must run on whatever box inspect.sh meets, and lib/marker.sh run
+#           under BusyBox ash against its expected output
 #   e2e:    rust-client's #[ignore] end-to-end tests against a running server (ci/e2e-server.sh up); CSQTT_E2E_PEER (and
 #           CSQTT_E2E_WEB, the other CSQTT_E2E_* knobs) are passed through, and the container shares the host network;
 #           CSQTT_E2E_SERVER_LOG (ci/e2e-server.sh's LOG) is mounted read-only
 # A failing or non-compiling test exits non-zero. Outside e2e, tests marked #[ignore] (a TUN, a running server) stay out.
 # Laptop knobs, as in ci/build-apk.sh: CSQTT_DOCKER_ARGS (e.g. "--network host"), CSQTT_GRADLE_HOME (a gradle.properties with
-# the proxy), CSQTT_CARGO_REGISTRY (a kept registry cache).
+# the proxy), CSQTT_CARGO_REGISTRY (a kept registry cache), CSQTT_SHELLCHECK_IMAGE (the bundle suite's image).
 set -euo pipefail
 CI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC=$(cd "$1" && pwd); SUITE=$2; FILTER=${3:-}
@@ -62,11 +63,13 @@ app|deploy)
   P="$W/src/gradle/wrapper/gradle-wrapper.properties"
   grep -q '^distributionUrl=.*gradle-9\.4\.1-bin\.zip$' "$P" || { echo "the tree wants another Gradle than 9.4.1; pin it here" >&2; exit 1; }
   sed -i '/^distributionSha256Sum=/d' "$P"; echo "distributionSha256Sum=$GRADLE_SHA256" >> "$P"
-  if [ "$SUITE" = app ]; then TASKS=testDebugUnitTest; else TASKS=':deploy:test :deploy-cli:installDist'; fi
+  if [ "$SUITE" = app ]; then TASKS=testDebugUnitTest; AFTER=true
+  else TASKS=':deploy:test :deploy-cli:installDist'; AFTER='deploy-cli/build/install/deploy-cli/bin/deploy-cli bundle-check'; fi
   run "${CSQTT_ANDROID_IMAGE:-csqtt-ci-android}" "
 set -euo pipefail
 cd /w/src && chmod +x gradlew && printf 'sdk.dir=%s\n' \"\$ANDROID_HOME\" > local.properties
-./gradlew --no-daemon --console=plain -I /ci/unsigned.init.gradle.kts $TASKS"
+./gradlew --no-daemon --console=plain -I /ci/unsigned.init.gradle.kts $TASKS
+$AFTER"
   ;;
 bundle)
   # read-only, offline, as the calling user; the image is pinned by digest like every other input
@@ -79,6 +82,11 @@ for f in $files; do
   shellcheck --severity=warning "$f"
   if grep -q "^# shellcheck shell=dash" "$f"; then busybox sh -n "$f"; fi
 done
-echo "bundle: $(echo "$files" | wc -l) scripts checked"'
+# the parser above passes some bash-isms; this runs the codec under BusyBox ash (the deploy suite runs it under dash)
+got=$(busybox sh -c ". ./lib/marker.sh; csqtt_emit INV \"a|b\" 100% \"\$(printf \"l1\\nl2\\r\")\" \"п|р\" \"\"; csqtt_end")
+want="CSQTT_INV|a%7Cb|100%25|l1%0Al2%0D|п%7Cр|
+CSQTT_END|1"
+[ "$got" = "$want" ] || { echo "lib/marker.sh under BusyBox ash printed:"; echo "$got"; exit 1; }
+echo "bundle: $(echo "$files" | wc -l) scripts checked; marker.sh runs under BusyBox ash"'
   ;;
 esac

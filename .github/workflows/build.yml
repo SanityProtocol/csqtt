@@ -1,6 +1,6 @@
 # Build the csqtt server cores and the APKs from source (CSQTT-APP-PLAN §3, M-158, M-161, M-162), and run every test suite
-# (job `test`, M-159: ci/test.sh server | client | app) and, in `build`, the client's end-to-end cases against the core it
-# built (ci/e2e-server.sh + ci/test.sh e2e).
+# (job `test`, M-159: ci/test.sh server | client | app | deploy | bundle) and, in `build`, the client's end-to-end cases
+# against the core it built (ci/e2e-server.sh + ci/test.sh e2e).
 # - Toolchains are pinned in ci/Dockerfile.server and ci/Dockerfile.android; actions are pinned by commit.
 # - The cores' manifest (csqtt.server-provenance.json) is generated here from the cores this run built, and the APK carries
 #   exactly those cores.
@@ -69,12 +69,13 @@ jobs:
         if: ${{ !cancelled() }}  # a red suite above still lets this one report
         run: recipe/ci/test.sh src app
 
+      # deploy v3 (P2): a `ref` run of a tree from before it (2.5.3's, say) has neither, so these two skip there
       - name: Deploy engine tests
-        if: ${{ !cancelled() }}  # a red suite above still lets this one report
+        if: ${{ !cancelled() && hashFiles('src/deploy/build.gradle.kts') != '' }}
         run: recipe/ci/test.sh src deploy
 
       - name: Deploy bundle checks
-        if: ${{ !cancelled() }}  # a red suite above still lets this one report
+        if: ${{ !cancelled() && hashFiles('src/deploy-bundle/**') != '' }}
         run: recipe/ci/test.sh src bundle
 
   build:
