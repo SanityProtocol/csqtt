@@ -1,0 +1,53 @@
+# Docker mode's root filesystems (P2 B13a; CSQTT-APP-PLAN §6.11 rule 1), built by ci/build-rootfs.sh from Alpine's live index
+# and held to the pins the engine carries. Built when the recipe or the pins change, or by hand: Alpine's index moves on (a
+# new revision of a dependency changes the bytes), so a rebuild on every push would fail the day it does, while the asset
+# users fetch is the one published by hand beside the cores (P2 B13a review F6).
+name: rootfs
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - ci/build-rootfs.sh
+      - ci/rootfs-pack.py
+      - deploy/src/main/resources/com/csqtt/deploy/run/rootfs.pins
+      - .github/workflows/rootfs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rootfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Root filesystems (amd64, arm64, armv7), each held to its pin
+        run: |
+          pins=deploy/src/main/resources/com/csqtt/deploy/run/rootfs.pins
+          for a in amd64 arm64 armv7; do ci/build-rootfs.sh "$a" out/rootfs; done
+          (cd out/rootfs && sha256sum csqtt-rootfs-*.tar.gz > SHA256SUMS)
+          bad=0
+          for a in amd64 arm64 armv7; do
+            want=$(awk -v a="$a" '$1 == a {print $2}' "$pins")
+            got=$(sha256sum "out/rootfs/csqtt-rootfs-$a.tar.gz" | cut -d' ' -f1)
+            [ "$got" = "$want" ] || { echo "csqtt-rootfs-$a.tar.gz is $got, pinned $want: Alpine's index moved on or the recipe changed; build again and update rootfs.pins"; bad=1; }
+          done
+          exit $bad
+
+      - name: Upload the root filesystems
+        if: ${{ !cancelled() && hashFiles('out/rootfs/SHA256SUMS') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: csqtt-rootfs-${{ github.sha }}
+          path: |
+            out/rootfs/csqtt-rootfs-*.tar.gz
+            out/rootfs/csqtt-rootfs-*.provenance.json
+            out/rootfs/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

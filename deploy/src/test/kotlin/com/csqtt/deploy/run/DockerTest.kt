@@ -99,6 +99,18 @@ class DockerTest {
     }
 
     @Test
+    fun ourImageKeepsOutOfTheStockNames() {
+        // P2-PLAN §1.5: an old app's cleanup removes any container whose command holds /usr/local/bin/csqtt (2.1.9's deploy.sh)
+        // or whose name or image is a stock one; ours live under /opt/sanityprotocol, labelled in our own namespace
+        val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        val docker = listOf("dk_image", "dk_run").joinToString("\n") { script.substringAfter("$it() {").substringBefore("\n}\n") } +
+            script.substringAfter("action_create() {").substringBefore("\n}\n")
+        assertFalse("/usr/local/bin/csqtt" in docker)
+        assertTrue("ENTRYPOINT [\"/opt/sanityprotocol/entrypoint\"]" in docker && "\"\$dn_img\" /opt/sanityprotocol/csqtt-server \"\$@\"" in docker)
+        assertTrue("--label \"net.sanityprotocol.csqtt.instance=" in docker)
+    }
+
+    @Test
     fun ourImagesGoOnlyWhenNothingNeedsThem() {
         // the zoo on docker.io 24.0.7: removing the root filesystem's tag while an image of ours is built from it untags it all
         // the same; it goes only once no image of ours is left (a container's image Docker keeps by itself)
@@ -113,7 +125,7 @@ class DockerTest {
 
     private fun oursInDocker(id: String) = arrayOf(
         "CSQTT_INV|ctr|id=c0ffee|name=sanity-csqtt-$id|image=sanity-csqtt:2.6.0-0123abcd|state=running|pid=4242|restarts=0|exit=0|" +
-            "policy=unless-stopped|net=host|labels=org.sanityprotocol.csqtt=sanity-csqtt-$id|flags=--listen 0.0.0.0:41234 --web-port 41236 " +
+            "policy=unless-stopped|net=host|labels=net.sanityprotocol.csqtt.instance=sanity-csqtt-$id|flags=--listen 0.0.0.0:41234 --web-port 41236 " +
             "--config-dir /var/lib/sanityprotocol/csqtt/$id --instance sqc-$id --iface sqc0 --instance-slot 2 --host-tuning off|" +
             "mounts=/var/lib/sanityprotocol/csqtt/$id:/var/lib/sanityprotocol/csqtt/$id|runtime=docker",
         "CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/$id|files=csqtt.db,env,manifest.json|lock=held|schema=table:client_groups|" +
@@ -139,5 +151,71 @@ class DockerTest {
         val keptActions = Manager.entries(Classifier.classify(kept), Version(2, 6, 0), kept).single().offers.map { it.action }
         assertFalse(keptActions.toString(), Action.RESTORE in keptActions)
         assertTrue(keptActions.toString(), Action.REMOVE_LEFTOVERS in keptActions)
+    }
+
+    private val runSh = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+
+    private fun body(f: String) = runSh.substringAfter("$f() {").substringBefore("\n}\n")
+
+    @Test
+    fun aCutDockerCreateIsContinuedOnTheImagesItMade() {
+        // B13a review F1: «Продолжить» keeps the images the cut run made (its own to take if it fails), and the Docker stage runs
+        // once the state dir is there, so a cut leaves each image and Docker change named
+        val create = body("action_create")
+        assertTrue("cr_kept_images=\$(printf '%s\\n' \"\$MF_OBJECTS\" | grep '^image ')" in create)
+        assertTrue("MF_OBJECTS=\$cr_kept_images MF_HOST=''" in create)
+        assertTrue(create.indexOf("mkdir -m 700 \"\$cr_state\"") in 0 until create.indexOf("\t\tdk_daemon"))
+    }
+
+    @Test
+    fun dockerIsLeftAsItIsWhileAContainerReliesOnIt() {
+        // B13a review F3: Docker's start or enable is undone only while no container (anyone's) is there
+        val undo = body("host_undo")
+        for (kind in listOf("service-enabled", "service-started")) {
+            assertTrue(kind, "$kind) [ -n \"\$(docker ps -aq 2>/dev/null)\" ] ||" in undo)
+        }
+    }
+
+    @Test
+    fun aLiveInstanceInDockerIsSeenWhileDockerIsStopped() {
+        // B13a review F4: Docker stopped, its container unseen: the docker file's flags are its claims; no S1; its slot stays its
+        val docker = "CSQTT_INV|docker|daemon=inactive"
+        val store = "CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/0a1b2c|files=csqtt.db,env,manifest.json|lock=none|" +
+            "schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=|docker_flags=--listen 0.0.0.0:41234 --web-port 41236 " +
+            "--config-dir /var/lib/sanityprotocol/csqtt/0a1b2c --instance sqc-0a1b2c --iface sqc0 --tun-addr 10.77.0.1/24 --instance-slot 2 --host-tuning off"
+        val dropIn = "CSQTT_INV|file|path=/etc/sysctl.d/99-sanity-csqtt.conf|type=f"
+        val inv = inventory(docker, store, dropIn)
+        val c = Classifier.classify(inv)
+        val install = c.installations.single()
+        assertEquals(41234, install.claims.udpPort)
+        assertFalse(c.problems.any { it.code == "S1" })
+        val proposal = com.csqtt.deploy.plan.Proposer.propose(c, inv, kotlin.random.Random(1))
+        assertTrue(proposal.toString(), proposal.slot != 2 && proposal.iface != "sqc0" && proposal.udpPort != 41234)
+        // the run keeps the drop-in for its docker file without asking Docker (a stopped one would start through its socket),
+        // and a removal takes the file
+        val drop = body("host_dropin_drop")
+        assertTrue(drop, "for hd_d in /var/lib/sanityprotocol/csqtt/*/docker; do [ -f \"\$hd_d\" ] && return 0; done" in drop)
+        assertFalse(drop, "docker container inspect" in drop)
+        assertTrue("rm -f \"\$in_state/docker\"" in body("inst_take_down"))
+    }
+
+    @Test
+    fun anInstanceInDockerTunesTheHostAsItsServerWould() {
+        // B13a review F5: the server's KERNEL_PARAMETERS (rust-server/tokio_io.rs), forwarding aside (a floor already), are the
+        // run's host tuning for an instance in Docker, whose server cannot write /proc/sys
+        val rust = java.io.File("../rust-server/tokio_io.rs").readText()
+        val server = Regex("\\(\"/proc/sys/([a-z0-9_/]+)\", \"([^\"]+)\"\\)").findAll(rust.substringAfter("const KERNEL_PARAMETERS").substringBefore("];"))
+            .map { it.groupValues[1].replace('/', '.') to it.groupValues[2] }.toList()
+        assertTrue(server.toString(), server.size >= 10)
+        val tuning = runSh.substringAfter("HOST_TUNING='").substringBefore("'").lines().map { it.substringBefore(' ') to it.substringAfter(' ') }
+        assertEquals(server.filter { it.first != "net.ipv4.ip_forward" }.toSet(), tuning.toSet())
+        assertTrue("if [ \$cr_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi" in body("action_create"))
+    }
+
+    @Test
+    fun aCutOrFailedRunLeavesNoRootfsOrImageFilesBehind() {
+        // B13a review F7
+        assertTrue("\"\$RUNS\"/*/core \"\$RUNS\"/*/rootfs 2>/dev/null" in runSh)
+        assertTrue("|| { rm -rf \"\$di_ctx\"; cr_fail \"Docker would not build the image\"; }" in body("dk_image"))
     }
 }

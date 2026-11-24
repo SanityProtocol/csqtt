@@ -135,8 +135,9 @@ object Classifier {
         val dirs = stores.map { it.dir }.toSet()
         // a store of ours kept by «Удалить» runs nothing: the flags it ran with are its claims, so no new instance takes its ports,
         // interface, subnet or slot and «Восстановить» stays possible (B11a review F3)
+        // (an instance of ours in Docker whose Docker is stopped: its docker file's flags, P2 B13a review F4)
         val flags = procs.firstOrNull()?.flags ?: units.firstOrNull()?.flags ?: containers.firstOrNull()?.flags
-            ?: stores.firstNotNullOfOrNull { it.keptFlags } ?: ServerFlags(emptyMap())
+            ?: stores.firstNotNullOfOrNull { it.dockerFlags } ?: stores.firstNotNullOfOrNull { it.keptFlags } ?: ServerFlags(emptyMap())
         val exes = procs.mapNotNull { inv.exes[it.sha] } + units.mapNotNull { unit -> inv.exeAt(unit.exec) }
         val exe = exes.firstOrNull()
         val side = units.any { it.id == "csqtt25.service" } || containers.any { it.name == "csqtt25" } || "/etc/csqtt25" in dirs ||
@@ -392,7 +393,8 @@ object Classifier {
         // B11c review F3, verify N1)
         // (an instance of ours counts by its unit or its container: P2 B13a)
         if (inv.files.any { it.path == dropIn } &&
-            installs.none { it.owner == Owner.OURS && (it.units.isNotEmpty() || it.containers.isNotEmpty()) } &&
+            installs.none { it.owner == Owner.OURS && (it.units.isNotEmpty() || it.containers.isNotEmpty() ||
+                it.stores.any { s -> s.dockerFlags != null }) } &&
             inv.files.none { it.path == "/etc/systemd/system/csqtt.service" || it.path == "/etc/systemd/system/csqtt25.service" } &&
             inv.procs.none { it.comm in setOf("csqtt", "csqtt25", "csqtt-server", "csqtt-swg") }) {
             problems += BoxProblem("S1", "our sysctl drop-in is left with no instance of ours: it turns forwarding on at every boot", dropIn)

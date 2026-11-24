@@ -44,7 +44,7 @@ cmd_start() {
 	fi
 	# no run lives: what a killed or rebooted run left of its secrets and raw output goes now (its own ExecStopPost covers a
 	# stop; a power cut leaves them for this sweep)
-	rm -f "$RUNS"/*/secrets "$RUNS"/*/out "$RUNS"/*/core 2>/dev/null
+	rm -f "$RUNS"/*/secrets "$RUNS"/*/out "$RUNS"/*/core "$RUNS"/*/rootfs 2>/dev/null
 	mkdir -p "$RUNS" && chmod 755 "${RUNS%/*}" "$RUNS"
 	rs_dir=$(run_dir "$rs_id")
 	if [ -e "$rs_dir/log" ]; then csqtt_emit START refused "run $rs_id exists"; csqtt_end; exit 2; fi
@@ -331,6 +331,19 @@ net.ipv4.tcp_wmem 67108864
 net.core.netdev_max_backlog 10000
 net.core.somaxconn 65535
 net.ipv4.tcp_mtu_probing 1'
+# the server's own tuning (rust-server/tokio_io.rs KERNEL_PARAMETERS, --host-tuning auto), set by the run for an instance in
+# Docker, whose server cannot write /proc/sys there: rp_filter loose (its TPROXY path needs it), fq and BBR, the TCP knobs
+# (P2 B13a review F5)
+HOST_TUNING='net.ipv4.conf.all.rp_filter 2
+net.ipv4.conf.default.rp_filter 2
+net.core.default_qdisc fq
+net.ipv4.tcp_congestion_control bbr
+net.ipv4.tcp_sack 1
+net.ipv4.tcp_dsack 1
+net.ipv4.tcp_reordering 15
+net.ipv4.tcp_window_scaling 1
+net.ipv4.tcp_fastopen 3
+net.ipv4.tcp_slow_start_after_idle 0'
 
 host_add() {  # host_add <kind> [key=value…]
 	MF_HOST="$MF_HOST
@@ -399,7 +412,10 @@ host_iptables() {
 
 # the floors, each raised only when lower and not in our drop-in already (another instance of ours set it), with what it
 # was kept beside it; sysctl.d takes no comment after a value, so each comment has a line of its own
-host_sysctl() {
+host_sysctl() {  # host_sysctl [tuning]: the floors; with `tuning`, the server's own values too (an instance in Docker)
+	hs_list=$HOST_FLOORS
+	[ "${1:-}" != tuning ] || hs_list="$HOST_FLOORS
+$HOST_TUNING"
 	while read -r hs_key hs_floor; do
 		[ -n "$hs_key" ] || continue
 		grep -q "^$hs_key = " "$HOST_DROPIN" 2>/dev/null && continue
@@ -413,6 +429,12 @@ host_sysctl() {
 			hs_set="$1 $2 $hs_floor"
 			;;
 		net.ipv4.ip_forward) hs_set=1 ;;
+		# the server's own tuning (in Docker its container cannot write /proc/sys): set as the server would, not raised
+		*.rp_filter | *.default_qdisc | *.tcp_congestion_control | *.tcp_sack | *.tcp_dsack | *.tcp_reordering | \
+			*.tcp_window_scaling | *.tcp_fastopen | *.tcp_slow_start_after_idle)
+			[ "$hs_now" != "$hs_floor" ] || continue
+			hs_set=$hs_floor
+			;;
 		*)
 			[ "$hs_now" -lt "$hs_floor" ] 2>/dev/null || continue
 			hs_set=$hs_floor
@@ -431,10 +453,10 @@ host_sysctl() {
 			fi
 		fi
 		host_add sysctl "key=$hs_key" "was=$(printf '%s' "$hs_now" | tr ' ' ,)" "set=$(printf '%s' "$hs_set" | tr ' ' ,)" $hs_redir
-		[ -f "$HOST_DROPIN" ] || printf '# SanityProtocol csqtt (APP-PLAN §6.9): forwarding and raise-only floors; each raised from the value above it\n' >"$HOST_DROPIN"
+		[ -f "$HOST_DROPIN" ] || printf '# SanityProtocol csqtt (APP-PLAN §6.9): forwarding and raise-only floors (and, for an instance in Docker, the server'"'"'s own tuning); each set from the value above it\n' >"$HOST_DROPIN"
 		printf '# %s was %s\n%s = %s\n' "$hs_key" "$hs_now" "$hs_key" "$hs_set" >>"$HOST_DROPIN"
 	done <<EOF
-$HOST_FLOORS
+$hs_list
 EOF
 }
 
@@ -505,9 +527,10 @@ host_undo() {
 		firewalld-policy) firewall-cmd -q --permanent --delete-policy="$hu_policy" 2>/dev/null ;;
 		# this run reloaded: its permanent changes went live, so taking them back needs a reload too (B9 review F5)
 		firewalld-reload) hu_reload=1 ;;
-		# Docker enabled at boot or started by this run (P2 B13a): back as it was
-		service-enabled) systemctl disable "$hu_unit" >/dev/null 2>&1 ;;
-		service-started) systemctl stop "$hu_unit" >/dev/null 2>&1 ;;
+		# Docker enabled at boot or started by this run (P2 B13a): back as it was, unless a container (anyone's: another
+		# instance of ours made since) now relies on it (review F3)
+		service-enabled) [ -n "$(docker ps -aq 2>/dev/null)" ] || systemctl disable "$hu_unit" >/dev/null 2>&1 ;;
+		service-started) [ -n "$(docker ps -aq 2>/dev/null)" ] || systemctl stop "$hu_unit" >/dev/null 2>&1 ;;
 		esac
 	done <<EOF
 $hu_list
@@ -847,7 +870,7 @@ dk_rootfs() {
 	dr_tag=sanity-csqtt-rootfs:$(printf '%.8s' "$1")
 	docker image inspect "$dr_tag" >/dev/null 2>&1 && return 0
 	if [ ! -f "$RUN_DIR/rootfs" ]; then
-		[ -n "$2" ] || cr_fail "no root filesystem for Docker: none was uploaded and none is to be fetched" "update the app"
+		[ -n "$2" ] || cr_fail "the root filesystem is not on the box, and none was uploaded or is to be fetched" "check again: the app then brings it"
 		if command -v curl >/dev/null 2>&1; then
 			run_cmd curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$RUN_DIR/rootfs" "$2"
 		else
@@ -861,16 +884,17 @@ dk_rootfs() {
 }
 
 # dk_image <rootfs tag> <image tag> <core>: our core and the entrypoint on the root filesystem, built with no network (no
-# registry, no mirror: §6.11 rule 1), as Docker has it or made now
+# registry, no mirror: §6.11 rule 1), as Docker has it or made now. Both live under /opt/sanityprotocol in the image (P2-PLAN
+# §1.5): an old app's cleanup removes any container whose command holds /usr/local/bin/csqtt (2.1.9's deploy.sh)
 dk_image() {
 	docker image inspect "$2" >/dev/null 2>&1 && return 0
 	di_ctx=$RUN_DIR/image
 	{ mkdir -p "$di_ctx" && install -m 755 "$3" "$di_ctx/csqtt-server" && dk_entrypoint >"$di_ctx/sanity-entrypoint" &&
 		chmod 755 "$di_ctx/sanity-entrypoint" &&
-		printf 'FROM %s\nCOPY csqtt-server /usr/local/bin/csqtt-server\nCOPY sanity-entrypoint /usr/local/bin/sanity-entrypoint\nENTRYPOINT ["/usr/local/bin/sanity-entrypoint"]\n' \
+		printf 'FROM %s\nCOPY csqtt-server /opt/sanityprotocol/csqtt-server\nCOPY sanity-entrypoint /opt/sanityprotocol/entrypoint\nENTRYPOINT ["/opt/sanityprotocol/entrypoint"]\n' \
 			"$1" >"$di_ctx/Dockerfile"; } || cr_fail "cannot lay out the image's files"
 	mf_add image "$2"
-	run_cmd docker build -q --network none -t "$2" "$di_ctx" || cr_fail "Docker would not build the image"
+	run_cmd docker build -q --network none -t "$2" "$di_ctx" || { rm -rf "$di_ctx"; cr_fail "Docker would not build the image"; }
 	rm -rf "$di_ctx"
 }
 
@@ -883,7 +907,7 @@ dk_run() {
 	shift 4
 	docker run -d --name "$dn_c" --restart unless-stopped --network host --cap-add NET_ADMIN --device /dev/net/tun \
 		--log-driver local --env-file "$dn_state/env" -e "SANITY_IPTABLES=$(dk_backend)" -e "SANITY_OPEN=$dn_open" \
-		-v "$dn_state:$dn_state" --label "org.sanityprotocol.csqtt=$dn_c" "$dn_img" /usr/local/bin/csqtt-server "$@"
+		-v "$dn_state:$dn_state" --label "net.sanityprotocol.csqtt.instance=$dn_c" "$dn_img" /opt/sanityprotocol/csqtt-server "$@"
 }
 
 action_create() {
@@ -960,6 +984,9 @@ action_create() {
 			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
 			MF_HOST=$(mf_host_of "$cr_state/manifest.json")
 			[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
+			# the images that run made (pinned, the same again) stay for this one, its own to take if it fails (P2 B13a review F1)
+			cr_kept_images=$(printf '%s\n' "$MF_OBJECTS" | grep '^image ')
+			MF_OBJECTS=$(printf '%s\n' "$MF_OBJECTS" | grep -v '^image ')
 			# the floors are the box's: while another instance of ours stands, they stay (it may have skipped what this one set)
 			for cr_m in /var/lib/sanityprotocol/csqtt/*/manifest.json; do
 				[ -f "$cr_m" ] && [ "$cr_m" != "$cr_state/manifest.json" ] || continue
@@ -970,7 +997,7 @@ action_create() {
 			mf_undo
 			cr_server_undo
 			host_undo
-			MF_OBJECTS='' MF_HOST=''
+			MF_OBJECTS=$cr_kept_images MF_HOST=''
 			# a move cut off before its switch: the stock server it stopped serves again until this run stops it in turn (one
 			# that did not run stays as it was, B12 review F4)
 			if [ $cr_move = 1 ] && [ -n "$cr_mv_unit" ] && [ $cr_mv_ran = 1 ] && ! systemctl is-active --quiet "$cr_mv_unit"; then
@@ -989,7 +1016,9 @@ action_create() {
 	for cr_u in /etc/systemd/system/sanity-csqtt-*.service /var/lib/sanityprotocol/csqtt/*/docker; do
 		[ -f "$cr_u" ] && [ "$cr_u" != "$cr_state/docker" ] || continue
 		if sed -n 's/^ExecStart=//p' "$cr_u" | grep -qE -- "--instance-slot $cr_slot( |\$)"; then
-			run_result failed-cleaned "slot $cr_slot is now ${cr_u##*/}'s" "check again: the app proposes another slot"
+			cr_who=${cr_u##*/}
+			[ "$cr_who" != docker ] || cr_who=sanity-csqtt-$(basename "${cr_u%/docker}")
+			run_result failed-cleaned "slot $cr_slot is now $cr_who's" "check again: the app proposes another slot"
 		fi
 	done
 	[ "$(sha256sum "$RUN_DIR/core" 2>/dev/null | cut -d' ' -f1)" = "$cr_sha" ] || cr_fail "the uploaded core is damaged" "try again"
@@ -1016,6 +1045,14 @@ action_create() {
 	[ "${cr_nat:-}" != failed ] || cr_fail "this box's iptables cannot NAT (see the step's output)" "ask the hoster to enable NAT (iptable_nat, xt_TCPMSS)"
 	# the firewall the openings go through, known before the unit is written (a plain iptables box's are the unit's own)
 	cr_fw=$(host_fw_mode)
+	run_safe_point
+
+	mkdir -p "${cr_state%/*}" || cr_fail "cannot make ${cr_state%/*}"
+	mf_add dir "$cr_state"
+	mkdir -m 700 "$cr_state" || cr_fail "cannot make $cr_state"
+	mf_write
+	# (once the state dir is there, so its manifest names each image and Docker change as it is made: a cut leaves them
+	# named for «Продолжить», P2 B13a review F1)
 	if [ $cr_docker = 1 ]; then
 		# Docker running and enabled, the root filesystem's image, ours from it, and its core asked to run inside it (M-129)
 		command -v docker >/dev/null 2>&1 || cr_fail "Docker is not installed here" "check again: systemd is offered"
@@ -1025,15 +1062,9 @@ action_create() {
 		dk_rootfs "$(plan rootfs_sha256)" "$(plan rootfs_url)"
 		dk_image "$cr_rootfs" "$cr_image" "$RUN_DIR/core"
 		# shellcheck disable=SC2086 # the flags are words of ours
-		cr_said=$(docker run --rm --network none "$cr_image" /usr/local/bin/csqtt-server $cr_flags --version 2>&1 | head -n 1)
+		cr_said=$(docker run --rm --network none "$cr_image" /opt/sanityprotocol/csqtt-server $cr_flags --version 2>&1 | head -n 1)
 		[ "$cr_said" = "csqtt $cr_version CSQTT-WIRE-3" ] || cr_fail "the core does not run in its image: $cr_said" "check the box's architecture"
 	fi
-	run_safe_point
-
-	mkdir -p "${cr_state%/*}" || cr_fail "cannot make ${cr_state%/*}"
-	mf_add dir "$cr_state"
-	mkdir -m 700 "$cr_state" || cr_fail "cannot make $cr_state"
-	mf_write
 	mf_add dir "$cr_root"
 	mkdir -p "$cr_release" && chmod 755 "$cr_root" "$cr_root/releases" "$cr_release" || cr_fail "cannot make $cr_release"
 	install -m 755 "$RUN_DIR/core" "$cr_release/csqtt-server" && ln -sfn "$cr_release" "$cr_root/current" || cr_fail "cannot install the core"
@@ -1066,7 +1097,7 @@ action_create() {
 	if [ $cr_docker = 1 ]; then
 		# what the instance is in Docker, read by its removal, read-back, restart and journal: its container, its images, and
 		# its flags on an ExecStart= line, as a unit's (a kept store's flags are then read alike)
-		printf '# docker %s\n# image %s\n# rootfs %s\nExecStart=/usr/local/bin/csqtt-server %s\n' "$cr_ctr" "$cr_image" "$cr_rootfs" \
+		printf '# docker %s\n# image %s\n# rootfs %s\nExecStart=/opt/sanityprotocol/csqtt-server %s\n' "$cr_ctr" "$cr_image" "$cr_rootfs" \
 			"$cr_flags" >"$cr_state/docker" || cr_fail "cannot write $cr_state/docker"
 	else
 		cr_cond=''
@@ -1078,9 +1109,10 @@ action_create() {
 	fi
 	run_safe_point
 
-	# host: forwarding and the floors, then the openings (each recorded as made, undone by a failure from here on)
+	# host: forwarding and the floors (in Docker the server's own tuning too, review F5), then the openings (each recorded as
+	# made, undone by a failure from here on)
 	run_phase host 45
-	host_sysctl
+	if [ $cr_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi
 	host_firewall
 	[ "$cr_fw" != iptables ] || host_add iptables-input "ports=$(printf '%s' "$cr_open" | tr ' ' ,)"
 	run_safe_point
@@ -1354,10 +1386,9 @@ host_dropin_drop() {
 	for hd_u in /etc/systemd/system/sanity-csqtt-*.service /etc/systemd/system/csqtt.service /etc/systemd/system/csqtt25.service; do
 		[ -f "$hd_u" ] && return 0
 	done
-	# (an instance of ours in Docker counts while its container is there: a kept store's docker file alone does not, P2 B13a)
-	for hd_d in /var/lib/sanityprotocol/csqtt/*/docker; do
-		[ -f "$hd_d" ] && docker container inspect "$(sed -n 's/^# docker //p' "$hd_d")" >/dev/null 2>&1 && return 0
-	done
+	# (an instance of ours in Docker counts by its docker file, whatever Docker's state: asking a stopped Docker would start it
+	# through its socket, P2 B13a review F4; a removal takes the file, keeping its lines in unit.saved)
+	for hd_d in /var/lib/sanityprotocol/csqtt/*/docker; do [ -f "$hd_d" ] && return 0; done
 	[ -f "$HOST_DROPIN" ] || return 0
 	! pgrep -x 'csqtt(25|-server|-swg)?' >/dev/null 2>&1 || return 0
 	sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1 \2/p' "$HOST_DROPIN" | while read -r hd_k hd_was; do
@@ -1426,6 +1457,8 @@ inst_take_down() {
 		for in_i in "$(sed -n 's/^# image //p' "$in_state/docker")" "$(sed -n 's/^# rootfs //p' "$in_state/docker")"; do
 			dk_image_rm "$in_i"
 		done
+		# (its lines are unit.saved's now, for «Восстановить»: the file alone marks a live instance, review F4)
+		rm -f "$in_state/docker"
 	fi
 	inst_sweep "$1"
 	host_undo
