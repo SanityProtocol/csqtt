@@ -243,8 +243,12 @@ run_recheck() {
 	rr_sha=$(plan expect_sha) rr_bin=$(plan expect_bin)
 	# an update cut off before holds the binary until this run resolves it (action_update's up_recover, B10 review F2)
 	[ "$(plan action)" != update ] || [ ! -f "/var/lib/sanityprotocol/csqtt/$(plan id)/update.pending" ] || rr_sha=''
-	if [ -n "$rr_sha" ] && [ "$(sha256sum "$rr_bin" 2>/dev/null | cut -d' ' -f1)" != "$rr_sha" ]; then
-		run_result failed-cleaned "$rr_bin changed since the check" "check again"
+	if [ -n "$rr_sha" ]; then
+		rr_now=$(sha256sum "$rr_bin" 2>/dev/null | cut -d' ' -f1)
+		# an update that landed before a cut (a boot cleared its record) finds its own target there: «Продолжить» goes on, as the
+		# same build again (B10 verify of round 2, L1)
+		[ "$rr_now" = "$rr_sha" ] || { [ "$(plan action)" = update ] && [ "$rr_now" = "$(plan core_sha)" ]; } ||
+			run_result failed-cleaned "$rr_bin changed since the check" "check again"
 	fi
 }
 
@@ -653,9 +657,10 @@ NotifyAccess=main
 WatchdogSec=30
 EnvironmentFile=$3/env
 ExecStart=$2/current/csqtt-server $4
-# an update's record goes the first time a start is ready: the build it went to has served, its store is live from then on,
-# and no later run may put the copy from before it back over that (B10 verify N1)
-ExecStartPost=-/bin/rm -f $3/update.pending
+# an update's record goes the first time a start outside an update run is ready: after a boot the build it went to serves,
+# its store is live from then on, and no later run may put the copy from before it back over that (B10 verify N1); while an
+# update run lives, its marker in /run keeps the record, which the run settles itself (B10 verify of round 2, V1)
+ExecStartPost=-/bin/sh -c '[ -e /run/sanity-csqtt-$1.updating ] || exec rm -f $3/update.pending'
 $5
 Restart=always
 RestartSec=3
@@ -871,6 +876,8 @@ up_back() {
 		up_store_back 2>"$RUN_DIR/restore.err" ||
 			run_result failed-not-rolled-back "$1; the store could not be put back: $(head -c 200 "$RUN_DIR/restore.err" | tr '\n' ' ')" \
 				"free some disk, then «Запустить» or «Починить»: $up_where"
+	elif [ "$up_new" = "$up_old" ]; then
+		up_where="its store is its own: the same build runs on it"
 	else
 		up_where="its store is as it was: the new build never ran on it"
 	fi
@@ -941,6 +948,11 @@ action_update() {
 	up_iface=$(printf '%s\n' "$up_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')
 	up_secret=$(sed -n 's/^CSQTT_WEB_SECRET_PATH=//p' "$up_state/env" | head -n 1)
 	up_settled='' up_failed=''
+	# while this run lives no start of the unit clears the record (its ExecStartPost looks for this marker): only a run knows
+	# whether the build it went to serves. cmd_exec's trap takes it at the run's end; a run killed leaves it until the next one
+	# or a boot (B10 verify of round 2, V1)
+	UP_MARK=/run/sanity-csqtt-$up_id.updating
+	: >"$UP_MARK"
 
 	run_phase stage 10
 	[ "$(sha256sum "$RUN_DIR/core" 2>/dev/null | cut -d' ' -f1)" = "$up_sha" ] || run_result failed-cleaned "the uploaded core is damaged" "try again"
@@ -962,27 +974,32 @@ action_update() {
 	fi
 	run_safe_point
 
-	# switch (D4: a cancel is refused from here): recorded, stopped, its store copied aside, `current` flipped, started
+	# switch (D4: a cancel is refused from here)
 	run_phase switch 60
 	: >"$RUN_DIR/switching"
-	printf 'old=%s\nnew=%s\n' "$up_old" "$up_new" >"$UP_PENDING.new" && mv -f "$UP_PENDING.new" "$UP_PENDING" ||
-		{ rm -f "$UP_PENDING.new"; action_cleanup; run_result failed-cleaned "cannot write $UP_PENDING" "check the box's disk"; }
-	run_cmd systemctl stop "$up_unit"
-	if ! up_copy_store 2>"$RUN_DIR/copy.err"; then
-		rm -rf "$up_copy.new"
-		up_rollback "cannot keep a copy of the store aside: $(head -c 200 "$RUN_DIR/copy.err" | tr '\n' ' ')"
-	fi
 	if [ "$up_new" = "$up_old" ]; then
-		# «Починить»: the same build again, over a damaged or missing binary
+		# «Починить»: the same build again, over a damaged or missing binary. Nothing migrates, so its store needs no copy, and
+		# the copy from before the last real update is never overwritten by a build that may be the failing one (V1)
+		up_with=''
+		run_cmd systemctl stop "$up_unit"
 		install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" || up_rollback "cannot reinstall the binary"
 	else
+		# recorded, stopped, its store copied aside, `current` flipped
+		up_with=store
+		printf 'old=%s\nnew=%s\n' "$up_old" "$up_new" >"$UP_PENDING.new" && mv -f "$UP_PENDING.new" "$UP_PENDING" ||
+			{ rm -f "$UP_PENDING.new"; action_cleanup; run_result failed-cleaned "cannot write $UP_PENDING" "check the box's disk"; }
+		run_cmd systemctl stop "$up_unit"
+		if ! up_copy_store 2>"$RUN_DIR/copy.err"; then
+			rm -rf "$up_copy.new"
+			up_rollback "cannot keep a copy of the store aside: $(head -c 200 "$RUN_DIR/copy.err" | tr '\n' ' ')"
+		fi
 		ln -sfn "$up_new" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" || up_rollback "cannot switch to $up_new"
 	fi
-	run_cmd systemctl start "$up_unit" || up_rollback "$up_unit did not start on the new build: $(inst_start_lines "$up_unit")" store
+	run_cmd systemctl start "$up_unit" || up_rollback "$up_unit did not start on the new build: $(inst_start_lines "$up_unit")" "$up_with"
 
 	run_phase verify 80
 	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
-	[ -z "$up_why" ] || up_rollback "the new build does not serve: $up_why" store
+	[ -z "$up_why" ] || up_rollback "the new build does not serve: $up_why" "$up_with"
 	up_prune
 	rm -f "$UP_PENDING"
 	run_phase "done" 100
@@ -1239,7 +1256,8 @@ cmd_exec() {
 	RUN_ID=$1
 	RUN_DIR=$(run_dir "$RUN_ID")
 	RUN_LOG=$RUN_DIR/log
-	trap 'run_beat_stop; rm -f "$RUN_DIR/secrets" "$RUN_DIR/out"' EXIT
+	# (an update's marker in /run goes with the run too: UP_MARK, set by action_update)
+	trap 'run_beat_stop; rm -f "$RUN_DIR/secrets" "$RUN_DIR/out" ${UP_MARK:+"$UP_MARK"}' EXIT
 	run_emit RUN "$RUN_ID" "$(plan action)"
 	run_recheck
 	case $(plan action) in
