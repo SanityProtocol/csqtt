@@ -525,20 +525,21 @@ mf_host_of() {
 		sed -n 's/^{"kind":"\([^"]*\)"\(.*\)}$/\1\2/p' | sed 's/,"\([^"]*\)":"\([^"]*\)"/ \1=\2/g'
 }
 
-# A unit's last lines since <cursor> (taken before its start with inst_cursor), so a start that fails names its own words, never
-# what the build before printed as it stopped (B10 review F4). systemctl returns as the server exits, often before journald has
-# read its last line from the stream: up to ~2 s are waited for one
-inst_cursor() { journalctl -n 1 --show-cursor -o cat --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' | tail -n 1; }
-inst_lines_since() {  # inst_lines_since <unit> <cursor>
-	ils_n=0
+# The last lines a unit's start that failed printed: its own invocation's, read right after it (Restart=always begins the next
+# one 3 s on), never what the build before printed as it stopped (B10 review F4). By the invocation id, not a cursor: before
+# systemd 253, --after-cursor with a match skips the first entry that matches (Debian 12's 252 showed nothing). systemctl
+# returns as the server exits, often before journald has read its last line from the stream: up to ~2 s are waited for one
+inst_start_lines() {  # inst_start_lines <unit>
+	isl_id=$(systemctl show -p InvocationID --value "$1" 2>/dev/null)
+	[ -n "$isl_id" ] || return 0
+	isl_n=0
 	while :; do
-		ils_l=$(if [ -n "$2" ]; then journalctl _SYSTEMD_UNIT="$1" --after-cursor="$2" -n 3 -o cat --no-pager
-			else journalctl _SYSTEMD_UNIT="$1" -n 3 -o cat --no-pager; fi 2>/dev/null)
-		[ -z "$ils_l" ] && [ "$ils_n" -lt 10 ] || break
-		ils_n=$((ils_n + 1))
+		isl_l=$(journalctl _SYSTEMD_INVOCATION_ID="$isl_id" -n 3 -o cat --no-pager 2>/dev/null)
+		[ -z "$isl_l" ] && [ "$isl_n" -lt 10 ] || break
+		isl_n=$((isl_n + 1))
 		sleep 0.2
 	done
-	printf '%s\n' "$ils_l" | run_redact | tr '\n' ' '
+	printf '%s\n' "$isl_l" | run_redact | tr '\n' ' '
 }
 
 # An instance of ours serves (create's and update's verify): its unit active, its UDP and web ports held by its own pid alone
@@ -804,8 +805,7 @@ action_create() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	cr_cursor=$(inst_cursor)
-	run_cmd systemctl enable --now "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_lines_since "$cr_unit" "$cr_cursor")"
+	run_cmd systemctl enable --now "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_start_lines "$cr_unit")"
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80
@@ -968,8 +968,7 @@ action_update() {
 	else
 		ln -sfn "$up_new" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" || up_rollback "cannot switch to $up_new"
 	fi
-	up_cursor=$(inst_cursor)
-	run_cmd systemctl start "$up_unit" || up_rollback "$up_unit did not start on the new build: $(inst_lines_since "$up_unit" "$up_cursor")" store
+	run_cmd systemctl start "$up_unit" || up_rollback "$up_unit did not start on the new build: $(inst_start_lines "$up_unit")" store
 
 	run_phase verify 80
 	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
@@ -1116,8 +1115,7 @@ action_restore() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	rs_cursor=$(inst_cursor)
-	run_cmd systemctl enable --now "$in_unit" || cr_fail "$in_unit did not start: $(inst_lines_since "$in_unit" "$rs_cursor")"
+	run_cmd systemctl enable --now "$in_unit" || cr_fail "$in_unit did not start: $(inst_start_lines "$in_unit")"
 	run_phase verify 80
 	rs_why=$(inst_verify "$in_unit" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
 	[ -z "$rs_why" ] || cr_fail "$rs_why"
@@ -1138,9 +1136,8 @@ action_restart() {
 	run_phase switch 50
 	: >"$RUN_DIR/switching"
 	run_cmd systemctl enable "$in_unit"
-	rt_cursor=$(inst_cursor)
 	run_cmd systemctl restart "$in_unit" ||
-		run_result failed-not-rolled-back "$in_unit did not start: $(inst_lines_since "$in_unit" "$rt_cursor")" "read its journal («Журнал»)"
+		run_result failed-not-rolled-back "$in_unit did not start: $(inst_start_lines "$in_unit")" "read its journal («Журнал»)"
 	run_phase verify 80
 	rt_why=$(inst_verify "$in_unit" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')" \
 		"$(printf '%s\n' "$rt_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')" \
