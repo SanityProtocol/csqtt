@@ -765,17 +765,27 @@ private fun move(session: SshSession, p: Properties, target: File, name: String,
         val inventory = Inventory.from(report.lines)
         val classification = Classifier.classify(inventory)
         val install = classification.installations.firstOrNull { it.name == name } ?: return 2.also { println("no installation $name on this box") }
-        val proposal = try {
-            Proposer.proposeMove(install, classification, inventory)
+        // only what the manager offers moves (never a newer build, M-150; never an install with no store to carry, or one that
+        // must be sorted out first): «Обновить», «Починить» or «Обновить до 2.6», its warning and «Будет» said as the app says them
+        val carried = com.csqtt.deploy.plan.Version.parse(core.version) ?: return 2.also { println("core_version ${core.version} is no version") }
+        val entry = com.csqtt.deploy.plan.Manager.entries(classification, carried, inventory).first { it.installation === install }
+        val offer = entry.offers.firstOrNull {
+            it.action in setOf(com.csqtt.deploy.plan.Action.UPDATE, com.csqtt.deploy.plan.Action.REPAIR, com.csqtt.deploy.plan.Action.UPDATE_FROM_21)
+        } ?: return 2.also { println("no move offered for $name: ${entry.note ?: "its build or state allows none"}") }
+        val offered = try {
+            Proposer.offerPlan(entry, offer, classification, inventory, carried)
         } catch (refused: ProposalRefused) {
             return 2.also { println("refused: ${refused.reason}") }
         }
+        val proposal = offered.proposal ?: return 2.also { println("$name is not a stock install to move") }
         plan = com.csqtt.deploy.run.MoveRun.plan(install, classification, inventory, proposal,
             CreateRun.publicAddress(Preflight.from(report.lines), p.prop("host").orEmpty()), core, Credentials.generate())
             ?: return 2.also { println("$name is not a stock systemd install to move") }
         id = proposal.id
         println("will: $name moves into ${proposal.instance}: ${proposal.iface} ${proposal.subnet} udp=${proposal.udpPort} " +
             "web=${proposal.webPort} slot=${proposal.slot}")
+        offer.warning?.let { println("warning: $it") }
+        offered.will.forEach { println("will: $it") }
         com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inventory, purge = false)?.will?.forEach { println("will then: $it") }
     }
     val sshHost = p.prop("host").orEmpty()
