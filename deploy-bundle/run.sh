@@ -44,7 +44,7 @@ cmd_start() {
 	fi
 	# no run lives: what a killed or rebooted run left of its secrets and raw output goes now (its own ExecStopPost covers a
 	# stop; a power cut leaves them for this sweep)
-	rm -f "$RUNS"/*/secrets "$RUNS"/*/out 2>/dev/null
+	rm -f "$RUNS"/*/secrets "$RUNS"/*/out "$RUNS"/*/core 2>/dev/null
 	mkdir -p "$RUNS" && chmod 755 "${RUNS%/*}" "$RUNS"
 	rs_dir=$(run_dir "$rs_id")
 	if [ -e "$rs_dir/log" ]; then csqtt_emit START refused "run $rs_id exists"; csqtt_end; exit 2; fi
@@ -69,7 +69,7 @@ cmd_start() {
 			[ "$rs_old" = "$rs_id" ] || rm -rf "${RUNS:?}/$rs_old"
 		done
 	if ! systemd-run --unit "sanity-csqtt-deploy-$rs_id" --collect --quiet --property=KillMode=mixed \
-		--property="ExecStopPost=/bin/rm -f $rs_dir/secrets $rs_dir/out" \
+		--property="ExecStopPost=/bin/rm -f $rs_dir/secrets $rs_dir/out $rs_dir/core" \
 		flock -n $LOCK /bin/sh "$rs_dir/run.sh" exec "$rs_id" >/dev/null 2>&1; then
 		csqtt_emit START failed "systemd-run refused the run"
 		csqtt_end
@@ -194,7 +194,7 @@ run_result() {  # run_result <kind> <cause> <next action>
 	run_emit RESULT "$1" "$RUN_STEP" "$(printf '%s\n' "$2" | run_redact)" "$(printf '%s\n' "$3" | run_redact)"
 	# the kind alone (no secret) where every login reads it: the log is its starting login's own (B7 verify N2)
 	printf '%s\n' "$1" >"$RUN_DIR/result" && chmod 644 "$RUN_DIR/result"
-	rm -f "$RUN_DIR/secrets"
+	rm -f "$RUN_DIR/secrets" "$RUN_DIR/core"
 	printf 'CSQTT_END|%s\n' "$(grep -c '^CSQTT_' "$RUN_LOG")" >>"$RUN_LOG"
 	exit 0
 }
@@ -311,6 +311,54 @@ EOF
 	return 0
 }
 
+# the objects a manifest names, as `kind path` lines (our own format: one object per {…})
+mf_objects_of() {
+	sed -n 's/.*"objects":\[\(.*\)\],"host".*/\1/p' "$1" | sed 's/},{/}\n{/g' |
+		sed -n 's/.*"kind":"\([^"]*\)","path":"\([^"]*\)".*/\1 \2/p'
+}
+
+# The server's own footprint once it has run (B8 review F4): if it died rather than stopped, its rules tagged with its instance
+# (SQC-<ID>_…, every table, v4 and v6) and its forward chain stay; and the host-wide values it sets at every start are put
+# back as they were before the switch, unless another csqtt server still runs and needs them
+cr_server_undo() {
+	cr_tagbase=SQC-$(printf '%s' "$cr_id" | tr 'a-f' 'A-F')_
+	for cs_ipt in iptables ip6tables; do
+		command -v $cs_ipt >/dev/null 2>&1 || continue
+		for cs_t in filter nat mangle raw; do
+			$cs_ipt -w 5 -t $cs_t -S 2>/dev/null | grep '^-A ' | grep -F -- "$cr_tagbase" | sed 's/^-A /-D /' | while read -r cs_rule; do
+				eval "$cs_ipt -w 5 -t $cs_t $cs_rule" 2>/dev/null
+			done
+			$cs_ipt -w 5 -t $cs_t -S 2>/dev/null | awk -v t="$cr_tagbase" '$1 == "-N" && index($2, t) == 1 {print $2}' | while read -r cs_c; do
+				$cs_ipt -w 5 -t $cs_t -F "$cs_c" 2>/dev/null
+				$cs_ipt -w 5 -t $cs_t -X "$cs_c" 2>/dev/null
+			done
+		done
+	done
+	# iptables-nft leaves the tables the server's rules made, empty: a table new since the switch and holding no rule goes
+	if [ -f "$RUN_DIR/nft-before" ] && command -v nft >/dev/null 2>&1; then
+		nft list tables 2>/dev/null | while read -r cs_w cs_fam cs_name; do
+			[ "$cs_w" = table ] || continue
+			grep -qx "table $cs_fam $cs_name" "$RUN_DIR/nft-before" && continue
+			nft list table "$cs_fam" "$cs_name" 2>/dev/null | awk '!/^[ \t]*((table|chain) .*\{|type .*;|\}|)$/ {n++} END {exit n > 0}' &&
+				nft delete table "$cs_fam" "$cs_name" 2>/dev/null
+		done
+	fi
+	if [ -f "$RUN_DIR/sysctl-before" ] && ! pgrep -x csqtt-server >/dev/null 2>&1 && ! pgrep -x csqtt >/dev/null 2>&1 &&
+		! pgrep -x csqtt25 >/dev/null 2>&1; then
+		while IFS='=' read -r cs_key cs_val; do
+			[ -z "$cs_key" ] || sysctl -q -w "$cs_key=$cs_val" 2>/dev/null
+		done <"$RUN_DIR/sysctl-before"
+		# bbr's module, loaded by the server's congestion control: unloaded when it was not loaded before the switch
+		grep -qx tcp_bbr "$RUN_DIR/modules-before" 2>/dev/null || modprobe -r tcp_bbr 2>/dev/null
+	fi
+	return 0
+}
+
+# the host-wide values the server sets at every start (rust-server tokio_io.rs KERNEL_PARAMETERS), saved before the switch
+CR_SERVER_SYSCTLS='net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter net.core.default_qdisc
+net.ipv4.tcp_congestion_control net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_reordering net.ipv4.tcp_window_scaling
+net.ipv4.tcp_fastopen net.ipv4.tcp_slow_start_after_idle'
+
 action_create() {
 	cr_id=$(plan id) cr_iface=$(plan iface) cr_subnet=$(plan subnet) cr_udp=$(plan udp) cr_web=$(plan web)
 	cr_slot=$(plan slot) cr_bind=$(plan web_bind) cr_version=$(plan version) cr_sha=$(plan core_sha)
@@ -327,6 +375,7 @@ action_create() {
 	done
 	action_cleanup() {
 		mf_undo
+		[ ! -e "$RUN_DIR/switching" ] || cr_server_undo
 		for cr_d in $cr_parents; do rmdir "$cr_d" 2>/dev/null; done
 		return 0
 	}
@@ -339,7 +388,18 @@ action_create() {
 	# undoing this run can remove only what it made
 	run_phase stage 10
 	if [ -e "$cr_state" ] || [ -e "$cr_root" ] || [ -e "/etc/systemd/system/$cr_unit" ]; then
-		run_result failed-cleaned "sqc-$cr_id exists already" "check again"
+		if [ "$(plan resume)" = 1 ] && grep -qs "\"id\":\"$cr_id\"" "$cr_state/manifest.json"; then
+			# «Продолжить» (B8 review F1): an earlier run of this plan was cut off; what its manifest names goes (its server
+			# stopped, its rules with it), and the create runs again from the start with this run's credentials
+			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
+			run_cmd systemctl stop "$cr_unit"
+			mf_undo
+			cr_server_undo
+			MF_OBJECTS=''
+		else
+			run_result failed-cleaned "sqc-$cr_id exists already: an earlier run of this plan was cut off" \
+				"continue it («Продолжить»), or check again"
+		fi
 	fi
 	# a slot another instance of ours took since the plan (a second phone's create) would share its policy table and mark
 	for cr_u in /etc/systemd/system/sanity-csqtt-*.service; do
@@ -417,8 +477,13 @@ EOF
 	# switch: nothing ran before, so it is the start (Type=notify: it returns once the server said READY=1). From here a
 	# cancel is refused (D4): the run ends in ok or undoes itself
 	run_phase switch 60
+	# what the server will set host-wide, as it is now: put back if this run is undone and no other csqtt server runs (F4)
+	for cr_k in $CR_SERVER_SYSCTLS; do printf '%s=%s\n' "$cr_k" "$(sysctl -n "$cr_k" 2>/dev/null)"; done >"$RUN_DIR/sysctl-before"
+	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
+	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	run_cmd systemctl enable --now "$cr_unit" || cr_fail "$cr_unit did not start: $(journalctl -u "$cr_unit" -n 1 -o cat --no-pager 2>/dev/null | run_redact)"
+	run_cmd systemctl enable --now "$cr_unit" ||
+		cr_fail "$cr_unit did not start: $(journalctl _SYSTEMD_UNIT="$cr_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')"
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80

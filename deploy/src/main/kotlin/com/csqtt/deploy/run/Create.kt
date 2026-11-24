@@ -55,7 +55,7 @@ object CreateRun {
     }
 
     /** The run «Создать новый» starts: the proposal's facts in the plan, the passwords and the panel's path in its secrets. */
-    fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials): RunPlan = RunPlan(
+    fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials, resume: Boolean = false): RunPlan = RunPlan(
         action = "create",
         values = linkedMapOf(
             "id" to p.id, "iface" to p.iface, "subnet" to p.subnet, "udp" to p.udpPort.toString(), "web" to p.webPort.toString(),
@@ -63,11 +63,22 @@ object CreateRun {
             "public_ip" to publicIp, "web_user" to credentials.webUser,
             // what the run re-checks before it makes anything (§1.4): still free, or it fails cleaned
             "ports" to "${p.udpPort} ${p.webPort}",
-        ),
+        ) + if (resume) mapOf("resume" to "1") else emptyMap(),
         secrets = linkedMapOf("main_password" to credentials.mainPassword, "web_pass" to credentials.webPass,
             "secret_path" to credentials.secretPath),
         core = core.bytes,
     )
+}
+
+/**
+ * «Продолжить» (B8 review F1): the proposal of a create a reboot or a kill cut off, from the plan its run kept on the box
+ * (no secret in it); run again with resume, it undoes what that run left and creates again, with new credentials.
+ */
+fun proposalOfKeptPlan(text: String): Proposal? {
+    val v = text.lines().filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
+    if (v["action"] != "create") return null
+    return Proposal(v["id"] ?: return null, v["iface"] ?: return null, v["subnet"] ?: return null, v["udp"]?.toIntOrNull() ?: return null,
+        v["web"]?.toIntOrNull() ?: return null, v["slot"]?.toIntOrNull() ?: return null, v["web_bind"]?.takeIf { it.isNotEmpty() })
 }
 
 /** What the app needs to connect to an instance and to open its panel; [certSha256] pins the panel (null: not readable). */

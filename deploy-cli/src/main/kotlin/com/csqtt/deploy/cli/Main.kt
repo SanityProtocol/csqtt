@@ -17,6 +17,7 @@ import com.csqtt.deploy.run.Outside
 import com.csqtt.deploy.run.PanelAnswer
 import com.csqtt.deploy.run.ReadBack
 import com.csqtt.deploy.run.ReadBackFailed
+import com.csqtt.deploy.run.proposalOfKeptPlan
 import com.csqtt.deploy.run.CancelOutcome
 import com.csqtt.deploy.run.Coordinator
 import com.csqtt.deploy.run.DeployState
@@ -65,10 +66,11 @@ private const val USAGE = """usage: deploy-cli <command>
   attach <target>         follow the run <target>.state names (or say what state it holds)
   cancel <target>         ask that run to stop at its next safe point
   runs <target>           the runs the box keeps: id, live, result (none and not live: interrupted)
-  create <target> [id=… iface=… subnet=… udp=… web=… slot=… bind=127.0.0.1]   «Создать новый» (B8): inspect as root,
+  create <target> [id=… iface=… subnet=… udp=… web=… slot=… bind=127.0.0.1 | resume=<run id>]   «Создать новый» (B8): inspect as root,
                           propose a new instance that collides with nothing (the words override the proposal), run it,
                           read the connection back and check it from here: a DTLS ClientHello on its UDP port and the
                           panel over HTTPS, its certificate pinned. The core is the target's core=<file>, core_version=…
+                          resume=<run id>: «Продолжить» a create a reboot or a kill cut off, from the plan its run kept
   readback <target> <id>  «Подключиться» to an instance of ours: its connection read back, then the same outside check
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
       · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed) · 7 a run failed (its result
@@ -418,6 +420,13 @@ private fun rootOf(session: SshSession, p: Properties): RootRunner {
 /** «Создать новый»: inspect, propose, run, read back, check from outside (P2 B8). */
 private fun create(session: SshSession, p: Properties, target: File, words: List<String>): Int {
     val edits = words.associate { it.substringBefore('=') to it.substringAfter('=', "") }
+    // every word known and every number a number (B8 review F7: a typo must not fall back to the proposal)
+    val unknown = edits.keys - setOf("id", "iface", "subnet", "udp", "web", "slot", "bind", "resume")
+    val notNumbers = listOf("udp", "web", "slot").filter { it in edits && edits.getValue(it).toIntOrNull() == null }
+    if (unknown.isNotEmpty() || notNumbers.isNotEmpty()) {
+        println("unknown words: ${unknown.joinToString()}; not numbers: ${notNumbers.joinToString()}")
+        return 2
+    }
     val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
     val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
     val remote = session.asRemote()
@@ -430,6 +439,15 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
     if (PreflightRules.stops(verdicts).isNotEmpty()) return 6
     val inventory = Inventory.from(report.lines)
     val classification = Classifier.classify(inventory)
+    val runner = Runner(remote, root)
+    val resumeOf = edits["resume"]
+    if (resumeOf != null) {
+        // «Продолжить»: the cut-off run's own plan again, new credentials, and run.sh undoes what that run left first
+        val proposal = runner.keptPlan(resumeOf)?.let { proposalOfKeptPlan(it) }
+            ?: return 2.also { println("no create plan kept for run $resumeOf on the box") }
+        println("will: «Продолжить» ${proposal.instance} from run $resumeOf: what it left goes, the create runs again")
+        return runCreate(remote, root, runner, target, proposal, preflight, core, p, resume = true)
+    }
     val proposed = try {
         Proposer.propose(classification, inventory)
     } catch (refused: ProposalRefused) {
@@ -453,10 +471,14 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
     val plan = Proposer.createPlan(proposal, classification)
     plan.will.forEach { println("will: $it") }
     plan.unchanged.forEach { println("unchanged: $it") }
+    return runCreate(remote, root, runner, target, proposal, preflight, core, p, resume = false)
+}
+
+private fun runCreate(remote: com.csqtt.deploy.ssh.Remote, root: RootRunner, runner: Runner, target: File,
+    proposal: com.csqtt.deploy.plan.Proposal, preflight: Preflight, core: Core, p: Properties, resume: Boolean): Int {
     val credentials = Credentials.generate()
     val sshHost = p.prop("host").orEmpty()
-    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials)
-    val runner = Runner(remote, root)
+    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials, resume)
     val coordinator = coordinator(target)
     val runId = Runner.newRunId()
     val before = coordinator.state
@@ -487,7 +509,9 @@ private fun readBack(root: RootRunner, id: String, sshHost: String, set: Credent
         println("readback failed: ${failed.reason}")
         return 7
     }
-    println("connection host=${connection.host} udp=${connection.udpPort} web=${connection.webPort} panel=${connection.panelUrl} " +
+    // the panel's secret path is a secret: masked here, as the passwords are (B8 review F6)
+    val masked = if (connection.secretPath.isEmpty()) connection.panelUrl else connection.panelUrl.replace(connection.panelPath, "/***/")
+    println("connection host=${connection.host} udp=${connection.udpPort} web=${connection.webPort} panel=$masked " +
         "login=${connection.webUser} cert=${connection.certSha256 ?: "-"}")
     if (set != null) {
         println("readback main_password " + if (connection.mainPassword == set.mainPassword) "matches the one set" else "DIFFERS from the one set")

@@ -79,7 +79,8 @@ class CreateTest {
         // and the create action reads only keys the plan has
         val create = script.substringAfter("action_create() {").substringBefore("\n}\n")
         val used = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(create).map { it.groupValues[1] }.toSet()
-        for (key in used) assertTrue("create reads $key", "\n$key=" in "\n$plan")
+        // (resume only on a continuation: «Продолжить», B8 review F1)
+        for (key in used - "resume") assertTrue("create reads $key", "\n$key=" in "\n$plan")
     }
 
     @Test
@@ -170,6 +171,39 @@ class CreateTest {
         DatagramSocket(0, InetAddress.getLoopbackAddress()).use { silent ->
             assertFalse(Outside.udp("127.0.0.1", silent.localPort, tries = 1, waitMs = 300))
         }
+    }
+
+    @Test
+    fun aLostAnswerIsAskedForAgainFromANewEndpoint() {
+        // the server answers one ClientHello per source endpoint (B8 review F2); here its first answer is lost on the way
+        DatagramSocket(0, InetAddress.getLoopbackAddress()).use { server ->
+            val seen = mutableSetOf<Int>()
+            val responder = thread {
+                val buffer = ByteArray(2_048)
+                repeat(3) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    try { server.receive(packet) } catch (_: Exception) { return@thread }
+                    val first = seen.isEmpty()
+                    if (seen.add(packet.port) && !first) {
+                        val answer = ByteArray(40).also { it[0] = 22; it[1] = 0xfe.toByte(); it[2] = 0xfd.toByte(); it[13] = 2 }
+                        server.send(DatagramPacket(answer, answer.size, packet.socketAddress))
+                        return@thread
+                    }
+                }
+            }
+            server.soTimeout = 5_000
+            assertTrue(Outside.udp("127.0.0.1", server.localPort, tries = 3, waitMs = 500))
+            responder.join(5_000)
+        }
+    }
+
+    @Test
+    fun aCutOffCreateIsContinuedFromItsKeptPlan() {
+        val kept = CreateRun.plan(proposal.copy(webBind = "127.0.0.1"), "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate()).planText()
+        assertEquals(proposal.copy(webBind = "127.0.0.1"), proposalOfKeptPlan(kept))
+        assertEquals(null, proposalOfKeptPlan("action=selftest\nsteps=2\n"))
+        val again = CreateRun.plan(proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate(), resume = true).planText()
+        assertTrue("\nresume=1\n" in "\n$again")
     }
 
     @Test

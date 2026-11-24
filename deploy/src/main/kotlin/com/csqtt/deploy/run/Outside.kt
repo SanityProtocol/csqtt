@@ -57,16 +57,19 @@ object Outside {
 
     /**
      * Whether the server answers a ClientHello on its UDP port: any DTLS handshake record back (ServerHello, or a
-     * HelloVerifyRequest) is an answer. Sent three times, 2 s apart; an ICMP port-unreachable ends it at once.
+     * HelloVerifyRequest) is an answer. Sent three times, 2 s apart, each from a socket of its own; an ICMP port-unreachable
+     * ends it at once.
      */
     fun udp(host: String, port: Int, tries: Int = 3, waitMs: Int = 2_000): Boolean {
-        DatagramSocket().use { socket ->
-            try {
-                socket.connect(InetSocketAddress(host, port))
-                socket.soTimeout = waitMs
-                val hello = clientHello(ByteArray(32).also { SecureRandom().nextBytes(it) })
-                val buffer = ByteArray(4_096)
-                repeat(tries) {
+        val hello = clientHello(ByteArray(32).also { SecureRandom().nextBytes(it) })
+        val buffer = ByteArray(4_096)
+        repeat(tries) {
+            // a socket of its own each try (B8 review F2): the server answers one ClientHello per source endpoint and holds that
+            // handshake for 10 s, so a retry from the same port would go unanswered after a lost answer
+            DatagramSocket().use { socket ->
+                try {
+                    socket.connect(InetSocketAddress(host, port))
+                    socket.soTimeout = waitMs
                     socket.send(DatagramPacket(hello, hello.size))
                     val deadline = System.nanoTime() + waitMs * 1_000_000L
                     while (System.nanoTime() < deadline) {
@@ -78,11 +81,11 @@ object Outside {
                         }
                         if (isHandshakeAnswer(buffer, packet.length)) return true
                     }
+                } catch (_: PortUnreachableException) {
+                    return false
+                } catch (_: IOException) {
+                    return false
                 }
-            } catch (_: PortUnreachableException) {
-                return false
-            } catch (_: IOException) {
-                return false
             }
         }
         return false

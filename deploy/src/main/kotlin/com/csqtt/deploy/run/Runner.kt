@@ -206,6 +206,12 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
         }
     }
 
+    /** A kept run's plan (0644, no secret), as the login user: what «Продолжить» runs again. null when the box has none. */
+    fun keptPlan(runId: String): String? {
+        val result = remote.exec(RemoteCommand.of("cat", "$RUNS/$runId/plan"), null, 30_000)
+        return if (result.exitStatus == 0) result.stdoutText.substringAfter("action=").let { "action=$it" } else null
+    }
+
     /** The runs the box keeps, read with run.sh on stdin (no run needs to exist), as the login user. */
     fun status(): List<RunInfo> {
         val result = remote.exec(RemoteCommand.of("/bin/sh", "-s", "status"), script(), 30_000)
