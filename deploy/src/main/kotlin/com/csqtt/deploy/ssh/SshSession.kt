@@ -288,16 +288,17 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
         fun loadKey(key: SshAuth.Key): KeyProvider {
             val passphrase = key.passphrase?.takeIf { it.isNotEmpty() }
             val finder: PasswordFinder? = passphrase?.let { PasswordUtils.createOneOff(it.toCharArray()) }
+            val encrypted = encryptedKeyText(key.privateKey)
             val provider = try {
                 SSHClient(DefaultConfig()).loadKeys(key.privateKey, null, finder)
             } catch (error: Exception) {
-                throw keyError(error, passphrase != null)
+                throw keyError(error, passphrase != null, encrypted)
             }
             try {
                 // sshj reads a key lazily; read it now so a bad key fails here, not at the server
                 check(provider.public != null && provider.private != null) { "the key file holds no key" }
             } catch (error: Exception) {
-                throw keyError(error, passphrase != null)
+                throw keyError(error, passphrase != null, encrypted)
             }
             val certificate = key.certificate?.takeIf { it.isNotBlank() } ?: return provider
             return withCertificate(provider, certificate)
@@ -324,9 +325,20 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
             }
         }
 
-        private fun keyError(error: Exception, hadPassphrase: Boolean): SshError {
+        /**
+         * The key file says it is encrypted: a legacy PEM's `Proc-Type: 4,ENCRYPTED`, PKCS#8's `ENCRYPTED PRIVATE KEY`, a PuTTY
+         * file's `Encryption:` other than none. A wrong passphrase decrypts such a PEM or PKCS#8 key to bytes whose padding passes
+         * by chance about once in 256 tries, and those then fail as ASN.1, not as a passphrase (CI, 2026-11-24).
+         */
+        private fun encryptedKeyText(text: String): Boolean =
+            "Proc-Type: 4,ENCRYPTED" in text || "BEGIN ENCRYPTED PRIVATE KEY" in text ||
+                Regex("(?m)^Encryption: *(?!none\\s*$)\\S").containsMatchIn(text)
+
+        private fun keyError(error: Exception, hadPassphrase: Boolean, encrypted: Boolean): SshError {
             val message = error.message.orEmpty().lowercase()
-            val passphraseProblem = SshFailures.classify(error) == SshFailure.KEY_PASSPHRASE ||
+            // a passphrase given for a key that says it is encrypted, and the key still unread: the passphrase is wrong, however
+            // the decrypted bytes failed
+            val passphraseProblem = SshFailures.classify(error) == SshFailure.KEY_PASSPHRASE || (hadPassphrase && encrypted) ||
                 "passphrase" in message || "password" in message || "decrypt" in message || "encrypted" in message
             val kind = if (passphraseProblem) SshFailure.KEY_PASSPHRASE else SshFailure.KEY_FORMAT
             val what = if (kind == SshFailure.KEY_PASSPHRASE && !hadPassphrase) "the key is encrypted and no passphrase was given"

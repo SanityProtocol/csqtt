@@ -75,7 +75,10 @@ class SshKeysTest {
     fun anEncryptedKeyWithoutItsPassphraseSaysSo() {
         for ((i, format) in listOf(null, "PEM", "PKCS8").withIndex()) {
             val (text, _) = keygen("e$i", if (format == null) "ed25519" else "rsa", format, "right phrase")
-            for (given in listOf(null, "wrong phrase")) {
+            // (a wrong passphrase on a PEM or PKCS#8 key: the decrypted bytes' padding passes by chance about once in 256,
+            // then fails as ASN.1; it is a passphrase problem all the same, whatever the bytes did — CI run 45385215641)
+            val tries = if (format == null) emptyList() else (1..40).map { "wrong phrase $it" }
+            for (given in listOf(null, "wrong phrase") + tries) {
                 try {
                     SshSession.loadKey(SshAuth.Key(text, given))
                     fail("${format ?: "OpenSSH"} with passphrase $given was read")
