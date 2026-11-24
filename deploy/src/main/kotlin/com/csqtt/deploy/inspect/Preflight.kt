@@ -16,6 +16,14 @@ class Facts(private val values: Map<String, String>) {
     fun long(key: String): Long? = values[key]?.trim()?.toLongOrNull()
 
     override fun toString() = values.toString()
+
+    companion object {
+        /** inspect.sh's fields, each `key=value`; a field with no `=` is not a fact and is skipped. */
+        fun of(fields: List<String>): Facts = Facts(fields.mapNotNull { field ->
+            val at = field.indexOf('=')
+            if (at > 0) field.substring(0, at) to field.substring(at + 1) else null
+        }.toMap())
+    }
 }
 
 class Preflight(private val checks: Map<String, Facts>, val reach: List<Facts>) {
@@ -29,10 +37,7 @@ class Preflight(private val checks: Map<String, Facts>, val reach: List<Facts>) 
             val reach = mutableListOf<Facts>()
             for (line in lines) {
                 if (line.kind != "PRE" || line.fields.isEmpty()) continue
-                val facts = Facts(line.fields.drop(1).mapNotNull { field ->
-                    val at = field.indexOf('=')
-                    if (at > 0) field.substring(0, at) to field.substring(at + 1) else null
-                }.toMap())
+                val facts = Facts.of(line.fields.drop(1))
                 if (line.fields[0] == "reach") reach += facts else checks[line.fields[0]] = facts
             }
             return Preflight(checks, reach)

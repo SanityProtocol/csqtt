@@ -258,6 +258,11 @@ private fun inspect(session: SshSession, p: Properties, hosts: List<String>): In
         println("report broken: ${(report as Report.Broken).reason}")
         return 4
     }
+    // report_file=…: the report exactly as the box sent it (its marker lines, noise dropped), which the zoo keeps as the
+    // classifier's test data: it must go through the same parse the app does
+    p.getProperty("report_file")?.let { path ->
+        File(path).writeText(result.stdoutText.lines().filter { it.startsWith("CSQTT_") }.joinToString("\n", postfix = "\n"))
+    }
     report.lines.forEach { line -> println("${line.kind} ${line.fields.joinToString(" ")}") }
     val verdicts = PreflightRules.verdicts(Preflight.from(report.lines), System.currentTimeMillis() / 1000)
     verdicts.forEach { println("${it.level} ${it.finding}" + if (it.detail.isEmpty()) "" else " ${it.detail}") }
