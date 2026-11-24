@@ -75,10 +75,7 @@ class SshKeysTest {
     fun anEncryptedKeyWithoutItsPassphraseSaysSo() {
         for ((i, format) in listOf(null, "PEM", "PKCS8").withIndex()) {
             val (text, _) = keygen("e$i", if (format == null) "ed25519" else "rsa", format, "right phrase")
-            // (a wrong passphrase on a PEM or PKCS#8 key: the decrypted bytes' padding passes by chance about once in 256,
-            // then fails as ASN.1; it is a passphrase problem all the same, whatever the bytes did — CI run 45385215641)
-            val tries = if (format == null) emptyList() else (1..40).map { "wrong phrase $it" }
-            for (given in listOf(null, "wrong phrase") + tries) {
+            for (given in listOf(null, "wrong phrase")) {
                 try {
                     SshSession.loadKey(SshAuth.Key(text, given))
                     fail("${format ?: "OpenSSH"} with passphrase $given was read")
@@ -86,6 +83,38 @@ class SshKeysTest {
                     assertEquals("${format ?: "OpenSSH"} with passphrase $given: ${error.detail}", SshFailure.KEY_PASSPHRASE, error.kind)
                 }
             }
+        }
+    }
+
+    @Test
+    fun aWrongPassphraseOnALegacyPemKeyIsNamedSoWhateverItsBytesDid() {
+        // CI run 45385215641: a wrong passphrase decrypts a legacy PEM key to bytes whose padding passes by chance about once in
+        // 255, which then fail in the key's own parser; wrong passphrases are tried until that has happened (about 0.4 ms each)
+        val (text, _) = keygen("lucky", "rsa", "PEM", "right phrase")
+        var lucky = 0
+        for (i in 1..5000) {
+            try {
+                SshSession.loadKey(SshAuth.Key(text, "wrong phrase $i"))
+                fail("wrong phrase $i was taken")
+            } catch (error: SshError) {
+                assertEquals("wrong phrase $i: ${error.detail}", SshFailure.KEY_PASSPHRASE, error.kind)
+                if ("problem creating" in error.detail) lucky++
+            }
+            if (lucky > 0) break
+        }
+        assertTrue("no wrong passphrase got past the padding in 5000 tries", lucky > 0)
+    }
+
+    @Test
+    fun anEncryptedKeyOfAKindSshjCannotReadIsAFormatProblem() {
+        // B1 fix review F1: openssl's PKCS#8 Ed25519, encrypted, with its right passphrase: sshj reads no such key, and the
+        // passphrase is not the problem
+        KeyTool.run(dir, "openssl", "genpkey", "-algorithm", "ed25519", "-aes256", "-pass", "pass:right phrase", "-out", "ossl.pem")
+        try {
+            SshSession.loadKey(SshAuth.Key(File(dir, "ossl.pem").readText(), "right phrase"))
+            fail("an Ed25519 PKCS#8 key was read")
+        } catch (error: SshError) {
+            assertEquals(error.detail, SshFailure.KEY_FORMAT, error.kind)
         }
     }
 

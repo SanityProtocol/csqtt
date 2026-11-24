@@ -326,19 +326,20 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
         }
 
         /**
-         * The key file says it is encrypted: a legacy PEM's `Proc-Type: 4,ENCRYPTED`, PKCS#8's `ENCRYPTED PRIVATE KEY`, a PuTTY
-         * file's `Encryption:` other than none. A wrong passphrase decrypts such a PEM or PKCS#8 key to bytes whose padding passes
-         * by chance about once in 256 tries, and those then fail as ASN.1, not as a passphrase (CI, 2026-11-24).
+         * A legacy PEM key that says it is encrypted (`Proc-Type: 4,ENCRYPTED`). A wrong passphrase decrypts it to bytes whose CBC
+         * padding passes by chance about once in 255 tries, and those then fail in the key's own parser («problem creating … private
+         * key»), not as a passphrase (CI, 2026-11-24). PKCS#8 (BouncyCastle wraps every failure of its decryption) and PuTTY files
+         * (sshj checks their MAC) name a wrong passphrase already (B1 fix review F1).
          */
-        private fun encryptedKeyText(text: String): Boolean =
-            "Proc-Type: 4,ENCRYPTED" in text || "BEGIN ENCRYPTED PRIVATE KEY" in text ||
-                Regex("(?m)^Encryption: *(?!none\\s*$)\\S").containsMatchIn(text)
+        private fun encryptedKeyText(text: String): Boolean = "Proc-Type: 4,ENCRYPTED" in text
 
         private fun keyError(error: Exception, hadPassphrase: Boolean, encrypted: Boolean): SshError {
             val message = error.message.orEmpty().lowercase()
-            // a passphrase given for a key that says it is encrypted, and the key still unread: the passphrase is wrong, however
-            // the decrypted bytes failed
-            val passphraseProblem = SshFailures.classify(error) == SshFailure.KEY_PASSPHRASE || (hadPassphrase && encrypted) ||
+            // a passphrase given for a legacy PEM key that says it is encrypted, and its decrypted bytes failing as a key: the
+            // passphrase is wrong (a file damaged in its structure fails before, as a format; damage inside the encrypted body
+            // cannot be told from a wrong passphrase: B1 fix review F1 and its verify)
+            val passphraseProblem = SshFailures.classify(error) == SshFailure.KEY_PASSPHRASE ||
+                (hadPassphrase && encrypted && "problem creating" in message) ||
                 "passphrase" in message || "password" in message || "decrypt" in message || "encrypted" in message
             val kind = if (passphraseProblem) SshFailure.KEY_PASSPHRASE else SshFailure.KEY_FORMAT
             val what = if (kind == SshFailure.KEY_PASSPHRASE && !hadPassphrase) "the key is encrypted and no passphrase was given"
