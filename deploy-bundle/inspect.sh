@@ -150,9 +150,13 @@ pre_forwarding() {
 pre_ipv4() {
 	p4_dev='' p4_via='' p4_src=''
 	if have ip; then
-		p4_dev=$(ip -4 route show default 2>/dev/null | awk 'NR==1 {for (i=1;i<NF;i++) if ($i=="dev") print $(i+1)}')
-		p4_via=$(ip -4 route show default 2>/dev/null | awk 'NR==1 {for (i=1;i<NF;i++) if ($i=="via") print $(i+1)}')
-		p4_src=$(ip -4 route get 1.1.1.1 2>/dev/null | awk 'NR==1 {for (i=1;i<NF;i++) if ($i=="src") print $(i+1)}')
+		# the uplink is the first default route through no tunnel: a VPN client on the box (csqtt, sqc, mrtt, wg, awg, tun)
+		# would otherwise give its own address as the box's (M-118); its source is the uplink's own first global address
+		p4_line=$(ip -4 route show default 2>/dev/null | awk '{d = ""; for (i = 1; i < NF; i++) if ($i == "dev") d = $(i + 1)}
+			d != "" && d !~ /^(csqtt|sqc|mrtt|mrtx|wg|awg|tun|tap|ppp)/ {print; exit}')
+		p4_dev=$(printf '%s\n' "$p4_line" | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+		p4_via=$(printf '%s\n' "$p4_line" | awk '{for (i = 1; i < NF; i++) if ($i == "via") print $(i + 1)}')
+		[ -z "$p4_dev" ] || p4_src=$(ip -4 -o addr show dev "$p4_dev" scope global 2>/dev/null | awk 'NR == 1 {sub(/\/.*/, "", $4); print $4}')
 	fi
 	p4_addrs=''
 	have ip && p4_addrs=$(ip -4 -o addr show scope global 2>/dev/null | awk '{printf "%s ", $4}')

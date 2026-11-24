@@ -282,7 +282,18 @@ mf_write() {
 		done <<EOF
 $MF_OBJECTS
 EOF
-		printf '],"host":[]}\n'
+		printf '],"host":['
+		mf_sep=
+		while read -r mf_kind mf_rest; do
+			[ -n "$mf_kind" ] || continue
+			printf '%s{"kind":"%s"' "$mf_sep" "$mf_kind"
+			for mf_kv in $mf_rest; do printf ',"%s":"%s"' "${mf_kv%%=*}" "${mf_kv#*=}"; done
+			printf '}'
+			mf_sep=,
+		done <<EOF
+$MF_HOST
+EOF
+		printf ']}\n'
 	} >"$MF.new" && chmod 600 "$MF.new" && mv -f "$MF.new" "$MF"
 }
 
@@ -290,6 +301,171 @@ mf_add() {  # mf_add <kind> <path>: named before it is made
 	MF_OBJECTS="$MF_OBJECTS
 $1 $2"
 	[ ! -d "${MF%/*}" ] || mf_write
+}
+
+# ── host changes (APP-PLAN §6.9, P2-PLAN §1.6; P2 B9): each check-then-apply, named in the manifest's host list as made
+# (kind key=value…, values without spaces), and undone, newest first, by a run that fails: only what this run added ─────
+HOST_DROPIN=/etc/sysctl.d/99-sanity-csqtt.conf
+# the floors 2.5.3's deploy set, raise-only (D8; for tcp_rmem/tcp_wmem the maximum), and forwarding, which the server also
+# re-asserts at every start
+HOST_FLOORS='net.ipv4.ip_forward 1
+net.core.rmem_max 67108864
+net.core.wmem_max 67108864
+net.ipv4.tcp_rmem 67108864
+net.ipv4.tcp_wmem 67108864
+net.core.netdev_max_backlog 10000
+net.core.somaxconn 65535
+net.ipv4.tcp_mtu_probing 1'
+
+host_add() {  # host_add <kind> [key=value…]
+	MF_HOST="$MF_HOST
+$*"
+	[ ! -d "${MF%/*}" ] || mf_write
+}
+
+# the firewall the openings go through: ufw or firewalld when active, else iptables when INPUT drops (its policy, or a
+# last rule that drops everything), else none. A native nft table that drops input is not edited: the outside check names it
+host_fw_mode() {
+	if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -n 1 | grep -q 'Status: active'; then
+		echo ufw
+	elif [ "$(systemctl is-active firewalld 2>/dev/null)" = active ]; then
+		echo firewalld
+	elif iptables -w 5 -S INPUT 2>/dev/null | awk '$1 == "-P" && ($3 == "DROP" || $3 == "REJECT") {d = 1}
+		$1 == "-A" && $3 == "-j" && ($4 == "DROP" || $4 == "REJECT") {d = 1} END {exit !d}'; then
+		echo iptables
+	else
+		echo none
+	fi
+}
+
+# waits for the package lock up to 20 minutes, the heartbeat naming its holder; false when it is still held
+host_lock_wait() {
+	[ -n "$(apt_lock_holder)" ] || return 0
+	run_beat_start "the package lock"
+	hl_i=0
+	while [ -n "$(apt_lock_holder)" ]; do
+		hl_i=$((hl_i + 1))
+		[ $hl_i -le 240 ] || { run_beat_stop; return 1; }
+		sleep 5
+	done
+	run_beat_stop
+}
+
+# iptables, which the server's NAT needs (Alma ships without it): installed, never removed by an undo
+host_iptables() {
+	command -v iptables >/dev/null 2>&1 && return 0
+	run_phase packages 12
+	if command -v apt-get >/dev/null 2>&1; then
+		host_lock_wait || cr_fail "the package lock is held by $(apt_lock_holder)" "wait for it to finish, then try again"
+		# a dpkg run cut off before leaves packages half-configured, and apt refuses until they are: once (DE-O4)
+		[ -z "$(dpkg --audit 2>/dev/null)" ] || run_cmd env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold </dev/null
+		hi_apt="env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends -o Dpkg::Options::=--force-confold iptables"
+		# shellcheck disable=SC2086 # the words of ours
+		run_cmd $hi_apt </dev/null || { run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q </dev/null && run_cmd $hi_apt </dev/null; } ||
+			cr_fail "iptables could not be installed" "check the box's package sources, then try again"
+	elif command -v dnf >/dev/null 2>&1; then
+		run_cmd dnf install -y -q iptables-nft </dev/null || cr_fail "iptables could not be installed" "check the box's package sources, then try again"
+	else
+		cr_fail "iptables is not installed (the server's NAT needs it)" "install iptables and try again"
+	fi
+	host_add package name=iptables
+}
+
+# the floors, each raised only when lower and not in our drop-in already (another instance of ours set it), with what it
+# was kept beside it; sysctl.d takes no comment after a value, so each comment has a line of its own
+host_sysctl() {
+	while read -r hs_key hs_floor; do
+		[ -n "$hs_key" ] || continue
+		grep -q "^$hs_key = " "$HOST_DROPIN" 2>/dev/null && continue
+		hs_now=$(sysctl -n "$hs_key" 2>/dev/null | tr -s '\t ' '  ')
+		[ -n "$hs_now" ] || continue
+		case $hs_key in
+		*.tcp_rmem | *.tcp_wmem)
+			# shellcheck disable=SC2086 # three numbers
+			set -- $hs_now
+			[ $# = 3 ] && [ "$3" -lt "$hs_floor" ] 2>/dev/null || continue
+			hs_set="$1 $2 $hs_floor"
+			;;
+		net.ipv4.ip_forward) hs_set=1 ;;
+		*)
+			[ "$hs_now" -lt "$hs_floor" ] 2>/dev/null || continue
+			hs_set=$hs_floor
+			;;
+		esac
+		# writing ip_forward resets accept_redirects to !forwarding (the kernel's devinet): kept to put back beside it
+		hs_redir=''
+		[ "$hs_key" != net.ipv4.ip_forward ] || hs_redir="redirects=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null)"
+		host_add sysctl "key=$hs_key" "was=$(printf '%s' "$hs_now" | tr ' ' ,)" "set=$(printf '%s' "$hs_set" | tr ' ' ,)" $hs_redir
+		[ -f "$HOST_DROPIN" ] || printf '# SanityProtocol csqtt (APP-PLAN §6.9): forwarding and raise-only floors; each raised from the value above it\n' >"$HOST_DROPIN"
+		printf '# %s was %s\n%s = %s\n' "$hs_key" "$hs_now" "$hs_key" "$hs_set" >>"$HOST_DROPIN"
+		[ "$hs_now" = "$hs_set" ] || run_cmd sysctl -w "$hs_key=$hs_set" || cr_fail "cannot set $hs_key"
+	done <<EOF
+$HOST_FLOORS
+EOF
+}
+
+# the openings: UDP always, the panel's TCP unless it is local only; firewalld's interface in a zone of our own whose target
+# stays default (no host port opens to VPN clients) with a forwarding policy out of it (§1.6). iptables' are the unit's own
+host_firewall() {
+	case $cr_fw in
+	ufw)
+		for hf_r in $cr_open; do
+			ufw status 2>/dev/null | grep -qE "^${hf_r}[[:space:]]+ALLOW" && continue
+			host_add ufw "rule=$hf_r"
+			run_cmd ufw allow "$hf_r" comment "sqc-$cr_id" || cr_fail "ufw would not open $hf_r"
+		done
+		;;
+	firewalld)
+		hf_zone=$(firewall-cmd --get-default-zone 2>/dev/null)
+		for hf_r in $cr_open; do
+			firewall-cmd -q --permanent --zone="$hf_zone" --query-port="$hf_r" 2>/dev/null && continue
+			host_add firewalld-port "zone=$hf_zone" "port=$hf_r"
+			run_cmd firewall-cmd -q --permanent --zone="$hf_zone" --add-port="$hf_r" || cr_fail "firewalld would not open $hf_r"
+		done
+		host_add firewalld-zone "zone=sqc$cr_id"
+		run_cmd firewall-cmd -q --permanent --new-zone="sqc$cr_id" &&
+			run_cmd firewall-cmd -q --permanent --zone="sqc$cr_id" --add-interface="$cr_iface" ||
+			cr_fail "firewalld would not take $cr_iface into a zone of its own"
+		host_add firewalld-policy "policy=sqc$cr_id-fwd"
+		run_cmd firewall-cmd -q --permanent --new-policy="sqc$cr_id-fwd" ||
+			cr_fail "this firewalld has no policies (0.9 or newer is needed)" "update firewalld, then try again"
+		run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --add-ingress-zone="sqc$cr_id" &&
+			run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --add-egress-zone=ANY &&
+			run_cmd firewall-cmd -q --permanent --policy="sqc$cr_id-fwd" --set-target=ACCEPT &&
+			run_cmd firewall-cmd -q --reload || cr_fail "firewalld would not let $cr_iface forward"
+		;;
+	esac
+}
+
+# this run's host changes undone, newest first; a package installed stays
+host_undo() {
+	hu_list=$(printf '%s\n' "$MF_HOST" | awk 'NF {l[++n] = $0} END {for (i = n; i > 0; i--) print l[i]}')
+	hu_reload=0
+	while read -r hu_kind hu_rest; do
+		hu_key='' hu_was='' hu_rule='' hu_zone='' hu_port='' hu_policy='' hu_redir=''
+		for hu_kv in $hu_rest; do
+			case $hu_kv in
+			key=*) hu_key=${hu_kv#key=} ;; was=*) hu_was=${hu_kv#was=} ;; rule=*) hu_rule=${hu_kv#rule=} ;; redirects=*) hu_redir=${hu_kv#redirects=} ;;
+			zone=*) hu_zone=${hu_kv#zone=} ;; port=*) hu_port=${hu_kv#port=} ;; policy=*) hu_policy=${hu_kv#policy=} ;;
+			esac
+		done
+		case $hu_kind in
+		sysctl)
+			sysctl -q -w "$hu_key=$(printf '%s' "$hu_was" | tr , ' ')" 2>/dev/null
+			[ -z "$hu_redir" ] || sysctl -q -w "net.ipv4.conf.all.accept_redirects=$hu_redir" 2>/dev/null
+			[ ! -f "$HOST_DROPIN" ] || sed -i "/^# $hu_key was /d; /^$hu_key = /d" "$HOST_DROPIN"
+			grep -q '^[a-z]' "$HOST_DROPIN" 2>/dev/null || rm -f "$HOST_DROPIN"
+			;;
+		ufw) ufw delete allow "$hu_rule" >/dev/null 2>&1 ;;
+		firewalld-port) firewall-cmd -q --permanent --zone="$hu_zone" --remove-port="$hu_port" 2>/dev/null; hu_reload=1 ;;
+		firewalld-zone) firewall-cmd -q --permanent --delete-zone="$hu_zone" 2>/dev/null; hu_reload=1 ;;
+		firewalld-policy) firewall-cmd -q --permanent --delete-policy="$hu_policy" 2>/dev/null; hu_reload=1 ;;
+		esac
+	done <<EOF
+$hu_list
+EOF
+	[ $hu_reload = 0 ] || firewall-cmd -q --reload 2>/dev/null
+	return 0
 }
 
 # removes what this run made, newest first: the unit before the files it runs, then any parent left empty
@@ -309,6 +485,12 @@ mf_undo() {
 $mu_list
 EOF
 	return 0
+}
+
+# the host changes a manifest names, as `kind key=value…` lines (our own format)
+mf_host_of() {
+	sed -n 's/.*"host":\[\(.*\)\]}$/\1/p' "$1" | sed 's/},{/}\n{/g' |
+		sed -n 's/^{"kind":"\([^"]*\)"\(.*\)}$/\1\2/p' | sed 's/,"\([^"]*\)":"\([^"]*\)"/ \1=\2/g'
 }
 
 # the objects a manifest names, as `kind path` lines (our own format: one object per {…})
@@ -355,7 +537,8 @@ cr_server_undo() {
 }
 
 # the host-wide values the server sets at every start (rust-server tokio_io.rs KERNEL_PARAMETERS), saved before the switch
-CR_SERVER_SYSCTLS='net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter net.core.default_qdisc
+# (accept_redirects follows forwarding: the kernel resets it to !forwarding whenever ip_forward is written)
+CR_SERVER_SYSCTLS='net.ipv4.ip_forward net.ipv4.conf.all.accept_redirects net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter net.core.default_qdisc
 net.ipv4.tcp_congestion_control net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_reordering net.ipv4.tcp_window_scaling
 net.ipv4.tcp_fastopen net.ipv4.tcp_slow_start_after_idle'
 
@@ -366,7 +549,7 @@ action_create() {
 	cr_root=/opt/sanityprotocol/csqtt/$cr_id cr_state=/var/lib/sanityprotocol/csqtt/$cr_id
 	cr_unit=sanity-csqtt-$cr_id.service
 	cr_release=$cr_root/releases/$cr_version-$(printf '%.8s' "$cr_sha")
-	MF=$cr_state/manifest.json MF_ID=$cr_id MF_OBJECTS=
+	MF=$cr_state/manifest.json MF_ID=$cr_id MF_OBJECTS='' MF_HOST=
 	# the parents this run makes are its own, never the manifest's (another instance may come to share them): removed when
 	# the run is undone and they are empty
 	cr_parents=
@@ -375,7 +558,9 @@ action_create() {
 	done
 	action_cleanup() {
 		mf_undo
+		# the server's own footprint back to before the switch, then our host changes back to before this run
 		[ ! -e "$RUN_DIR/switching" ] || cr_server_undo
+		host_undo
 		for cr_d in $cr_parents; do rmdir "$cr_d" 2>/dev/null; done
 		return 0
 	}
@@ -383,6 +568,8 @@ action_create() {
 	cr_flags="--listen 0.0.0.0:$cr_udp --web-port $cr_web --config-dir $cr_state --instance sqc-$cr_id --iface $cr_iface"
 	cr_flags="$cr_flags --tun-addr ${cr_subnet%.0/24}.1/24 --instance-slot $cr_slot"
 	[ -z "$cr_bind" ] || cr_flags="$cr_flags --web-bind $cr_bind"
+	cr_open="$cr_udp/udp"
+	[ "$cr_bind" = 127.0.0.1 ] || cr_open="$cr_open $cr_web/tcp"
 
 	# stage: nothing is made until the box and the binary have answered, and every object the manifest will name is new, so
 	# undoing this run can remove only what it made
@@ -392,10 +579,12 @@ action_create() {
 			# «Продолжить» (B8 review F1): an earlier run of this plan was cut off; what its manifest names goes (its server
 			# stopped, its rules with it), and the create runs again from the start with this run's credentials
 			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
+			MF_HOST=$(mf_host_of "$cr_state/manifest.json")
 			run_cmd systemctl stop "$cr_unit"
 			mf_undo
 			cr_server_undo
-			MF_OBJECTS=''
+			host_undo
+			MF_OBJECTS='' MF_HOST=''
 		else
 			run_result failed-cleaned "sqc-$cr_id exists already: an earlier run of this plan was cut off" \
 				"continue it («Продолжить»), or check again"
@@ -421,7 +610,7 @@ action_create() {
 	cr_in_ns() { if [ $cr_ns = 1 ]; then unshare -n "$@"; else "$@"; fi; }
 	run_cmd cr_in_ns ip tuntap add mode tun name "$cr_probe" || cr_fail "this box cannot make a TUN interface" "ask the hoster to enable TUN/TAP"
 	[ $cr_ns = 1 ] || ip link del "$cr_probe" 2>/dev/null
-	command -v iptables >/dev/null 2>&1 || cr_fail "iptables is not installed (the server's NAT needs it)" "install iptables and try again"
+	host_iptables
 	# shellcheck disable=SC2016 # expanded by the sh that runs it, with the chain as $1
 	run_cmd cr_in_ns sh -c 'iptables -w 5 -t nat -N "$1" && iptables -w 5 -t nat -A "$1" -j MASQUERADE &&
 		iptables -w 5 -t mangle -N "$1" && iptables -w 5 -t mangle -A "$1" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' \
@@ -430,6 +619,8 @@ action_create() {
 		for cr_t in nat mangle; do iptables -w 5 -t $cr_t -F "$cr_probe" 2>/dev/null; iptables -w 5 -t $cr_t -X "$cr_probe" 2>/dev/null; done
 	fi
 	[ "${cr_nat:-}" != failed ] || cr_fail "this box's iptables cannot NAT (see the step's output)" "ask the hoster to enable NAT (iptable_nat, xt_TCPMSS)"
+	# the firewall the openings go through, known before the unit is written (a plain iptables box's are the unit's own)
+	cr_fw=$(host_fw_mode)
 	run_safe_point
 
 	mkdir -p "${cr_state%/*}" || cr_fail "cannot make ${cr_state%/*}"
@@ -449,6 +640,26 @@ action_create() {
 	} >"$cr_state/env" && chmod 600 "$cr_state/env" || cr_fail "cannot write $cr_state/env"
 	( umask 077 && printf '{"main_password":"%s"}\n' "$(sed -n 's/^main_password=//p' "$RUN_DIR/secrets" | sed 's/[\\"]/\\&/g')" \
 		>"$cr_state/deploy-overrides.json" ) || cr_fail "cannot write the main password"
+	# on a plain iptables box whose INPUT drops, the openings are the unit's own: made at each start (a reboot, a restore of
+	# the saved rules), taken at each stop, tagged SQC-<ID>_OPEN (§1.5)
+	cr_open_unit=''
+	if [ "$cr_fw" = iptables ]; then
+		cr_tag=SQC-$(printf '%s' "$cr_id" | tr 'a-f' 'A-F')_OPEN
+		{
+			printf '#!/bin/sh\n# SanityProtocol csqtt: sqc-%s'"'"'s openings in INPUT, run by its unit (P2 B9)\n' "$cr_id"
+			printf 'for r in'
+			for cr_r in $cr_open; do printf ' "-p %s --dport %s"' "${cr_r#*/}" "${cr_r%/*}"; done
+			printf '; do\n'
+			# shellcheck disable=SC2016 # the generated script's own variables
+			printf '\tif [ "${1:-add}" = add ]; then\n\t\tiptables -w 5 -C INPUT $r -m comment --comment %s -j ACCEPT 2>/dev/null ||\n' "$cr_tag"
+			# shellcheck disable=SC2016
+			printf '\t\t\tiptables -w 5 -I INPUT $r -m comment --comment %s -j ACCEPT\n\telse\n' "$cr_tag"
+			# shellcheck disable=SC2016
+			printf '\t\tiptables -w 5 -D INPUT $r -m comment --comment %s -j ACCEPT 2>/dev/null\n\tfi\ndone\nexit 0\n' "$cr_tag"
+		} >"$cr_state/open.sh" && chmod 700 "$cr_state/open.sh" || cr_fail "cannot write $cr_state/open.sh"
+		cr_open_unit="ExecStartPre=-/bin/sh $cr_state/open.sh add
+ExecStopPost=-/bin/sh $cr_state/open.sh del"
+	fi
 	mf_add unit "/etc/systemd/system/$cr_unit"
 	cat >"/etc/systemd/system/$cr_unit" <<EOF || cr_fail "cannot write $cr_unit"
 [Unit]
@@ -464,6 +675,7 @@ NotifyAccess=main
 WatchdogSec=30
 EnvironmentFile=$cr_state/env
 ExecStart=$cr_root/current/csqtt-server $cr_flags
+$cr_open_unit
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -472,6 +684,13 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 	systemctl daemon-reload
+	run_safe_point
+
+	# host: forwarding and the floors, then the openings (each recorded as made, undone by a failure from here on)
+	run_phase host 45
+	host_sysctl
+	host_firewall
+	[ "$cr_fw" != iptables ] || host_add iptables-input "ports=$(printf '%s' "$cr_open" | tr ' ' ,)"
 	run_safe_point
 
 	# switch: nothing ran before, so it is the start (Type=notify: it returns once the server said READY=1). From here a

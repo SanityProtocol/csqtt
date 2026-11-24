@@ -84,6 +84,18 @@ class CreateTest {
     }
 
     @Test
+    fun thePlanSaysWhatTheHostGets() {
+        fun preflight(vararg lines: String) = com.csqtt.deploy.inspect.Preflight.from(
+            (com.csqtt.deploy.wire.LineCodec.parse(lines.joinToString("\n") + "\nCSQTT_END|${lines.size}\n") as com.csqtt.deploy.wire.Report.Complete).lines)
+        val ufw = CreateRun.hostChanges(preflight("CSQTT_PRE|firewall|ufw=active|firewalld=inactive", "CSQTT_PRE|forwarding|ipv4=0"), proposal)
+        assertTrue(ufw.joinToString(), "Откроет в ufw: UDP 41234, TCP 52345" in ufw && ufw.any { it.startsWith("Включит пересылку") })
+        val firewalld = CreateRun.hostChanges(preflight("CSQTT_PRE|firewall|firewalld=active", "CSQTT_PRE|nat|iptables=0|probe=skipped",
+            "CSQTT_PRE|forwarding|ipv4=1"), proposal.copy(webBind = "127.0.0.1"))
+        assertTrue(firewalld.joinToString(), firewalld.first().startsWith("Установит iptables") &&
+            firewalld.any { it.startsWith("Откроет в firewalld: UDP 41234;") } && firewalld.any { it.startsWith("Закрепит пересылку") })
+    }
+
+    @Test
     fun theReadBackIsParsedAndItsFailuresNamed() {
         val text = """
             motd noise

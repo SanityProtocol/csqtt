@@ -54,6 +54,27 @@ object CreateRun {
         return if (src.isNotEmpty() && !com.csqtt.deploy.inspect.PreflightRules.isPrivate(src)) src else sshHost
     }
 
+    /**
+     * What the run will change on the host (APP-PLAN §6.9, P2-PLAN §1.6; P2 B9), for the plan's «Будет», from the facts the
+     * inspection read: forwarding, the raise-only floors, the openings through the firewall the box uses, a missing iptables.
+     */
+    fun hostChanges(preflight: com.csqtt.deploy.inspect.Preflight, p: Proposal): List<String> {
+        val ports = listOf("UDP ${p.udpPort}") + if (p.webBind == "127.0.0.1") emptyList() else listOf("TCP ${p.webPort}")
+        val firewall = preflight.facts("firewall")
+        return listOfNotNull(
+            if (preflight.facts("nat")["iptables"] == "0") "Установит iptables (без него сервер не выпустит клиентов в интернет)" else null,
+            if (preflight.facts("forwarding")["ipv4"] == "1") "Закрепит пересылку пакетов (ip_forward) после перезагрузки"
+            else "Включит пересылку пакетов (ip_forward), и после перезагрузки тоже",
+            "Поднимет сетевые буферы до значений 2.5.3 там, где они ниже (/etc/sysctl.d/99-sanity-csqtt.conf)",
+            when {
+                firewall["ufw"] == "active" -> "Откроет в ufw: ${ports.joinToString(", ")}"
+                firewall["firewalld"] == "active" ->
+                    "Откроет в firewalld: ${ports.joinToString(", ")}; интерфейс ${p.iface} получит свою зону с выходом наружу (порты сервера ему закрыты)"
+                else -> "Откроет ${ports.joinToString(" и ")} в iptables, если входящие там закрыты"
+            },
+        )
+    }
+
     /** The run «Создать новый» starts: the proposal's facts in the plan, the passwords and the panel's path in its secrets. */
     fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials, resume: Boolean = false): RunPlan = RunPlan(
         action = "create",

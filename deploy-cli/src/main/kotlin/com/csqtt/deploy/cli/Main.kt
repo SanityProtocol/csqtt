@@ -469,7 +469,7 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
         return 2
     }
     val plan = Proposer.createPlan(proposal, classification)
-    plan.will.forEach { println("will: $it") }
+    (plan.will + CreateRun.hostChanges(preflight, proposal)).forEach { println("will: $it") }
     plan.unchanged.forEach { println("unchanged: $it") }
     return runCreate(remote, root, runner, target, proposal, preflight, core, p, resume = false)
 }
