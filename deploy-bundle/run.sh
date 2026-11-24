@@ -1243,52 +1243,95 @@ fr_sweep_tag() {
 	return 0
 }
 
-action_remove_foreign() {
-	fr_role=$(plan role) fr_purge=$(plan purge) fr_store=$(plan store)
-	case $fr_role in main | side) ;; *) run_result failed-cleaned "bad role $fr_role" "update the app" ;; esac
+# fr_validate <role> <key prefix>: every object a plan names (under its keys <prefix>units, …), in the role's namespace,
+# checked before anything changes (the move's are under move_)
+fr_validate() {
+	case $1 in main | side) ;; *) run_result failed-cleaned "bad role $1" "update the app" ;; esac
 	for fr_kind in unit path tag table; do
-		for fr_v in $(plan "${fr_kind}s" | tr , ' '); do
-			fr_ok "$fr_role" "$fr_kind" "$fr_v" || run_result failed-cleaned "$fr_v is not the stock $fr_role install's" "update the app"
+		for fr_v in $(plan "$2${fr_kind}s" | tr , ' '); do
+			fr_ok "$1" "$fr_kind" "$fr_v" || run_result failed-cleaned "$fr_v is not the stock $1 install's" "update the app"
 		done
 	done
-	for fr_v in $(plan lineage | tr , ' '); do
-		fr_ok "$fr_role" lineage "$fr_v" || run_result failed-cleaned "$fr_v is not a stock certificate" "update the app"
+	for fr_v in $(plan "$2lineage" | tr , ' '); do
+		fr_ok "$1" lineage "$fr_v" || run_result failed-cleaned "$fr_v is not a stock certificate" "update the app"
 	done
-	[ -z "$fr_store" ] || fr_ok "$fr_role" store "$fr_store" || run_result failed-cleaned "$fr_store is not the stock $fr_role store" "update the app"
+	fr_v=$(plan "$2store")
+	[ -z "$fr_v" ] || fr_ok "$1" store "$fr_v" || run_result failed-cleaned "$fr_v is not the stock $1 store" "update the app"
+}
 
-	run_phase stop 20
-	: >"$RUN_DIR/switching"
-	for fr_u in $(plan units | tr , ' '); do run_cmd systemctl disable --now "$fr_u"; done
-	# M-120: a server that outlived its unit keeps its port and TUN; nothing of it is deleted under it
-	case $fr_role in main) fr_bin=/usr/local/bin/csqtt ;; *) fr_bin=/usr/local/lib/csqtt25/csqtt25 ;; esac
+# fr_outside <role>: the pids of its binary still running once its units are stopped (M-120: a server that outlived its unit
+# keeps its port and TUN, and nothing of it is deleted under it); empty when none
+fr_outside() {
+	case $1 in main) fr_bin=/usr/local/bin/csqtt ;; *) fr_bin=/usr/local/lib/csqtt25/csqtt25 ;; esac
 	fr_live=''
 	for fr_pid in $(pgrep -x "${fr_bin##*/}" 2>/dev/null); do
 		[ "$(readlink "/proc/$fr_pid/exe" 2>/dev/null)" != "$fr_bin" ] || fr_live="$fr_live $fr_pid"
 	done
-	[ -z "$fr_live" ] || run_result failed-not-rolled-back "$fr_bin still runs outside its unit (pid$fr_live)" \
-		"stop it, then remove again: its units are disabled, nothing else changed"
-	# only the stock deploy's own unit files; a unit packaged elsewhere is not its to delete
-	for fr_u in $(plan units | tr , ' '); do rm -f "/etc/systemd/system/$fr_u"; done
-	systemctl daemon-reload
-	for fr_u in $(plan units | tr , ' '); do systemctl reset-failed "$fr_u" >/dev/null 2>&1; done
+	printf '%s' "$fr_live"
+}
 
-	run_phase remove 50
-	for fr_v in $(plan tags | tr , ' '); do fr_sweep_tag "$fr_v"; done
-	for fr_v in $(plan tables | tr , ' '); do
+# fr_keep_floors <key prefix>: an instance of ours on the box leans on the stock sysctl files this removal deletes (our create
+# records a floor only where the live value was below it, and the stock 2.5 files set exactly our floors: B11b review F1).
+# Each floor they set that our drop-in lacks goes into it at its live value, recorded so (the value it was is the value it
+# is): it survives the next boot, and a later last removal of ours writes nothing back
+fr_keep_floors() {
+	for fk_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$fk_u" ] && break; fk_u=''; done
+	[ -n "$fk_u" ] || return 0
+	for fk_p in $(plan "$1paths" | tr , ' '); do
+		case $fk_p in /etc/sysctl.d/*.conf) [ -f "$fk_p" ] || continue ;; *) continue ;; esac
+		for fk_k in $(sed -n 's/^[[:space:]]*\([a-z0-9_.]*\)[[:space:]]*=.*/\1/p' "$fk_p"); do
+			printf '%s\n' "$HOST_FLOORS" | awk '{print $1}' | grep -qxF "$fk_k" || continue
+			! grep -q "^$fk_k = " "$HOST_DROPIN" 2>/dev/null || continue
+			fk_v=$(sysctl -n "$fk_k" 2>/dev/null | tr -s '\t ' '  ')
+			[ -n "$fk_v" ] || continue
+			[ -f "$HOST_DROPIN" ] ||
+				printf '# SanityProtocol csqtt (APP-PLAN §6.9): forwarding and raise-only floors; each raised from the value above it\n' >"$HOST_DROPIN"
+			printf '# %s was %s\n%s = %s\n' "$fk_k" "$fk_v" "$fk_k" "$fk_v" >>"$HOST_DROPIN"
+		done
+	done
+	return 0
+}
+
+# fr_take <key prefix> <purge>: the stock install's objects (after fr_validate, its units stopped and disabled, nothing of it
+# left running): its unit files, its tagged rules, its routing, its paths (the floors its sysctl files set kept for an instance
+# of ours first), what all stock installs share when the plan says this is the last, its store only with <purge>
+fr_take() {
+	# only the stock deploy's own unit files; a unit packaged elsewhere is not its to delete
+	for fr_u in $(plan "$1units" | tr , ' '); do rm -f "/etc/systemd/system/$fr_u"; done
+	systemctl daemon-reload
+	for fr_u in $(plan "$1units" | tr , ' '); do systemctl reset-failed "$fr_u" >/dev/null 2>&1; done
+	for fr_v in $(plan "$1tags" | tr , ' '); do fr_sweep_tag "$fr_v"; done
+	for fr_v in $(plan "$1tables" | tr , ' '); do
 		while ip rule del table "$fr_v" 2>/dev/null; do :; done
 		ip route flush table "$fr_v" 2>/dev/null
 	done
-	for fr_v in $(plan paths | tr , ' '); do fr_rm "$fr_v"; done
-	if [ "$(plan untagged)" = 1 ]; then
+	fr_keep_floors "$1"
+	for fr_v in $(plan "$1paths" | tr , ' '); do fr_rm "$fr_v"; done
+	if [ "$(plan "$1untagged")" = 1 ]; then
 		iptables -w 5 -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
 		ip6tables -w 5 -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
 	fi
-	for fr_v in $(plan lineage | tr , ' '); do
+	for fr_v in $(plan "$1lineage" | tr , ' '); do
 		fr_rm "/etc/letsencrypt/live/$fr_v"
 		fr_rm "/etc/letsencrypt/archive/$fr_v"
 		fr_rm "/etc/letsencrypt/renewal/$fr_v.conf"
 	done
-	[ "$fr_purge" != 1 ] || [ -z "$fr_store" ] || fr_rm "$fr_store"
+	fr_v=$(plan "$1store")
+	[ "$2" != 1 ] || [ -z "$fr_v" ] || fr_rm "$fr_v"
+	return 0
+}
+
+action_remove_foreign() {
+	fr_role=$(plan role) fr_purge=$(plan purge) fr_store=$(plan store)
+	fr_validate "$fr_role" ""
+	run_phase stop 20
+	: >"$RUN_DIR/switching"
+	for fr_u in $(plan units | tr , ' '); do run_cmd systemctl disable --now "$fr_u"; done
+	fr_live=$(fr_outside "$fr_role")
+	[ -z "$fr_live" ] || run_result failed-not-rolled-back "the stock $fr_role binary still runs outside its unit (pid$fr_live)" \
+		"stop it, then remove again: its units are disabled, nothing else changed"
+	run_phase remove 50
+	fr_take "" "$fr_purge"
 	# our drop-in, kept for a csqtt server that ran beside our last instance (B11a verify N1), goes once none runs
 	host_dropin_drop
 	run_phase "done" 100

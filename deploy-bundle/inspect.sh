@@ -626,8 +626,12 @@ inv_stores() {
 				is_krel=$(sed -n 's/^# release //p' "$is_d/unit.saved" | head -n 1)
 			fi ;;
 		esac
+		# a config dir that is a link (moved to another disk, #5): its removal takes the link, never what it points to (B11b
+		# review F3: the listing says where the data stays)
+		is_link=''
+		[ ! -L "$is_d" ] || is_link=$(readlink "$is_d" 2>/dev/null)
 		csqtt_emit INV store "dir=$is_d" "files=$is_files" "lock=$is_lock" "schema=${is_schema%,}" "env_keys=${is_keys%,}" \
-			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel"
+			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel" "link=$is_link"
 	done
 }
 

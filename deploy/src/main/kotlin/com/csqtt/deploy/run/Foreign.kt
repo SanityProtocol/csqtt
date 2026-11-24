@@ -37,12 +37,20 @@ object ForeignRemoval {
 
     /** What the run removes, keeps and leaves, in the words the app shows before the typed confirmation, and its plan. */
     data class Listing(val role: Role, val units: List<String>, val paths: List<String>, val tags: List<String>, val tables: List<Int>,
-        val lineages: List<String>, val untagged: Boolean, val store: String?, val purge: Boolean, val left: List<String>) {
+        val lineages: List<String>, val untagged: Boolean, val store: String?, val purge: Boolean, val left: List<String>,
+        /** Where a symlinked store points: its removal takes the link alone (B11b review F3). */
+        val storeLink: String = "") {
         val will: List<String> get() = listOfNotNull(
             "Будет удалено: " + (units + paths + tags.map { "правила $it" } + tables.map { "маршрутизация $it" } +
                 lineages.map { "сертификат $it" } + (if (untagged) listOf("общее правило FORWARD RELATED,ESTABLISHED") else emptyList()))
                 .joinToString(", ").ifEmpty { "ничего" },
-            store?.let { if (purge) "База $it будет удалена вместе с клиентами" else "База $it останется" },
+            store?.let {
+                when {
+                    !purge -> "База $it останется"
+                    storeLink.isNotEmpty() -> "Ссылка $it будет удалена; база в $storeLink останется (её файлы не трогаются)"
+                    else -> "База $it будет удалена вместе с клиентами"
+                }
+            },
         ) + left.map { "Останется: $it" }
     }
 
@@ -52,10 +60,16 @@ object ForeignRemoval {
         else -> null
     }
 
-    /** The tag a live server's rules carry: its --instance uppercased, the default instance's CSQTT (swg's server included). */
+    private fun flagsOf(install: Installation) =
+        (install.procs.map { it.flags } + install.units.map { it.flags } + install.containers.map { it.flags }).firstOrNull()
+
+    /**
+     * The tag a live server's rules carry: its --instance uppercased, the default instance's CSQTT (swg's server included);
+     * MRTT's server tags its own MRTT_MANAGED (B11b review F4).
+     */
     private fun tagOf(install: Installation): String? {
-        val flags = (install.procs.map { it.flags } + install.units.map { it.flags } + install.containers.map { it.flags }).firstOrNull()
-            ?: return null
+        val flags = flagsOf(install) ?: return null
+        if (install.owner == Owner.MRTT) return "MRTT_MANAGED"
         return (flags["--instance"]?.uppercase() ?: "CSQTT") + "_MANAGED"
     }
 
@@ -66,21 +80,31 @@ object ForeignRemoval {
         val left = mutableListOf<String>()
         val units = role.units.filter { u -> inv.units.any { it.id == u } || inv.files.any { it.path == "/etc/systemd/system/$u" } }
         val paths = role.paths.filter { p -> inv.files.any { it.path == p } }
+        val live = others.filter { it.state in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING) }
         // a tag another live server's rules carry too (swg's default-instance server on a take-over, B15): its rules stay
-        val sharedBy = others.filter { it.state in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING) }
-            .firstOrNull { tagOf(it) == role.tags.first() }
+        val sharedBy = live.firstOrNull { tagOf(it) == role.tags.first() }
         val tags = if (sharedBy != null) {
-            left += "правила ${role.tags.joinToString("/")} и маршрутизация ${role.tables.joinToString("/")}: их же ведёт ${sharedBy.name}"
+            left += "правила ${role.tags.joinToString("/")}: их же ведёт ${sharedBy.name}"
             emptyList()
         } else role.tags.filter { tag -> inv.firewall.any { !it.isChain && Regex("--comment \"?$tag([:\" ]|$)").containsMatchIn(it.text) } }
-        val tables = if (sharedBy != null) emptyList() else role.tables.filter { t -> inv.ipRules.any { it.trimEnd().endsWith("lookup $t") } }
+        // the policy routing is the instance's slot's: a live server on the same one (the default instance for the main —
+        // swg's, MRTT's — csqtt25 for the side) keeps it, whatever its tag (B11b review F4)
+        val slotOwner = live.firstOrNull { other -> flagsOf(other) != null && flagsOf(other)?.get("--instance") == (if (role == Role.MAIN) null else "csqtt25") }
+        val tables = if (slotOwner != null) {
+            left += "маршрутизация ${role.tables.joinToString("/")}: её же ведёт ${slotOwner.name}"
+            emptyList()
+        } else role.tables.filter { t -> inv.ipRules.any { it.trimEnd().endsWith("lookup $t") } }
         // shared by every stock install: they go with the last one
         val lastStock = others.none { it.owner in STOCK }
         val lineages = inv.files.mapNotNull { LINEAGE.find(it.path)?.groupValues?.get(1) }.distinct()
-        val untagged = inv.firewall.any { !it.isChain && it.text == UNTAGGED }
-        if (!lastStock && (lineages.isNotEmpty() || untagged)) {
+        // the untagged FORWARD rule is a 2.5 network-up's (added when missing): an install of another line never put it there,
+        // so the one on the box is someone else's (B11b review F2)
+        val untaggedThere = inv.firewall.any { !it.isChain && it.text == UNTAGGED }
+        val untaggedOurs = untaggedThere && install.build?.line == com.csqtt.deploy.inspect.ProtocolLine.V25
+        if (untaggedThere && !untaggedOurs) left += "правило FORWARD RELATED,ESTABLISHED: эта установка его не ставила"
+        if (!lastStock && (lineages.isNotEmpty() || untaggedOurs)) {
             left += "общие с ${others.first { it.owner in STOCK }.name}: " +
-                (lineages.map { "сертификат $it" } + if (untagged) listOf("правило FORWARD RELATED,ESTABLISHED") else emptyList()).joinToString(", ")
+                (lineages.map { "сертификат $it" } + if (untaggedOurs) listOf("правило FORWARD RELATED,ESTABLISHED") else emptyList()).joinToString(", ")
         }
         if (inv.files.any { it.path == "/etc/modules-load.d/bbr.conf" }) left += "/etc/modules-load.d/bbr.conf (такой файл пишут и другие программы)"
         // 2.0.0's deploy tagged its SSH opening: run.sh never takes an INPUT rule for a port sshd listens on (a box whose INPUT
@@ -94,8 +118,9 @@ object ForeignRemoval {
         inv.firewall.count { !it.isChain && "--comment" !in it.text && subnet in it.text }.takeIf { it > 0 }
             ?.let { left += "правила без метки для $subnet ($it, так их ставил 2.0.0)" }
         if (inv.firewall.any { !it.isChain && it.text == CLAMP }) left += "общий TCPMSS-clamp в FORWARD (такой ставят и другие программы)"
-        val store = install.stores.firstOrNull { it.dir == role.store }?.dir
-        return Listing(role, units, paths, tags, tables, if (lastStock) lineages else emptyList(), lastStock && untagged, store, purge, left)
+        val store = install.stores.firstOrNull { it.dir == role.store }
+        return Listing(role, units, paths, tags, tables, if (lastStock) lineages else emptyList(), lastStock && untaggedOurs, store?.dir,
+            purge, left, store?.linkTarget.orEmpty())
     }
 
     /**

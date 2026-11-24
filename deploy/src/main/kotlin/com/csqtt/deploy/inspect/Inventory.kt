@@ -65,10 +65,12 @@ data class Image(val ref: String, val id: String, val runtime: String)
 
 /**
  * A store directory. [keptFlags] and [keptRelease]: a store of ours kept by «Удалить», the flags it ran with and the release it
- * ran (`<version>-<sha8>`), from its unit.saved; null and "" otherwise (B11a review F3, F6).
+ * ran (`<version>-<sha8>`), from its unit.saved; null and "" otherwise (B11a review F3, F6). [linkTarget]: where [dir] points
+ * when it is a symlink (a config dir moved to another disk, #5), "" otherwise.
  */
 data class Store(val dir: String, val files: Set<String>, val lock: String, val schema: Set<String>, val envKeys: Set<String>,
-    val publicIp: String, val domain: String, val keptFlags: ServerFlags? = null, val keptRelease: String = "") {
+    val publicIp: String, val domain: String, val keptFlags: ServerFlags? = null, val keptRelease: String = "",
+    val linkTarget: String = "") {
     /** A live server holds this store's lock, whatever runs it. */
     val locked: Boolean get() = lock == "held"
 }
@@ -159,7 +161,7 @@ class Inventory(
                     "image" -> images += Image(f["ref"], f["id"], f["runtime"])
                     "store" -> stores += Store(f["dir"], list(f["files"]).toSet(), f["lock"], list(f["schema"]).toSet(),
                         list(f["env_keys"]).toSet(), f["public_ip"], f["domain"],
-                        f["kept_flags"].takeIf { it.isNotEmpty() }?.let { ServerFlags.parse(it) }, f["kept_release"])
+                        f["kept_flags"].takeIf { it.isNotEmpty() }?.let { ServerFlags.parse(it) }, f["kept_release"], f["link"])
                     "tun" -> tuns += Tun(f["name"], f["state"], f["persist"] == "on")
                     "addr" -> addrs += Addr(f["dev"], f["cidr"])
                     "route" -> routes += Route(f["dst"], f["dev"], f["table"])

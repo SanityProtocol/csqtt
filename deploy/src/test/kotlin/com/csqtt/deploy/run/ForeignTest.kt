@@ -107,6 +107,37 @@ class ForeignTest {
     }
 
     @Test
+    fun theUntaggedRuleIsTakenOnlyFromTheLineThatPutsItThere() {
+        // B11b review F2: a 2.5 network-up adds it when missing; 2.1.9 never does, so the one on its box is someone else's
+        val v219 = checkNotNull(listing(lines("v219-systemd-noble") + shared.take(2), "csqtt.service"))
+        assertFalse(v219.untagged)
+        assertTrue(v219.will.joinToString(), "Останется: правило FORWARD RELATED,ESTABLISHED: эта установка его не ставила" in v219.will)
+        assertTrue(checkNotNull(listing(lines("v253main-systemd-noble") + shared.take(2), "csqtt.service")).untagged)
+    }
+
+    @Test
+    fun aSymlinkedStoreLosesItsLinkAndTheListingSaysSo() {
+        // B11b review F3: the run unlinks a symlinked config dir and never touches what it points to; the listing says so
+        val linked = lines("v253main-systemd-noble").map {
+            if (it.startsWith("CSQTT_INV|store|dir=/etc/csqtt|")) "$it|link=/srv/csqtt-data" else it
+        }
+        val purge = checkNotNull(listing(linked, "csqtt.service", purge = true))
+        assertEquals("/srv/csqtt-data", purge.storeLink)
+        assertTrue(purge.will.joinToString(), "Ссылка /etc/csqtt будет удалена; база в /srv/csqtt-data останется (её файлы не трогаются)" in purge.will)
+        assertTrue("База /etc/csqtt останется" in checkNotNull(listing(linked, "csqtt.service")).will)
+    }
+
+    @Test
+    fun mrttBesideKeepsTheRoutingItSharesAndNoneOfTheStockTags() {
+        // B11b review F4: MRTT tags its rules MRTT_MANAGED, so the stock main's CSQTT_MANAGED rules go; the default instance's
+        // policy routing (30001) is MRTT's as well, so it stays
+        val l = checkNotNull(listing(lines("v253main-systemd-noble") + lines("mrtt-systemd-noble") + shared.drop(4), "csqtt.service"))
+        assertEquals(listOf("CSQTT_MANAGED"), l.tags)
+        assertEquals(emptyList<Int>(), l.tables)
+        assertTrue(l.will.joinToString(), l.will.any { it.startsWith("Останется: маршрутизация 30001/1066: её же ведёт mrtt") })
+    }
+
+    @Test
     fun noneButAStockSystemdInstallIsAForeignRemoval() {
         // MRTT, swg's own and ours are not this action's
         assertNull(listing(lines("mrtt-systemd-noble"), "mrtt.service"))
