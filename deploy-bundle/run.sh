@@ -28,6 +28,8 @@ valid_id() { case $1 in '' | *[!a-z0-9-]*) return 1 ;; *) return 0 ;; esac; }
 
 cmd_start() {
 	rs_id=$1 rs_up=$2
+	# sudo passes the login's umask (027 on a hardened box) and a parent made under it would shut the login out of tail
+	umask 022
 	valid_id "$rs_id" || { csqtt_emit START refused "a run id is a-z, 0-9 and -"; csqtt_end; exit 2; }
 	[ -f "$rs_up/plan" ] && [ -f "$rs_up/run.sh" ] || { csqtt_emit START refused "no plan in $rs_up"; csqtt_end; exit 2; }
 	# one run per box: a held lock or a live run unit means another run (the app offers to watch it)
@@ -40,20 +42,32 @@ cmd_start() {
 		csqtt_end
 		exit 3
 	fi
-	mkdir -p "$RUNS" && chmod 755 "$RUNS"
+	# no run lives: what a killed or rebooted run left of its secrets and raw output goes now (its own ExecStopPost covers a
+	# stop; a power cut leaves them for this sweep)
+	rm -f "$RUNS"/*/secrets "$RUNS"/*/out 2>/dev/null
+	mkdir -p "$RUNS" && chmod 755 "${RUNS%/*}" "$RUNS"
 	rs_dir=$(run_dir "$rs_id")
 	if [ -e "$rs_dir/log" ]; then csqtt_emit START refused "run $rs_id exists"; csqtt_end; exit 2; fi
-	mkdir -p "$rs_dir" && chmod 755 "$rs_dir"
+	# the run dir lets others through to the files they may read (run.sh, plan), and lists nothing; the log is the login
+	# user's own (P2-PLAN §1.2), whom sudo names, root when root signed in
+	rs_uid=${SUDO_UID:-0}
+	case $rs_uid in '' | *[!0-9]*) rs_uid=0 ;; esac
+	mkdir -p "$rs_dir" && chmod 711 "$rs_dir"
 	install -m 644 "$rs_up/run.sh" "$rs_dir/run.sh"
 	install -m 644 "$rs_up/plan" "$rs_dir/plan"
-	[ ! -f "$rs_up/secrets" ] || install -m 600 "$rs_up/secrets" "$rs_dir/secrets"
-	: >"$rs_dir/log" && chmod 644 "$rs_dir/log"
+	if [ -f "$rs_up/secrets" ]; then
+		install -m 600 "$rs_up/secrets" "$rs_dir/secrets"
+		# the upload's copy goes here, on the box: the engine's own removal needs a link that may be gone
+		rm -f "$rs_up/secrets"
+	fi
+	: >"$rs_dir/log" && chown "$rs_uid" "$rs_dir/log" && chmod 600 "$rs_dir/log"
 	# the last KEEP runs are kept (the newest by name: run ids start with their UTC time)
 	ls -1 "$RUNS" 2>/dev/null | sort | awk -v keep=$KEEP '{a[NR] = $0} END {for (i = 1; i <= NR - keep; i++) print a[i]}' |
 		while IFS= read -r rs_old; do
 			[ "$rs_old" = "$rs_id" ] || rm -rf "${RUNS:?}/$rs_old"
 		done
 	if ! systemd-run --unit "sanity-csqtt-deploy-$rs_id" --collect --quiet --property=KillMode=mixed \
+		--property="ExecStopPost=/bin/rm -f $rs_dir/secrets $rs_dir/out" \
 		flock -n $LOCK /bin/sh "$rs_dir/run.sh" exec "$rs_id" >/dev/null 2>&1; then
 		csqtt_emit START failed "systemd-run refused the run"
 		csqtt_end
@@ -151,8 +165,10 @@ apt_lock_holder() {
 run_cmd() {
 	run_emit STEP "$RUN_STEP" "$*"
 	rc_status=0
+	# made 0600 first: the raw output may hold a secret until it is redacted (the command keeps its own umask)
+	(umask 077 && : >"$RUN_DIR/out")
 	"$@" >"$RUN_DIR/out" 2>&1 || rc_status=$?
-	run_redact <"$RUN_DIR/out" | while IFS= read -r rc_line; do csqtt_emit OUT "$rc_line"; done >>"$RUN_LOG"
+	run_redact <"$RUN_DIR/out" | while IFS= read -r rc_line || [ -n "$rc_line" ]; do csqtt_emit OUT "$rc_line"; done >>"$RUN_LOG"
 	rm -f "$RUN_DIR/out"
 	return $rc_status
 }
@@ -179,12 +195,25 @@ run_recheck() {
 	run_phase recheck 2
 	rr_own=$(plan iface)
 	for rr_port in $(plan ports); do
-		rr_holder=$(ss -H -ltunp "( sport = :$rr_port )" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n 1)
-		[ -n "$rr_holder" ] || continue
+		rr_line=$(ss -H -ltunp "( sport = :$rr_port )" 2>/dev/null | head -n 1)
+		[ -n "$rr_line" ] || continue
+		# a socket with no process is the kernel's (a WireGuard or AmneziaWG interface's port)
+		rr_holder=$(printf '%s\n' "$rr_line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')
 		# a re-run after an interruption finds its own server on the port: ours, so it goes on
 		[ "$(plan resume)" = 1 ] && [ "$rr_holder" = csqtt-server ] && continue
-		run_result failed-cleaned "port $rr_port is now held by $rr_holder" "check again: the app proposes another port"
+		run_result failed-cleaned "port $rr_port is now held by ${rr_holder:-the kernel (a VPN interface)}" "check again: the app proposes another port"
 	done
+	rr_net=$(plan subnet)
+	if [ -n "$rr_net" ] && [ "$(plan resume)" != 1 ]; then
+		# every address and route on the box, against the planned /24 (the default route aside)
+		rr_hit=$( { ip -4 -o addr show 2>/dev/null | awk '{print $4}'
+			ip -4 route show table all 2>/dev/null | awk '$1 != "default" {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) {print $i; break}}'; } |
+			awk -v net="$rr_net" 'function n(a, p) {split(a, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4]}
+				BEGIN {split(net, w, "/"); s = n(w[1])}
+				{split($0, c, "/"); l = (c[2] == "") ? 32 : c[2] + 0; m = (l < 24) ? l : 24; d = 1; for (i = m; i < 32; i++) d *= 2
+				 if (int(s / d) == int(n(c[1]) / d)) {print $0; exit}}')
+		[ -z "$rr_hit" ] || run_result failed-cleaned "$rr_net now overlaps $rr_hit" "check again: the app proposes another subnet"
+	fi
 	if [ -n "$rr_own" ] && ip link show "$rr_own" >/dev/null 2>&1 && [ "$(plan resume)" != 1 ]; then
 		run_result failed-cleaned "interface $rr_own appeared" "check again"
 	fi
@@ -224,7 +253,7 @@ cmd_exec() {
 	RUN_ID=$1
 	RUN_DIR=$(run_dir "$RUN_ID")
 	RUN_LOG=$RUN_DIR/log
-	trap 'run_beat_stop; rm -f "$RUN_DIR/secrets"' EXIT
+	trap 'run_beat_stop; rm -f "$RUN_DIR/secrets" "$RUN_DIR/out"' EXIT
 	run_emit RUN "$RUN_ID" "$(plan action)"
 	run_recheck
 	case $(plan action) in
