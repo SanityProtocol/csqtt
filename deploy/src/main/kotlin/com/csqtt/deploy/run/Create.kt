@@ -100,7 +100,9 @@ object CreateRun {
         rootfs = (rootfs?.source as? DockerMode.Source.Upload)?.bytes?.takeIf { p.docker },
     )
 
-    private fun dockerKeys(rootfs: RootfsChoice): Map<String, String> = linkedMapOf(
+    internal fun upload(rootfs: RootfsChoice): ByteArray? = (rootfs.source as? DockerMode.Source.Upload)?.bytes
+
+    internal fun dockerKeys(rootfs: RootfsChoice): Map<String, String> = linkedMapOf(
         "mode" to "docker", "rootfs_sha256" to rootfs.pin.sha256,
         "rootfs_url" to ((rootfs.source as? DockerMode.Source.Fetch)?.url ?: ""),
     )
@@ -150,22 +152,36 @@ fun proposalOfKeptPlan(text: String): Proposal? {
 object UpdateRun {
     private val OURS = Regex("^sanity-csqtt-([0-9a-f]{6})\\.service$")
 
-    /** The instance's id, by its unit's name; null when the installation is not one of ours. */
+    private val OURS_IN_DOCKER = Regex("^sanity-csqtt-([0-9a-f]{6})$")
+
+    /** The instance's id, by its unit's name or its container's (P2 B13c); null when the installation is not one of ours. */
     fun idOf(install: com.csqtt.deploy.inspect.Installation): String? =
         install.units.firstNotNullOfOrNull { OURS.find(it.id)?.groupValues?.get(1) }
+            ?: install.containers.firstNotNullOfOrNull { OURS_IN_DOCKER.find(it.name)?.groupValues?.get(1) }
 
     /**
      * The run: the instance and the build it goes to; what it re-checks first is the unit and the binary the inspection saw
      * (§1.4), so a box that changed since fails cleaned and is inspected again. No secret: the instance keeps all of its own.
      */
-    fun plan(install: com.csqtt.deploy.inspect.Installation, inv: com.csqtt.deploy.inspect.Inventory, core: Core): RunPlan {
+    fun plan(install: com.csqtt.deploy.inspect.Installation, inv: com.csqtt.deploy.inspect.Inventory, core: Core,
+        rootfs: RootfsChoice? = null): RunPlan {
         val id = idOf(install) ?: throw IllegalArgumentException("${install.name} is not an instance of ours")
+        // an instance in Docker (P2 B13c): no unit to re-check; its new image stands on the root filesystem the plan names
+        if (install.units.isEmpty() && install.containers.isNotEmpty()) {
+            val choice = checkNotNull(rootfs) { "an update in Docker needs its root filesystem" }
+            return RunPlan("update", linkedMapOf("id" to id, "version" to core.version, "core_sha" to core.sha256) +
+                CreateRun.dockerKeys(choice), core = core.bytes, rootfs = CreateRun.upload(choice))
+        }
         val unit = install.units.first()
         val sha = inv.exeAt(unit.exec)?.sha
         return RunPlan("update", linkedMapOf(
             "id" to id, "version" to core.version, "core_sha" to core.sha256, "expect_unit" to unit.id,
         ) + (if (sha != null) mapOf("expect_bin" to unit.exec, "expect_sha" to sha) else emptyMap()), core = core.bytes)
     }
+
+    /** An instance of ours in Docker, running or kept: its update and restore carry a root filesystem (P2 B13c). */
+    fun inDocker(install: com.csqtt.deploy.inspect.Installation): Boolean =
+        (install.units.isEmpty() && install.containers.isNotEmpty()) || install.stores.any { it.keptDocker }
 }
 
 /**
@@ -176,8 +192,13 @@ object Maintenance {
     fun remove(install: com.csqtt.deploy.inspect.Installation, purge: Boolean): RunPlan =
         RunPlan("remove", linkedMapOf("id" to idOf(install), "purge" to if (purge) "1" else "0"))
 
-    fun restore(install: com.csqtt.deploy.inspect.Installation, core: Core): RunPlan =
-        RunPlan("restore", linkedMapOf("id" to idOf(install), "version" to core.version, "core_sha" to core.sha256), core = core.bytes)
+    fun restore(install: com.csqtt.deploy.inspect.Installation, core: Core, rootfs: RootfsChoice? = null): RunPlan {
+        val values = linkedMapOf("id" to idOf(install), "version" to core.version, "core_sha" to core.sha256)
+        // a store an instance in Docker kept comes back in Docker (P2 B13c)
+        if (!install.stores.any { it.keptDocker }) return RunPlan("restore", values, core = core.bytes)
+        val choice = checkNotNull(rootfs) { "a restore in Docker needs its root filesystem" }
+        return RunPlan("restore", values + CreateRun.dockerKeys(choice), core = core.bytes, rootfs = CreateRun.upload(choice))
+    }
 
     /** «Перезапустить», and «Запустить» for a stopped one: the unit (re)started, verified. */
     fun restart(install: com.csqtt.deploy.inspect.Installation): RunPlan = RunPlan("restart", linkedMapOf("id" to idOf(install)))

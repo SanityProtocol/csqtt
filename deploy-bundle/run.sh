@@ -840,7 +840,15 @@ dk_backend() { case $(iptables -V 2>/dev/null) in *legacy*) echo legacy ;; *) ec
 # all the same: the zoo, docker.io 24.0.7)
 dk_image_rm() {
 	case $1 in
-	sanity-csqtt-rootfs:*) [ -n "$(docker images -q sanity-csqtt 2>/dev/null)" ] || docker image rm "$1" >/dev/null 2>&1 ;;
+	sanity-csqtt-rootfs:*)
+		# (built on it: its one layer is their first; another root filesystem's images, after an update to a newer pin, do not
+		# keep it: P2 B13c)
+		di_layer=$(docker image inspect -f '{{index .RootFS.Layers 0}}' "$1" 2>/dev/null) || return 0
+		for di_i in $(docker images -q sanity-csqtt 2>/dev/null); do
+			[ "$(docker image inspect -f '{{index .RootFS.Layers 0}}' "$di_i" 2>/dev/null)" != "$di_layer" ] || return 0
+		done
+		docker image rm "$1" >/dev/null 2>&1
+		;;
 	sanity-csqtt:*) docker image rm "$1" >/dev/null 2>&1 ;;
 	esac
 	return 0
@@ -1214,11 +1222,42 @@ up_store_back() {
 	rmdir "$up_state/.restore"
 }
 
-up_prune() {  # the release before stays for one more update; older ones go
+up_prune() {  # the release before stays for one more update; older ones go (an instance in Docker: their images with them)
 	for up_r in "$up_root"/releases/*/; do
 		up_r=${up_r%/}
-		[ "$up_r" = "$up_new" ] || [ "$up_r" = "$up_old" ] || rm -rf "$up_r"
+		[ "$up_r" = "$up_new" ] || [ "$up_r" = "$up_old" ] || {
+			rm -rf "$up_r"
+			[ $up_docker = 0 ] || { dk_image_rm "sanity-csqtt:${up_r##*/}"; dk_image_rm "$(sed -n 's/^# rootfs //p' "$up_state/docker")"; }
+		}
 	done
+}
+
+# The instance's server stopped and started on the build `current` names (P2 B13c): its unit, or, in Docker, its container made
+# again from that build's image (the docker file's image line set from `current` first, so a removal or a read reads it); a
+# container's openings and backend as its create's
+up_stop() {
+	if [ $up_docker = 1 ]; then docker stop -t 15 "$up_ctr" >/dev/null 2>&1; else systemctl stop "$up_unit" 2>/dev/null; fi
+	return 0
+}
+up_start() {
+	if [ $up_docker = 0 ]; then
+		run_cmd systemctl start "$up_unit"
+		return
+	fi
+	us_img=sanity-csqtt:$(basename "$(readlink "$up_root/current")")
+	sed "s|^# image .*|# image $us_img|" "$up_state/docker" >"$up_state/docker.new" && mv -f "$up_state/docker.new" "$up_state/docker" || return 1
+	docker rm -f "$up_ctr" >/dev/null 2>&1
+	us_fw=none
+	[ ! -f "$up_state/open.sh" ] || us_fw=iptables
+	# shellcheck disable=SC2086 # the instance's own flags
+	run_cmd dk_run "$up_ctr" "$us_img" "$up_state" "$us_fw" $up_flags
+}
+up_running() {
+	if [ $up_docker = 1 ]; then [ "$(docker inspect -f '{{.State.Running}}' "$up_ctr" 2>/dev/null)" = true ]
+	else systemctl is-active --quiet "$up_unit"; fi
+}
+up_where_runs() {  # for a result's cause: the server's state word
+	if [ $up_docker = 1 ]; then docker inspect -f '{{.State.Status}}' "$up_ctr" 2>/dev/null || echo gone; else systemctl is-active "$up_unit"; fi
 }
 
 # up_back <why> [store]: back to the build before, setting up_why (empty: it serves). With `store` (the new build has run on it)
@@ -1227,7 +1266,7 @@ up_prune() {  # the release before stays for one more update; older ones go
 # once the box is back on disk; a store that cannot be put back keeps it, the unit stopped, so the next run tries again. Never
 # run inside $(…): its results end the run
 up_back() {
-	systemctl stop "$up_unit" 2>/dev/null
+	up_stop
 	if [ "${2:-}" = store ]; then
 		up_where="the store before the update is whole in $up_copy"
 		up_store_back 2>"$RUN_DIR/restore.err" ||
@@ -1242,12 +1281,15 @@ up_back() {
 		ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" ||
 			run_result failed-not-rolled-back "$1; cannot switch back to $up_old" "«Починить»: $up_where"
 	fi
-	[ "$up_new" = "$up_old" ] || rm -rf "$up_new"
+	if [ "$up_new" != "$up_old" ]; then
+		rm -rf "$up_new"
+		[ $up_docker = 0 ] || dk_image_rm "sanity-csqtt:${up_new##*/}"
+	fi
 	rm -f "$UP_PENDING"
-	systemctl start "$up_unit" 2>/dev/null
-	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
+	up_start >/dev/null 2>&1
+	up_why=$(inst_verify "$up_check" "$up_udp" "$up_web" "$up_iface" "$up_secret")
 	[ -z "$up_why" ] || run_result failed-not-rolled-back \
-		"$1; the rollback did not serve either: $up_why ($(systemctl is-active "$up_unit"), current -> $(readlink "$up_root/current"))" \
+		"$1; the rollback did not serve either: $up_why ($(up_where_runs), current -> $(readlink "$up_root/current"))" \
 		"read its journal; $up_where"
 }
 
@@ -1276,12 +1318,12 @@ up_recover() {
 	if [ "$(readlink "$up_root/current")" != "$rc_new" ] || [ "$rc_new" = "$rc_old" ]; then
 		[ "$rc_new" = "$rc_old" ] || [ "$rc_new" = "$(readlink "$up_root/current")" ] || rm -rf "$rc_new"
 		rm -f "$UP_PENDING"
-		systemctl is-active --quiet "$up_unit" || run_cmd systemctl start "$up_unit"
+		up_running || up_start
 		return 0
 	fi
 	up_old=$rc_old up_new=$rc_new
-	systemctl is-active --quiet "$up_unit" || run_cmd systemctl start "$up_unit"
-	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
+	up_running || up_start
+	up_why=$(inst_verify "$up_check" "$up_udp" "$up_web" "$up_iface" "$up_secret")
 	if [ -n "$up_why" ]; then
 		rc_cause="the update to ${rc_new##*/} left unfinished before does not serve: $up_why"
 		up_back "$rc_cause" store
@@ -1298,9 +1340,16 @@ action_update() {
 	case $up_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) run_result failed-cleaned "bad instance id $up_id" "update the app" ;; esac
 	up_root=/opt/sanityprotocol/csqtt/$up_id up_state=/var/lib/sanityprotocol/csqtt/$up_id up_unit=sanity-csqtt-$up_id.service
 	up_target=$up_root/releases/$up_version-$(printf '%.8s' "$up_sha") up_copy=$up_state/pre-update UP_PENDING=$up_state/update.pending
-	[ ! -f "$up_state/docker" ] || run_result failed-cleaned "an update of an instance in Docker is not built yet (P2 B13c)" "update the app"
-	[ -f "/etc/systemd/system/$up_unit" ] && [ -L "$up_root/current" ] || run_result failed-cleaned "sqc-$up_id is not installed here" "check again"
-	up_flags=$(sed -n "s|^ExecStart=$up_root/current/csqtt-server ||p" "/etc/systemd/system/$up_unit" | head -n 1)
+	# an instance in Docker (P2 B13c): its flags are its docker file's, its server its container on the image `current` names
+	up_docker=0 up_ctr=sanity-csqtt-$up_id up_check=$up_unit
+	if [ -f "$up_state/docker" ] && [ ! -f "$up_state/unit.saved" ]; then
+		up_docker=1 up_check=docker:$up_ctr
+		[ -L "$up_root/current" ] || run_result failed-cleaned "sqc-$up_id is not installed here" "check again"
+		up_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$up_state/docker" | head -n 1)
+	else
+		[ -f "/etc/systemd/system/$up_unit" ] && [ -L "$up_root/current" ] || run_result failed-cleaned "sqc-$up_id is not installed here" "check again"
+		up_flags=$(sed -n "s|^ExecStart=$up_root/current/csqtt-server ||p" "/etc/systemd/system/$up_unit" | head -n 1)
+	fi
 	up_udp=$(printf '%s\n' "$up_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
 	up_web=$(printf '%s\n' "$up_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
 	up_iface=$(printf '%s\n' "$up_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')
@@ -1325,7 +1374,26 @@ action_update() {
 		# it was rolled back from this very build just now: going to it again would fail as it did
 		[ "$up_failed" != "$up_new" ] || run_result failed-rolled-back "$rc_cause" "the build it ran before runs again, its store as it was"
 	fi
-	action_cleanup() { [ ! -d "$up_new" ] || [ "$up_new" = "$up_old" ] || rm -rf "$up_new"; }
+	# (in Docker: the images this run made go too, through the manifest's own kinds)
+	MF_OBJECTS=''
+	action_cleanup() {
+		[ ! -d "$up_new" ] || [ "$up_new" = "$up_old" ] || rm -rf "$up_new"
+		mf_undo
+	}
+	cr_fail() { action_cleanup; run_result failed-cleaned "$1" "${2:-check again}"; }
+	if [ $up_docker = 1 ]; then
+		# Docker answering, the root filesystem's image, the new build's image from it, and its core asked to run inside it
+		docker info >/dev/null 2>&1 || cr_fail "Docker does not answer" "check Docker on the box"
+		dk_rootfs "$(plan rootfs_sha256)" "$(plan rootfs_url)"
+		up_img=sanity-csqtt:${up_new##*/}
+		dk_image "sanity-csqtt-rootfs:$(printf '%.8s' "$(plan rootfs_sha256)")" "$up_img" "$RUN_DIR/core"
+		# shellcheck disable=SC2086 # the instance's own flags
+		up_said=$(docker run --rm --network none "$up_img" /opt/sanityprotocol/csqtt-server $up_flags --version 2>&1 | head -n 1)
+		[ "$up_said" = "csqtt $up_version CSQTT-WIRE-3" ] || cr_fail "the new core does not run in its image: $up_said" "check the box's architecture"
+		# the docker file names the root filesystem the image now stands on
+		sed "s|^# rootfs .*|# rootfs sanity-csqtt-rootfs:$(printf '%.8s' "$(plan rootfs_sha256)")|" "$up_state/docker" >"$up_state/docker.new" &&
+			mv -f "$up_state/docker.new" "$up_state/docker" || cr_fail "cannot write $up_state/docker"
+	fi
 	if [ "$up_new" != "$up_old" ]; then
 		mkdir -p "$up_new" && install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" ||
 			{ action_cleanup; run_result failed-cleaned "cannot install the new release in $up_new" "check the box's disk"; }
@@ -1339,24 +1407,28 @@ action_update() {
 		# «Починить»: the same build again, over a damaged or missing binary. Nothing migrates, so its store needs no copy, and
 		# the copy from before the last real update is never overwritten by a build that may be the failing one (V1)
 		up_with=''
-		run_cmd systemctl stop "$up_unit"
+		up_stop
 		install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" || up_rollback "cannot reinstall the binary"
 	else
 		# recorded, stopped, its store copied aside, `current` flipped
 		up_with=store
 		printf 'old=%s\nnew=%s\n' "$up_old" "$up_new" >"$UP_PENDING.new" && mv -f "$UP_PENDING.new" "$UP_PENDING" ||
 			{ rm -f "$UP_PENDING.new"; action_cleanup; run_result failed-cleaned "cannot write $UP_PENDING" "check the box's disk"; }
-		run_cmd systemctl stop "$up_unit"
+		up_stop
 		if ! up_copy_store 2>"$RUN_DIR/copy.err"; then
 			rm -rf "$up_copy.new"
 			up_rollback "cannot keep a copy of the store aside: $(head -c 200 "$RUN_DIR/copy.err" | tr '\n' ' ')"
 		fi
 		ln -sfn "$up_new" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" || up_rollback "cannot switch to $up_new"
 	fi
-	run_cmd systemctl start "$up_unit" || up_rollback "$up_unit did not start on the new build: $(inst_start_lines "$up_unit")" "$up_with"
+	if [ $up_docker = 1 ]; then
+		up_start || up_rollback "$up_ctr did not start on the new build: $(dk_lines "$up_ctr")" "$up_with"
+	else
+		up_start || up_rollback "$up_unit did not start on the new build: $(inst_start_lines "$up_unit")" "$up_with"
+	fi
 
 	run_phase verify 80
-	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
+	up_why=$(inst_verify "$up_check" "$up_udp" "$up_web" "$up_iface" "$up_secret")
 	[ -z "$up_why" ] || up_rollback "the new build does not serve: $up_why" "$up_with"
 	up_prune
 	rm -f "$UP_PENDING"
@@ -1508,9 +1580,12 @@ action_restore() {
 	rs_id=$(plan id) rs_version=$(plan version) rs_sha=$(plan core_sha)
 	inst_paths "$rs_id"
 	[ -f "$in_state/unit.saved" ] || run_result failed-cleaned "sqc-$rs_id has no kept store to restore" "check again"
-	! grep -q '^# docker ' "$in_state/unit.saved" || run_result failed-cleaned "a restore into Docker is not built yet (P2 B13c)" "update the app"
-	if [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ]; then
+	# a store an instance in Docker kept (P2 B13c): it comes back in Docker, its container made again from today's image
+	rs_docker=0 rs_ctr=sanity-csqtt-$rs_id
+	! grep -q '^# docker ' "$in_state/unit.saved" || rs_docker=1
+	if [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ] || { [ $rs_docker = 1 ] && docker container inspect "$rs_ctr" >/dev/null 2>&1; }; then
 		systemctl is-active --quiet "$in_unit" && run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
+		[ "$(docker inspect -f '{{.State.Running}}' "$rs_ctr" 2>/dev/null)" != true ] || run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
 		# a restore (or a removal) cut off before its end left part of it, its flags still kept: what it made goes first, by
 		# the id, as a removal takes it, and the restore runs again (B11a review F4)
 		run_phase "take down" 5
@@ -1569,12 +1644,29 @@ action_restore() {
 		install -m 755 "$RUN_DIR/core" "$rs_release/csqtt-server" && ln -sfn "$rs_release" "$in_root/current" || cr_fail "cannot install the core"
 	rs_open_unit=''
 	[ "$cr_fw" != iptables ] || rs_open_unit=$(inst_open_sh "$rs_id" "$in_state" "$cr_open") || cr_fail "cannot write $in_state/open.sh"
-	mf_add unit "/etc/systemd/system/$in_unit"
-	inst_unit_text "$rs_id" "$in_root" "$in_state" "$rs_flags" "$rs_open_unit" >"/etc/systemd/system/$in_unit" || cr_fail "cannot write $in_unit"
-	systemctl daemon-reload
+	if [ $rs_docker = 1 ]; then
+		# Docker as a create makes it ready, the root filesystem's image and today's image from it, its core asked to run in it;
+		# the docker file names them, its flags those it ran with
+		command -v docker >/dev/null 2>&1 || cr_fail "Docker is not installed here" "install Docker, or remove the kept store"
+		dk_daemon
+		rs_rootfs=sanity-csqtt-rootfs:$(printf '%.8s' "$(plan rootfs_sha256)")
+		rs_image=sanity-csqtt:$rs_version-$(printf '%.8s' "$rs_sha")
+		dk_rootfs "$(plan rootfs_sha256)" "$(plan rootfs_url)"
+		dk_image "$rs_rootfs" "$rs_image" "$RUN_DIR/core"
+		# shellcheck disable=SC2086 # the flags it ran with
+		rs_said=$(docker run --rm --network none "$rs_image" /opt/sanityprotocol/csqtt-server $rs_flags --version 2>&1 | head -n 1)
+		[ "$rs_said" = "csqtt $rs_version CSQTT-WIRE-3" ] || cr_fail "the core does not run in its image: $rs_said" "check the box's architecture"
+		printf '# docker %s\n# image %s\n# rootfs %s\nExecStart=/opt/sanityprotocol/csqtt-server %s\n' "$rs_ctr" "$rs_image" "$rs_rootfs" \
+			"$rs_flags" >"$in_state/docker" || cr_fail "cannot write $in_state/docker"
+	else
+		mf_add unit "/etc/systemd/system/$in_unit"
+		inst_unit_text "$rs_id" "$in_root" "$in_state" "$rs_flags" "$rs_open_unit" >"/etc/systemd/system/$in_unit" || cr_fail "cannot write $in_unit"
+		systemctl daemon-reload
+	fi
 	run_safe_point
 	run_phase host 45
-	host_sysctl
+	# (in Docker the server's own tuning too, as its create's: P2 B13a review F5)
+	if [ $rs_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi
 	host_firewall
 	[ "$cr_fw" != iptables ] || host_add iptables-input "ports=$(printf '%s' "$cr_open" | tr ' ' ,)"
 	run_safe_point
@@ -1583,11 +1675,20 @@ action_restore() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
-	run_cmd systemctl enable "$in_unit" || cr_fail "$in_unit could not be enabled"
-	run_cmd systemctl start "$in_unit" || cr_fail "$in_unit did not start: $(inst_start_lines "$in_unit")"
-	run_phase verify 80
-	rs_why=$(inst_verify "$in_unit" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
+	if [ $rs_docker = 1 ]; then
+		mf_add container "$rs_ctr"
+		# shellcheck disable=SC2086 # the flags it ran with
+		run_cmd dk_run "$rs_ctr" "$rs_image" "$in_state" "$cr_fw" $rs_flags || cr_fail "Docker would not run $rs_ctr: $(dk_lines "$rs_ctr")"
+		run_phase verify 80
+		rs_why=$(inst_verify "docker:$rs_ctr" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
+		[ -z "$rs_why" ] || rs_why="$rs_why: $(dk_lines "$rs_ctr")"
+	else
+		# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
+		run_cmd systemctl enable "$in_unit" || cr_fail "$in_unit could not be enabled"
+		run_cmd systemctl start "$in_unit" || cr_fail "$in_unit did not start: $(inst_start_lines "$in_unit")"
+		run_phase verify 80
+		rs_why=$(inst_verify "$in_unit" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
+	fi
 	[ -z "$rs_why" ] || cr_fail "$rs_why"
 	# the manifest names the state dir again, first, as a create's does
 	MF_OBJECTS="dir $in_state$(printf '\n%s' "$MF_OBJECTS")"

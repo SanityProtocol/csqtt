@@ -175,7 +175,10 @@ class CreateTest {
         // the update action reads only keys its plan carries (resume aside)
         val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
         val update = script.substringAfter("action_update() {").substringBefore("\n}\n")
-        for (key in Regex("\\$\\(plan ([a-z_]+)\\)").findAll(update).map { it.groupValues[1] }.toSet()) assertTrue(key, "\n$key=" in "\n$plan")
+        // (the root filesystem's keys only for an instance in Docker, B13c: DockerTest)
+        for (key in Regex("\\$\\(plan ([a-z_]+)\\)").findAll(update).map { it.groupValues[1] }.toSet() - setOf("rootfs_sha256", "rootfs_url")) {
+            assertTrue(key, "\n$key=" in "\n$plan")
+        }
     }
 
     @Test
@@ -196,7 +199,8 @@ class CreateTest {
             "action_restart" to Maintenance.restart(leftover),
         )) {
             val text = plan.planText()
-            for (key in reads(action)) assertTrue("$action reads $key", "\n$key=" in "\n$text")
+            // (the root filesystem's keys only for a store an instance in Docker kept, B13c: DockerTest)
+            for (key in reads(action) - setOf("rootfs_sha256", "rootfs_url")) assertTrue("$action reads $key", "\n$key=" in "\n$text")
         }
         assertTrue("\npurge=1\n" in "\n" + Maintenance.remove(leftover, purge = true).planText())
         assertTrue("\npurge=0\n" in "\n" + Maintenance.remove(leftover, purge = false).planText())

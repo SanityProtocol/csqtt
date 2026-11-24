@@ -625,19 +625,24 @@ private fun update(session: SshSession, p: Properties, target: File, id: String)
     val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
     val remote = session.asRemote()
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
-    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    // (an instance in Docker builds its new image on the root filesystem: the inspection checks the release's reach too, B13c)
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), listOf(com.csqtt.deploy.run.Rootfs.HOST),
+        deadlineMs = 60_000)
     val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
     if (coreRunStopped(report)) return 6
     val inventory = Inventory.from(report.lines)
     val install = Classifier.classify(inventory).installations.firstOrNull { com.csqtt.deploy.run.UpdateRun.idOf(it) == id }
         ?: return 2.also { println("no instance of ours sqc-$id on this box") }
+    val rootfs = if (com.csqtt.deploy.run.UpdateRun.inDocker(install)) {
+        rootfsChoice(Preflight.from(report.lines), inventory, core, p) ?: return 2
+    } else null
     println("will: ${install.name} goes to ${core.version} (${core.sha256.take(8)}); its ports, env and certificate stay")
     val runner = Runner(remote, root)
     val coordinator = coordinator(target)
     val runId = Runner.newRunId()
     val before = coordinator.state
     coordinator.move(DeployState.Running(runId))
-    when (val outcome = runner.start(runId, com.csqtt.deploy.run.UpdateRun.plan(install, inventory, core))) {
+    when (val outcome = runner.start(runId, com.csqtt.deploy.run.UpdateRun.plan(install, inventory, core, rootfs))) {
         is StartOutcome.Started -> {}
         is StartOutcome.Busy -> {
             coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
@@ -659,9 +664,12 @@ private fun update(session: SshSession, p: Properties, target: File, id: String)
 private fun maintain(session: SshSession, p: Properties, target: File, id: String, verb: String): Int {
     val remote = session.asRemote()
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
-    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    // («Восстановить» of a store an instance in Docker kept builds its image again: the release's reach is checked too, B13c)
+    val reach = if (verb == "restore") listOf(com.csqtt.deploy.run.Rootfs.HOST) else emptyList()
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), reach, deadlineMs = 60_000)
     val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
-    val install = Classifier.classify(Inventory.from(report.lines)).installations.firstOrNull {
+    val inventory = Inventory.from(report.lines)
+    val install = Classifier.classify(inventory).installations.firstOrNull {
         runCatching { com.csqtt.deploy.run.Maintenance.idOf(it) }.getOrNull() == id
     } ?: return 2.also { println("no instance of ours sqc-$id on this box") }
     val plan = when (verb) {
@@ -672,8 +680,11 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
         else -> {
             if (coreRunStopped(report)) return 6
             val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
-            com.csqtt.deploy.run.Maintenance.restore(install,
-                Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") }))
+            val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
+            val rootfs = if (com.csqtt.deploy.run.UpdateRun.inDocker(install)) {
+                rootfsChoice(Preflight.from(report.lines), inventory, core, p) ?: return 2
+            } else null
+            com.csqtt.deploy.run.Maintenance.restore(install, core, rootfs)
         }
     }
     println("will: ${plan.action} ${install.name}")

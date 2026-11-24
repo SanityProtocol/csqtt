@@ -103,8 +103,8 @@ class DockerTest {
         // P2-PLAN §1.5: an old app's cleanup removes any container whose command holds /usr/local/bin/csqtt (2.1.9's deploy.sh)
         // or whose name or image is a stock one; ours live under /opt/sanityprotocol, labelled in our own namespace
         val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
-        val docker = listOf("dk_image", "dk_run").joinToString("\n") { script.substringAfter("$it() {").substringBefore("\n}\n") } +
-            script.substringAfter("action_create() {").substringBefore("\n}\n")
+        val docker = listOf("dk_image", "dk_run", "action_create", "action_update", "action_restore")
+            .joinToString("\n") { script.substringAfter("$it() {").substringBefore("\n}\n") }
         assertFalse("/usr/local/bin/csqtt" in docker)
         assertTrue("ENTRYPOINT [\"/opt/sanityprotocol/entrypoint\"]" in docker && "\"\$dn_img\" /opt/sanityprotocol/csqtt-server \"\$@\"" in docker)
         assertTrue("--label \"net.sanityprotocol.csqtt.instance=" in docker)
@@ -116,7 +116,8 @@ class DockerTest {
         // the same; it goes only once no image of ours is left (a container's image Docker keeps by itself)
         val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
         val rm = script.substringAfter("dk_image_rm() {").substringBefore("\n}\n")
-        assertTrue(rm, "sanity-csqtt-rootfs:*) [ -n \"\$(docker images -q sanity-csqtt 2>/dev/null)\" ] ||" in rm)
+        // (B13c: built on it = its one layer is their first: another root filesystem's images do not keep it)
+        assertTrue(rm, "{{index .RootFS.Layers 0}}" in rm && "for di_i in \$(docker images -q sanity-csqtt" in rm)
         for (f in listOf("mf_undo", "inst_take_down")) {
             val body = script.substringAfter("$f() {").substringBefore("\n}\n")
             assertTrue(f, "dk_image_rm " in body && "docker image rm" !in body)
@@ -133,24 +134,38 @@ class DockerTest {
     )
 
     @Test
-    fun anInstanceOfOursInDockerIsOfferedWhatB13aBuilds() {
+    fun anInstanceOfOursInDockerIsOfferedWhatAnyOfOursIs() {
         val inv = inventory(*oursInDocker("0a1b2c"))
         val c = Classifier.classify(inv)
-        assertEquals(Owner.OURS, c.installations.single().owner)
-        // run, connected to, restarted and removed; its update, repair, clean reinstall and restore are B13c's
+        val install = c.installations.single()
+        assertEquals(Owner.OURS, install.owner)
+        // B13c: run, connected to, restarted, updated, removed, reinstalled clean, as a unit's
         val actions = Manager.entries(c, Version(2, 7, 0), inv).single().offers.map { it.action }
-        assertTrue(actions.toString(), actions.containsAll(listOf(Action.CONNECT, Action.RESTART, Action.REMOVE)))
-        assertFalse(actions.toString(), actions.any { it in setOf(Action.UPDATE, Action.REINSTALL_CLEAN, Action.REPAIR) })
+        assertTrue(actions.toString(), actions.containsAll(listOf(Action.CONNECT, Action.UPDATE, Action.RESTART, Action.REMOVE,
+            Action.REINSTALL_CLEAN)))
+        assertEquals("0a1b2c", UpdateRun.idOf(install))
         // our drop-in stays for it (no S1), as for an instance of ours with a unit
         val dropIn = "CSQTT_INV|file|path=/etc/sysctl.d/99-sanity-csqtt.conf|type=f"
         assertFalse(Classifier.classify(inventory(*oursInDocker("0a1b2c"), dropIn)).problems.any { it.code == "S1" })
-        // its kept store: removed, not yet restored
+        // its update carries the root filesystem its new image stands on, and no unit to re-check
+        val pin = checkNotNull(Rootfs.pin("amd64"))
+        val update = UpdateRun.plan(install, inv, Core(ByteArray(1), "2.7.0"), RootfsChoice(pin, DockerMode.Source.Present)).planText()
+        assertTrue(update, "\nmode=docker\n" in "\n$update" && "\nrootfs_sha256=${pin.sha256}\n" in "\n$update" && "expect_unit" !in update)
+        // its kept store: «Восстановить», in Docker again
         val kept = inventory("CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/0a1b2c|files=csqtt.db,env,manifest.json,unit.saved|lock=none|" +
             "schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=|kept_flags=--listen 0.0.0.0:41234 --instance sqc-0a1b2c " +
             "--iface sqc0 --instance-slot 2|kept_release=2.6.0-0123abcd|kept_docker=1")
-        val keptActions = Manager.entries(Classifier.classify(kept), Version(2, 6, 0), kept).single().offers.map { it.action }
-        assertFalse(keptActions.toString(), Action.RESTORE in keptActions)
-        assertTrue(keptActions.toString(), Action.REMOVE_LEFTOVERS in keptActions)
+        val keptInstall = Classifier.classify(kept).installations.single()
+        assertTrue(Manager.entries(Classifier.classify(kept), Version(2, 6, 0), kept).single().offers.map { it.action }.contains(Action.RESTORE))
+        val bytes = ByteArray(3)
+        val restore = Maintenance.restore(keptInstall, Core(ByteArray(1), "2.6.0"), RootfsChoice(pin, DockerMode.Source.Upload(bytes)))
+        assertTrue(restore.rootfs === bytes && "\nrootfs_url=\n" in "\n${restore.planText()}")
+        // and the run reads them where the plans carry them
+        val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        for (f in listOf("action_update", "action_restore")) {
+            val body = script.substringAfter("$f() {").substringBefore("\n}\n")
+            for (key in listOf("rootfs_sha256", "rootfs_url")) assertTrue("$f reads $key", "\$(plan $key)" in body)
+        }
     }
 
     private val runSh = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
@@ -210,6 +225,8 @@ class DockerTest {
         val tuning = runSh.substringAfter("HOST_TUNING='").substringBefore("'").lines().map { it.substringBefore(' ') to it.substringAfter(' ') }
         assertEquals(server.filter { it.first != "net.ipv4.ip_forward" }.toSet(), tuning.toSet())
         assertTrue("if [ \$cr_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi" in body("action_create"))
+        // and a restore into Docker (B13c), as its create's
+        assertTrue("if [ \$rs_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi" in body("action_restore"))
     }
 
     @Test
