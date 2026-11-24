@@ -1289,12 +1289,12 @@ up_back() {
 		ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" ||
 			run_result failed-not-rolled-back "$1; cannot switch back to $up_old" "«Починить»: $up_where"
 	fi
-	if [ "$up_new" != "$up_old" ]; then
-		rm -rf "$up_new"
-		[ $up_docker = 0 ] || dk_image_rm "sanity-csqtt:${up_new##*/}"
-	fi
+	[ "$up_new" = "$up_old" ] || rm -rf "$up_new"
 	rm -f "$UP_PENDING"
 	up_start >/dev/null 2>&1
+	# the failed build's image once its container is made again on the build before (Docker refuses an image a container,
+	# stopped or not, still uses: the zoo, 13:48 UTC)
+	[ $up_docker = 0 ] || [ "$up_new" = "$up_old" ] || dk_image_rm "sanity-csqtt:${up_new##*/}"
 	up_why=$(inst_verify "$up_check" "$up_udp" "$up_web" "$up_iface" "$up_secret")
 	[ -z "$up_why" ] || run_result failed-not-rolled-back \
 		"$1; the rollback did not serve either: $up_why ($(up_where_runs), current -> $(readlink "$up_root/current"))" \
