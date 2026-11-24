@@ -237,6 +237,42 @@ class ManagerTest {
         assertEquals(null, Version.parse("99999999999.1"))
     }
 
+    private fun kept(id: String, slot: Int, release: String) =
+        "CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/$id|files=csqtt.db,env,manifest.json,unit.saved|lock=none|" +
+            "schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=|kept_flags=--listen 0.0.0.0:4${slot}111 --web-port " +
+            "5${slot}222 --config-dir /var/lib/sanityprotocol/csqtt/$id --instance sqc-$id --iface sqc$slot --tun-addr 10.77.$slot.1/24 " +
+            "--instance-slot ${slot + 2}|kept_release=$release"
+
+    @Test
+    fun aKeptStoreKeepsItsPlaceAndOnlyAKeptStoreIsRestored() {
+        // B11a review F3: «Удалить» kept sqc-0a1b2c's store; a new instance takes none of its ports, interface, subnet or slot
+        val (c, inv) = box(kept("0a1b2c", 0, "2.6.0-5dafed6b"))
+        val entry = Manager.entries(c, carried, inv).single()
+        assertEquals(listOf(Action.RESTORE, Action.REMOVE_LEFTOVERS), entry.offers.map { it.action })
+        assertTrue(entry.offers.first().recommended)
+        assertEquals(Compatibility.COMPATIBLE, entry.compatibility)
+        for (seed in 1..20) {
+            val p = Proposer.propose(c, inv, Random(seed))
+            assertEquals("sqc1", p.iface)
+            assertEquals("10.77.1.0/24", p.subnet)
+            assertEquals(3, p.slot)
+            assertTrue(p.udpPort != 40111 && p.webPort != 40111 && p.udpPort != 50222 && p.webPort != 50222)
+        }
+        // a store of ours with no kept flags (a create cut off: «Продолжить» is its): removed, never «restored»
+        val (c2, inv2) = box("CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/0a1b2c|files=csqtt.db,env,manifest.json|lock=none|" +
+            "schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=")
+        Manager.entries(c2, carried, inv2).single().offers.let { offers ->
+            assertEquals(listOf(Action.REMOVE_LEFTOVERS), offers.map { it.action })
+            assertTrue(offers.single().recommended)
+        }
+        // F6: a store a newer build ran (another phone's app) is not restored from our older core
+        val (c3, inv3) = box(kept("0a1b2c", 0, "2.6.1-0060bd53"))
+        Manager.entries(c3, carried, inv3).single().let { newer ->
+            assertEquals(Compatibility.NEWER_THAN_APP, newer.compatibility)
+            assertEquals(listOf(Action.REMOVE_LEFTOVERS), newer.offers.map { it.action })
+        }
+    }
+
     @Test
     fun removalKeepsTheStoreAndPurgingIsTyped() {
         val (c, inv) = box(*ours("0a1b2c", 2, "active"))

@@ -199,10 +199,13 @@ object Manager {
                 purge,
             )
             InstallState.STOPPED, InstallState.DORMANT -> listOf(Offer(Action.START, recommended = true), Offer(Action.REMOVE), purge)
-            InstallState.LEFTOVER -> listOfNotNull(
-                if (newer) null else Offer(Action.RESTORE, recommended = true),
-                Offer(Action.REMOVE_LEFTOVERS, recommended = newer, confirm = if (install.stores.isNotEmpty()) "удалить ${install.name}" else null),
-            )
+            // «Восстановить» needs the flags «Удалить» kept: a create cut off leaves a store without them («Продолжить» is its)
+            InstallState.LEFTOVER -> (!newer && install.stores.any { it.keptFlags != null }).let { restorable ->
+                listOfNotNull(
+                    if (restorable) Offer(Action.RESTORE, recommended = true) else null,
+                    Offer(Action.REMOVE_LEFTOVERS, recommended = !restorable, confirm = if (install.stores.isNotEmpty()) "удалить ${install.name}" else null),
+                )
+            }
         }.sortedByDescending { it.recommended }
         return Entry(install, compatibility, offers, if (newer) "Обновить нельзя: установлена более новая версия" else null)
     }

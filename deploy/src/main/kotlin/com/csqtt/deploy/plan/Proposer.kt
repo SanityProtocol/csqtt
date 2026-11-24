@@ -187,9 +187,10 @@ object Proposer {
     /** The stock family's 10.66.0.0/16 (10.66.67/24 the main's, 10.66.68/24 the side's). */
     private fun inStock(n: Int): Boolean = (n ushr 16) == (10 shl 8 or 66)
 
-    /** Every slot an instance of ours uses (its --instance-slot), running or not. */
+    /** Every slot an instance of ours uses (its --instance-slot), running or not, or kept for «Восстановить» (B11a review F3). */
     private fun usedSlots(c: Classification): Set<Int> = c.installations.filter { it.owner == Owner.OURS }.flatMap { install ->
-        install.procs.map { it.flags } + install.units.map { it.flags } + install.containers.map { it.flags }
+        install.procs.map { it.flags } + install.units.map { it.flags } + install.containers.map { it.flags } +
+            install.stores.mapNotNull { it.keptFlags }
     }.mapNotNull { it["--instance-slot"]?.toIntOrNull() }.toSet()
 
     /** "a.b.c.d/n" as (network, prefix); a bare address is /32. */

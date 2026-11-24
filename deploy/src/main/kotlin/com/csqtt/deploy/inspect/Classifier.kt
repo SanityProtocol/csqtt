@@ -130,7 +130,10 @@ object Classifier {
 
     private fun build(inv: Inventory, units: List<UnitView>, containers: List<Ctr>, procs: List<Proc>, stores: List<Store>): Installation {
         val dirs = stores.map { it.dir }.toSet()
-        val flags = procs.firstOrNull()?.flags ?: units.firstOrNull()?.flags ?: containers.firstOrNull()?.flags ?: ServerFlags(emptyMap())
+        // a store of ours kept by «Удалить» runs nothing: the flags it ran with are its claims, so no new instance takes its ports,
+        // interface, subnet or slot and «Восстановить» stays possible (B11a review F3)
+        val flags = procs.firstOrNull()?.flags ?: units.firstOrNull()?.flags ?: containers.firstOrNull()?.flags
+            ?: stores.firstNotNullOfOrNull { it.keptFlags } ?: ServerFlags(emptyMap())
         val exes = procs.mapNotNull { inv.exes[it.sha] } + units.mapNotNull { unit -> inv.exeAt(unit.exec) }
         val exe = exes.firstOrNull()
         val side = units.any { it.id == "csqtt25.service" } || containers.any { it.name == "csqtt25" } || "/etc/csqtt25" in dirs ||
@@ -158,7 +161,8 @@ object Classifier {
             exe != null && (exe.label.isNotEmpty() || exe.startup.isNotEmpty() || exe.swgFlags) -> Owner.HANDMADE
             else -> Owner.UNKNOWN
         }
-        val build = buildOf(exe, containers, schema, owner == Owner.MRTT || owner == Owner.MRTT_BETA)
+        val build = buildOf(exe, containers, schema, owner == Owner.MRTT || owner == Owner.MRTT_BETA,
+            stores.firstNotNullOfOrNull { it.keptRelease.ifEmpty { null } }.orEmpty())
         val runtime = when {
             units.isNotEmpty() -> Runtime.SYSTEMD
             containers.isNotEmpty() -> Runtime.DOCKER
@@ -195,7 +199,7 @@ object Classifier {
         "docker" in store.files || inv.units.any { it.id == prereq } || prereq in inv.dockerRequires || prereq in inv.dockerWants
     }
 
-    private fun buildOf(exe: Exe?, containers: List<Ctr>, schema: Set<String>, mrtt: Boolean): Build? {
+    private fun buildOf(exe: Exe?, containers: List<Ctr>, schema: Set<String>, mrtt: Boolean, keptRelease: String): Build? {
         if (mrtt) return Build(exe?.label?.removePrefix("v")?.ifEmpty { null } ?: exe?.startup?.substringBefore(' ').orEmpty(),
             ProtocolLine.MRTT, false, false, "MRTT")
         if (exe != null) {
@@ -210,6 +214,11 @@ object Classifier {
         containers.map { it.image.substringAfterLast(':', "") }.firstOrNull { it.isNotEmpty() && it[0].isDigit() }?.let { tag ->
             val version = tag.substringBefore('-')
             return Build(version, lineOf(version), false, false, "image tag")
+        }
+        // a store of ours kept by «Удалить»: the release it ran (`<version>-<sha8>`), so no older core restores it (M-150, B11a
+        // review F6)
+        keptRelease.substringBefore('-').takeIf { it.isNotEmpty() && it[0].isDigit() }?.let { version ->
+            return Build(version, lineOf(version), true, true, "kept release")
         }
         // the store's schema: client_groups is a 2.5 server's (a 2.1 store the app updated keeps 2.1's devices and device_id
         // beside it, B5 review F3), devices or device_id alone the 2.1 line's. A line, and no version: one made up here would

@@ -591,7 +591,7 @@ inv_stores() {
 		is_seen="$is_seen$is_d "
 		is_files=''
 		for is_f in csqtt.db csqtt.db-wal passwords.json passwords.json.imported csqtt.env env .server.lock deploy-overrides.json \
-			web_cert.pem letsencrypt.env letsencrypt-ip.env manifest.json runtime-archive docker mrtt.db mrtt.db-wal mrtt.env; do
+			web_cert.pem letsencrypt.env letsencrypt-ip.env manifest.json unit.saved runtime-archive docker mrtt.db mrtt.db-wal mrtt.env; do
 			[ -e "$is_d/$is_f" ] && is_files="$is_files${is_files:+,}$is_f"
 		done
 		[ -n "$is_files" ] || continue
@@ -617,8 +617,17 @@ inv_stores() {
 			[ -z "$is_v" ] || is_domain=$is_v
 		done
 		is_keys=$(printf '%s\n' $is_keys | sort -u | tr '\n' ',')
+		# a store of ours kept by «Удалить»: the flags it ran with (its ports, interface, subnet and slot stay its own, so no new
+		# instance takes them) and the release it ran (no older core restores it) (B11a review F3, F6)
+		is_kflags='' is_krel=''
+		case $is_d in /var/lib/sanityprotocol/csqtt/*)
+			if [ -f "$is_d/unit.saved" ]; then
+				is_kflags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$is_d/unit.saved" | head -n 1)
+				is_krel=$(sed -n 's/^# release //p' "$is_d/unit.saved" | head -n 1)
+			fi ;;
+		esac
 		csqtt_emit INV store "dir=$is_d" "files=$is_files" "lock=$is_lock" "schema=${is_schema%,}" "env_keys=${is_keys%,}" \
-			"public_ip=$is_ip" "domain=$is_domain"
+			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel"
 	done
 }
 

@@ -987,60 +987,65 @@ inst_paths() {  # inst_paths <id>: sets in_root in_state in_unit
 	in_root=/opt/sanityprotocol/csqtt/$1 in_state=/var/lib/sanityprotocol/csqtt/$1 in_unit=sanity-csqtt-$1.service
 }
 
-# our drop-in goes with the last instance of ours that runs: each key put back to what its comment says it was
-host_floors_revert() {
+# Our drop-in goes with the last instance of ours. A floor goes back to what its comment says it was only while its live value
+# is still the one the drop-in set and no csqtt server runs (a stock one leans on the same floors): one raised since by someone
+# else keeps its value. ip_forward is never written back: Docker, a WireGuard, any router may have come to rely on it, and
+# writing it resets every device's forwarding and accept_redirects (B11a review F1); it is the server's own tuning as well.
+# The iptables-nft tables the server's rules made stay, empty and inert, until the next boot: telling them from an admin's
+# (a DROP policy and nothing else) is not safe (B11a review F2)
+host_dropin_drop() {
+	for hd_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$hd_u" ] && return 0; done
 	[ -f "$HOST_DROPIN" ] || return 0
-	sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1=\2/p' "$HOST_DROPIN" | while IFS='=' read -r hf_k hf_v; do
-		sysctl -q -w "$hf_k=$hf_v" 2>/dev/null
-	done
+	if ! pgrep -x csqtt-server >/dev/null 2>&1 && ! pgrep -x csqtt >/dev/null 2>&1 && ! pgrep -x csqtt25 >/dev/null 2>&1; then
+		sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1 \2/p' "$HOST_DROPIN" | while read -r hd_k hd_was; do
+			[ "$hd_k" != net.ipv4.ip_forward ] || continue
+			hd_set=$(sed -n "s/^$hd_k = //p" "$HOST_DROPIN" | head -n 1)
+			[ "$(sysctl -n "$hd_k" 2>/dev/null | tr -s '\t ' '  ')" = "$hd_set" ] || continue
+			sysctl -q -w "$hd_k=$hd_was" 2>/dev/null
+		done
+	fi
 	rm -f "$HOST_DROPIN"
+}
+
+# inst_take_down <id> (after inst_paths): an instance of ours stopped and taken off the box by its id alone: its unit, its
+# tagged rules, its openings (ufw's and firewalld's through their tool; the iptables ones go with its unit's stop), the drop-in
+# with the last instance, its release. The state dir stays as it is
+inst_take_down() {
+	MF=$in_state/manifest.json MF_ID=$1
+	MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ')
+	if [ -f "/etc/systemd/system/$in_unit" ]; then
+		run_cmd systemctl disable --now "$in_unit"
+		rm -f "/etc/systemd/system/$in_unit"
+		systemctl daemon-reload
+		systemctl reset-failed "$in_unit" >/dev/null 2>&1
+	fi
+	inst_sweep "$1"
+	host_undo
+	host_dropin_drop
+	rm -rf "$in_root"
+	rm -f "$in_state/open.sh"
 }
 
 action_remove() {
 	rm_id=$(plan id) rm_purge=$(plan purge)
 	inst_paths "$rm_id"
 	[ -e "$in_state" ] || [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rm_id is not here" "check again"
-	MF=$in_state/manifest.json MF_ID=$rm_id
-	MF_HOST=$(mf_host_of "$MF" 2>/dev/null)
+	# its flags kept for «Восстановить» when the store stays, with the release it ran (a phone with an older core must not
+	# restore it: M-150, B11a review F6); nothing has changed if they cannot be
+	if [ "$rm_purge" != 1 ] && [ -d "$in_state" ] && [ -f "/etc/systemd/system/$in_unit" ]; then
+		{ printf '# release %s\n' "$(basename "$(readlink "$in_root/current" 2>/dev/null)" 2>/dev/null)"
+			cat "/etc/systemd/system/$in_unit"; } >"$in_state/unit.saved.new" && mv -f "$in_state/unit.saved.new" "$in_state/unit.saved" ||
+			{ rm -f "$in_state/unit.saved.new"; run_result failed-cleaned "cannot keep sqc-$rm_id's flags in $in_state" "check the box's disk"; }
+	fi
 	run_phase stop 20
 	: >"$RUN_DIR/switching"
-	if [ -f "/etc/systemd/system/$in_unit" ]; then
-		# its flags kept for «Восстановить» when the store stays
-		[ "$rm_purge" = 1 ] || [ ! -d "$in_state" ] || cp -p "/etc/systemd/system/$in_unit" "$in_state/unit.saved"
-		run_cmd systemctl disable --now "$in_unit"
-		rm -f "/etc/systemd/system/$in_unit"
-		systemctl daemon-reload
-		systemctl reset-failed "$in_unit" >/dev/null 2>&1
-	fi
-	inst_sweep "$rm_id"
+	inst_take_down "$rm_id"
 	run_phase remove 50
-	# its openings (ufw, firewalld) go through their tool; the iptables ones went with its unit's stop
-	MF_HOST=$(printf '%s\n' "$MF_HOST" | grep -v '^sysctl ')
-	host_undo
-	# the floors go with the last instance of ours that runs (a kept store runs nothing)
-	rm_others=0
-	for rm_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$rm_u" ] && rm_others=1; done
-	if [ $rm_others = 0 ]; then
-		host_floors_revert
-		# the last csqtt server gone: the iptables-nft tables its rules made, left empty, go too (a table holding any rule,
-		# Docker's, ufw's, stays; firewalld's inet table is never one of these)
-		if ! pgrep -x csqtt-server >/dev/null 2>&1 && ! pgrep -x csqtt >/dev/null 2>&1 && ! pgrep -x csqtt25 >/dev/null 2>&1 &&
-			command -v nft >/dev/null 2>&1; then
-			nft list tables 2>/dev/null | while read -r rm_w rm_fam rm_name; do
-				[ "$rm_w" = table ] || continue
-				case "$rm_fam $rm_name" in "ip filter" | "ip nat" | "ip mangle" | "ip raw" | "ip6 filter" | "ip6 nat" | "ip6 mangle" | "ip6 raw") ;; *) continue ;; esac
-				nft list table "$rm_fam" "$rm_name" 2>/dev/null | awk '!/^[ \t]*((table|chain) .*\{|type .*;|\}|)$/ {n++} END {exit n > 0}' &&
-					nft delete table "$rm_fam" "$rm_name" 2>/dev/null
-			done
-		fi
-	fi
-	rm -rf "$in_root"
 	if [ "$rm_purge" = 1 ]; then
 		rm -rf "$in_state"
 		rmdir /var/lib/sanityprotocol/csqtt 2>/dev/null
 	elif [ -d "$in_state" ]; then
 		# what stays: the store, env, certificate, the unit's flags; the manifest names the state dir alone now
-		rm -f "$in_state/open.sh"
 		MF_OBJECTS="dir $in_state" MF_HOST=''
 		mf_write
 	fi
@@ -1056,7 +1061,17 @@ action_restore() {
 	rs_id=$(plan id) rs_version=$(plan version) rs_sha=$(plan core_sha)
 	inst_paths "$rs_id"
 	[ -f "$in_state/unit.saved" ] || run_result failed-cleaned "sqc-$rs_id has no kept store to restore" "check again"
-	[ ! -e "$in_root" ] && [ ! -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
+	if [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ]; then
+		systemctl is-active --quiet "$in_unit" && run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
+		# a restore (or a removal) cut off before its end left part of it, its flags still kept: what it made goes first, by
+		# the id, as a removal takes it, and the restore runs again (B11a review F4)
+		run_phase "take down" 5
+		: >"$RUN_DIR/switching"
+		inst_take_down "$rs_id"
+		MF_OBJECTS="dir $in_state" MF_HOST=''
+		mf_write
+		rm -f "$RUN_DIR/switching"
+	fi
 	rs_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$in_state/unit.saved" | head -n 1)
 	rs_udp=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
 	rs_web=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
@@ -1077,12 +1092,15 @@ action_restore() {
 	cr_open="$rs_udp/udp"
 	[ "$rs_bind" = 127.0.0.1 ] || cr_open="$cr_open $rs_web/tcp"
 	MF=$in_state/manifest.json MF_ID=$rs_id MF_OBJECTS='' MF_HOST=''
-	# what this run makes (never the state dir: it holds the clients) goes if it fails
+	# what this run makes (never the state dir: it holds the clients) goes if it fails, and the manifest names the kept store
+	# alone again, as the removal left it (B11a review F5)
 	action_cleanup() {
 		mf_undo
 		[ ! -e "$RUN_DIR/switching" ] || cr_server_undo
 		host_undo
 		rmdir /opt/sanityprotocol/csqtt /opt/sanityprotocol 2>/dev/null
+		MF_OBJECTS="dir $in_state" MF_HOST=''
+		mf_write
 		return 0
 	}
 	cr_fail() { action_cleanup; run_result failed-cleaned "$1" "${2:-check again}"; }
