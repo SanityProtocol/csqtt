@@ -2089,6 +2089,8 @@ le_hook_text() {
 # SanityProtocol csqtt (P2 B14): our Let's Encrypt certificates, renewed by sanity-csqtt-le.timer
 LE_DIR=${LE_DIR:-/var/lib/sanityprotocol/letsencrypt}
 SQC_DIR=${SQC_DIR:-/var/lib/sanityprotocol/csqtt}
+LE_VENV=${LE_VENV:-/opt/sanityprotocol/certbot}
+LE_HOST_INI=${LE_HOST_INI:-/etc/letsencrypt/cli.ini}
 [ ! -f "$LE_DIR/acme-ca.pem" ] || export REQUESTS_CA_BUNDLE="$LE_DIR/acme-ca.pem"
 fw() {
 	if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -n 1 | grep -q 'Status: active'; then echo ufw
@@ -2150,10 +2152,12 @@ certbot)
 	# reads it) and the second is ours (B14 review F2)
 	shift
 	export XDG_CONFIG_HOME="$LE_DIR"
-	set -- /opt/sanityprotocol/certbot/bin/certbot --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
+	set -- "$LE_VENV/bin/certbot" --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
 		--work-dir "$LE_DIR/work" --logs-dir "$LE_DIR/logs" "$@"
-	[ -e /etc/letsencrypt/cli.ini ] || exec "$@"
-	exec unshare -m sh -c 'mount --bind /dev/null /etc/letsencrypt/cli.ini && exec "$@"' sh "$@" ;;
+	# (where root may make no mount namespace, a restricted LXC or OpenVZ VPS, or the bind fails, the host's cli.ini applies as it
+	# always did: B14 verify)
+	[ -e "$LE_HOST_INI" ] && unshare -m true 2>/dev/null || exec "$@"
+	exec unshare -m sh -c 'mount --bind /dev/null "$0" 2>/dev/null; exec "$@"' "$LE_HOST_INI" "$@" ;;
 renew)
 	exec "$0" certbot renew --non-interactive --pre-hook "$0 open" --post-hook "$0 close" --deploy-hook "$0 deploy" ;;
 esac
@@ -2242,6 +2246,8 @@ le_keep() {
 # le_signal: the instance's server told to read its certificate again (SIGUSR1: no client is cut)
 le_signal() {
 	if [ -f "$in_state/docker" ]; then
+		# (a stopped Docker is not started through its socket for this, as the hook's: B14 verify)
+		systemctl is-active --quiet docker.service || return 0
 		docker kill -s USR1 "sanity-csqtt-$le_id" >/dev/null 2>&1
 	else
 		ls_p=$(systemctl show -p MainPID --value "$in_unit" 2>/dev/null)

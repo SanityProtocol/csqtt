@@ -169,7 +169,7 @@ class LeTest {
         // certbot.timer renews /etc/letsencrypt); the issuance and the renewal both through the hook's certbot
         val certbot = hook.substringAfter("\ncertbot)").substringBefore(";;\n")
         assertTrue(certbot, "--config /dev/null --no-directory-hooks --config-dir \"\$LE_DIR\"" in certbot &&
-            "export XDG_CONFIG_HOME=\"\$LE_DIR\"" in certbot && "mount --bind /dev/null /etc/letsencrypt/cli.ini" in certbot)
+            "export XDG_CONFIG_HOME=\"\$LE_DIR\"" in certbot && "mount --bind /dev/null \"\$0\"" in certbot)
         assertTrue(le, "\"\$LE_HOOK\" certbot certonly" in le && "\"\$0\" certbot renew" in hook)
         assertFalse(le, "\$LE_VENV/bin/certbot\" --config" in le)
         // the short-lived profile, never a retry without it
@@ -180,6 +180,8 @@ class LeTest {
         // review F4: where none is got, a short-lived certificate nothing here renews gives way to a self-signed one
         val keep = body("le_keep")
         assertTrue(keep, "[ \"\$lk_days\" -lt 10 ]" in keep && "CN=rcgen self signed cert" in keep && "le_signal" in keep)
+        // B14 verify: the run's own signal never starts a stopped Docker either
+        assertTrue(body("le_signal").contains("systemctl is-active --quiet docker.service || return 0"))
         assertEquals(1, Regex("certonly").findAll(le).count())
         assertTrue(le, "renew_before_expiry = 3 days" in le)
         // the challenge's port opened and closed around it; the lineage written before it is deployed; the timer after
@@ -210,5 +212,43 @@ class LeTest {
         assertFalse(onDomain.offers.joinToString { it.action.name }, onDomain.offers.any { it.action in moves })
         assertTrue(onDomain.note.orEmpty(), "vpn.example.org" in onDomain.note.orEmpty())
         assertTrue(onDomain.offers.any { it.action == com.csqtt.deploy.plan.Action.REMOVE })
+    }
+
+    @Test
+    fun ourCertbotRunsWithoutTheHostsCliIniWhereANamespaceCanBeMadeAndAsBeforeWhereNot() {
+        // review F2 and its verify: the host's cli.ini hidden in a mount namespace of its own; where root may make none (a
+        // restricted LXC or OpenVZ VPS) our certbot runs as it always did, the host's file applying, never failing the issuance
+        val dir = kotlin.io.path.createTempDirectory("csqtt-le").toFile()
+        try {
+            File(dir, "le").mkdirs()
+            val venv = File(dir, "venv/bin").apply { mkdirs() }
+            File(venv, "certbot").apply { writeText("#!/bin/sh\necho certbot \"$@\" XDG=\$XDG_CONFIG_HOME\n"); setExecutable(true) }
+            val ini = File(dir, "cli.ini")
+            fun run(unshare: String): String {
+                val bin = File(dir, "bin").apply { mkdirs() }
+                File(bin, "unshare").apply { writeText("#!/bin/sh\n$unshare\n"); setExecutable(true) }
+                val hook = File(dir, "le-hook.sh").apply { writeText(hookText()) }
+                val proc = ProcessBuilder("sh", hook.path, "certbot", "certonly", "--standalone").redirectErrorStream(true).apply {
+                    environment()["PATH"] = "${bin.path}:/usr/bin:/bin"
+                    environment()["LE_DIR"] = File(dir, "le").path
+                    environment()["LE_VENV"] = File(dir, "venv").path
+                    environment()["LE_HOST_INI"] = ini.path
+                }.start()
+                assertTrue(proc.waitFor(30, TimeUnit.SECONDS))
+                return proc.inputStream.bufferedReader().readText().trim()
+            }
+            val plain = "certbot --config /dev/null --no-directory-hooks --config-dir ${dir.path}/le --work-dir ${dir.path}/le/work " +
+                "--logs-dir ${dir.path}/le/logs certonly --standalone XDG=${dir.path}/le"
+            // no host cli.ini: our certbot as it is, $XDG_CONFIG_HOME ours
+            assertEquals(plain, run("exit 9"))
+            ini.writeText("max-log-backups = 0\n")
+            // one there, no namespace to be had: as before, never a failure
+            assertEquals(plain, run("[ \"$*\" = '-m true' ] && exit 1; echo unshare \"$@\""))
+            // one there and a namespace: certbot inside it, the file hidden by a bind of /dev/null
+            assertTrue(run("[ \"$*\" = '-m true' ] && exit 0; echo unshare \"$1\" \"$2\" \"$3\" \"$5\"").startsWith(
+                "unshare -m sh -c ${ini.path}"))
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }
