@@ -42,7 +42,19 @@ exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) ·
       · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed)"""
 
 fun main(args: Array<String>) {
-    val code = when {
+    val code = try {
+        dispatch(args)
+    } catch (error: Exception) {
+        // a target file that cannot be read or is missing a field: a usage error, said in one line
+        if (error !is IllegalStateException && error !is NumberFormatException && error !is java.io.IOException) throw error
+        System.err.println("target: ${error.message}")
+        2
+    }
+    exitProcess(code)
+}
+
+private fun dispatch(args: Array<String>): Int {
+    return when {
         args.toList() == listOf("bundle-check") -> bundleCheck()
         args.size == 2 && args[0] == "ssh-check" -> sshCheck(File(args[1]))
         args.size == 2 && args[0] == "root-check" -> withSession(File(args[1])) { session, p -> rootCheck(session, p) }
@@ -54,7 +66,6 @@ fun main(args: Array<String>) {
             2
         }
     }
-    exitProcess(code)
 }
 
 private fun bundleCheck(): Int {
@@ -85,13 +96,24 @@ private class FilePins(private val file: File) : HostKeyPins {
     }
 }
 
-private fun properties(targetFile: File) = Properties().apply { targetFile.inputStream().use { load(it) } }
+/**
+ * A target file: UTF-8 `key=value` lines split at the first `=`, nothing escaped, `#` lines skipped. Properties.load read
+ * ISO-8859-1 and took backslashes as escapes, so a password holding `\` reached the server altered, and fail2ban counted
+ * the failure (review F6).
+ */
+private fun properties(targetFile: File) = Properties().apply {
+    targetFile.readLines(Charsets.UTF_8).forEach { line ->
+        val at = line.indexOf('=')
+        if (at > 0 && !line.trimStart().startsWith("#")) setProperty(line.substring(0, at).trim(), line.substring(at + 1).removeSuffix("\r"))
+    }
+}
 
 private fun Properties.prop(name: String): String? = getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
 
 private fun targetOf(p: Properties): SshTarget {
     val auth = p.prop("key_file")?.let { keyFile ->
-        SshAuth.Key(File(keyFile).readText(), p.prop("passphrase"), p.prop("cert_file")?.let { File(it).readText() })
+        SshAuth.Key(File(keyFile).readText(), p.getProperty("passphrase")?.takeIf { it.isNotEmpty() },
+            p.prop("cert_file")?.let { File(it).readText() })
     } ?: SshAuth.Password(p.getProperty("password") ?: error("the target has neither key_file nor password"))
     return SshTarget(p.prop("host") ?: error("the target has no host"), p.prop("port")?.toInt() ?: 22,
         p.prop("user") ?: error("the target has no user"), auth)

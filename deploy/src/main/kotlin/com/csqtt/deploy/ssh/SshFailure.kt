@@ -7,6 +7,7 @@
 package com.csqtt.deploy.ssh
 
 import net.schmizz.sshj.common.DisconnectReason
+import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.transport.TransportException
 import net.schmizz.sshj.userauth.UserAuthException
 import java.io.IOException
@@ -83,11 +84,13 @@ object SshFailures {
             error is TransportException && error.disconnectReason == DisconnectReason.HOST_KEY_NOT_VERIFIABLE ->
                 SshFailure.HOST_KEY_CHANGED
             error is TransportException && error.disconnectReason == DisconnectReason.KEY_EXCHANGE_FAILED -> SshFailure.KEX
+            // the keepalive's verdict on a link that stopped answering (M-140's own case; review F4)
+            error is SSHException && error.disconnectReason == DisconnectReason.CONNECTION_LOST -> SshFailure.CLOSED
             "timeout expired" in message || "timed out" in message -> SshFailure.TIMEOUT
             "identification" in message -> SshFailure.NOT_SSH
             "unable to reach a settlement" in message -> SshFailure.KEX
-            "broken transport" in message || "connection reset" in message || "end of stream" in message ->
-                SshFailure.CLOSED
+            "broken transport" in message || "connection reset" in message || "end of stream" in message ||
+                "broken pipe" in message || "socket closed" in message || "connection abort" in message -> SshFailure.CLOSED
             else -> null
         }
     }

@@ -14,6 +14,7 @@
 //   (so the shipped app's certificate login never offered its certificate); the engine pairs them itself.
 package com.csqtt.deploy.ssh
 
+import com.hierynomus.sshj.key.KeyAlgorithms
 import com.hierynomus.sshj.userauth.certificate.Certificate
 import com.hierynomus.sshj.userauth.keyprovider.OpenSSHKeyFileUtil
 import net.schmizz.keepalive.KeepAliveProvider
@@ -21,6 +22,8 @@ import net.schmizz.keepalive.KeepAliveRunner
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.KeyType
+import net.schmizz.sshj.connection.channel.direct.Session
+import net.schmizz.sshj.signature.SignatureRSA
 import net.schmizz.sshj.userauth.keyprovider.KeyProvider
 import net.schmizz.sshj.userauth.method.AuthKeyboardInteractive
 import net.schmizz.sshj.userauth.method.AuthPassword
@@ -34,6 +37,8 @@ import java.io.StringReader
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /** What one remote command left: its stdout bytes (marker lines live here), its stderr text, and its exit status. */
@@ -43,9 +48,8 @@ class ExecResult(val stdout: ByteArray, val stderr: String, val exitStatus: Int?
 
 data class SshTimeouts(
     val connectMs: Int = 15_000,
+    /** The server's banner, the key exchange and the login (a port that accepts and stays silent waits this long). */
     val handshakeMs: Int = 15_000,
-    /** Socket reads: the keepalive answers every 10 s, so only a dead link ever waits this long. */
-    val socketMs: Int = 60_000,
     val keepAliveSeconds: Int = 10,
     /** Unanswered keepalives before sshj drops the link (~30–40 s for a link that went away). */
     val keepAliveMisses: Int = 3,
@@ -55,10 +59,15 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
     val isConnected: Boolean get() = client.isConnected
 
     /**
-     * Runs [command] with [stdin] (written whole, then closed, so a script on stdin ends where its bytes end) and returns
-     * when the command exits, or throws SshError(TIMEOUT) after [deadlineMs], the one bound on the whole call, stdin
-     * included; a timed-out command's channel is closed. A command that exits before taking all its stdin (dd on a full
-     * disk) returns its own status and stderr, which say why, not the write's error; a link lost on the way is an SshError.
+     * Runs [command] with [stdin] and returns when the command exits. stdin is written in chunks no larger than the remote
+     * window, then closed, so a script on stdin ends where its bytes end, and a command that exits before taking all of it
+     * (dd on a full disk) returns its own status and stderr at once, which say why (review F2: one large write held sshj's
+     * stream through the transport's 30 s window wait, with the reader thread queued behind it).
+     *
+     * [deadlineMs] bounds the whole call, stdin included (review F1). Past it the channel is closed. If a dead path holds
+     * sshj's write lock inside a socket write, so that not even that can go out, the socket itself is closed after a few
+     * seconds. A chunk that makes no progress for 30 s means the link is lost and ends the call the same way, since the
+     * keepalive cannot run behind that lock. Either way the result is an SshError: TIMEOUT or CLOSED.
      */
     fun exec(command: RemoteCommand, stdin: ByteArray? = null, deadlineMs: Long = 60_000): ExecResult {
         val session = try {
@@ -75,26 +84,31 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
             val stdout = ByteArrayOutputStream()
             val stderr = ByteArrayOutputStream()
             val readers = listOf(drain(cmd.inputStream, stdout), drain(cmd.errorStream, stderr))
-            // from a thread of its own: a remote that stops reading (a hung disk under dd) would block a write with no
-            // bound of its own, so only the deadline below ends it, by closing the channel under it
+            val writing = AtomicLong(0)
             var writeError: Throwable? = null
             val writer = thread(isDaemon = true, name = "ssh-stdin") {
-                writeError = runCatching { cmd.outputStream.use { input -> stdin?.let { input.write(it) } } }.exceptionOrNull()
+                writeError = runCatching { writeStdin(cmd, stdin, writing) }.exceptionOrNull()
+            }
+            val cut = AtomicReference<SshFailure?>(null)
+            val watch = watchdog(cmd, deadlineMs, writing, cut)
+            fun cutError(cause: Throwable?): SshError? = cut.get()?.let { kind ->
+                SshError(kind, if (kind == SshFailure.TIMEOUT) "\"$command\" did not finish in ${deadlineMs / 1000} s"
+                else "\"$command\": the link stopped carrying data for ${STALL_MS / 1000} s", cause)
             }
             try {
-                cmd.join(deadlineMs, TimeUnit.MILLISECONDS)
+                // the watchdog acts first; this bound only stops the wait if it could not
+                cmd.join(deadlineMs + GRACE_MS + 10_000, TimeUnit.MILLISECONDS)
             } catch (error: Exception) {
+                cutError(error)?.let { throw it }
                 runCatching { cmd.close() }
                 throw SshError(SshFailures.classify(error), "\"$command\": ${error.message}", error)
+            } finally {
+                watch.interrupt()
             }
-            val status = cmd.exitStatus
-            if (status == null && cmd.isOpen) {
-                runCatching { cmd.close() }
-                (readers + writer).forEach { it.join(1_000) }
-                throw SshError(SshFailure.TIMEOUT, "\"$command\" did not finish in ${deadlineMs / 1000} s")
-            }
+            cutError(null)?.let { throw it }
             writer.join(5_000)
             readers.forEach { it.join(5_000) }
+            val status = cmd.exitStatus
             if (status == null) {
                 // the channel closed with no exit status (a signal, or a lost link): the write's error, if any, says more
                 writeError?.let { throw SshError(SshFailures.classify(it), "write the command's stdin: ${it.message}", it) }
@@ -103,12 +117,72 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
         }
     }
 
+    /** Never more than the remote window at once, so a write never waits inside sshj's stream for the window to open. */
+    private fun writeStdin(cmd: Session.Command, stdin: ByteArray?, writing: AtomicLong) {
+        val out = cmd.outputStream
+        val data = stdin ?: ByteArray(0)
+        var offset = 0
+        while (offset < data.size && cmd.isOpen && cmd.exitStatus == null) {
+            val window = cmd.remoteWinSize
+            if (window <= 0) {
+                Thread.sleep(5)
+                continue
+            }
+            val size = minOf(CHUNK.toLong(), window, (data.size - offset).toLong()).toInt()
+            writing.set(System.nanoTime())
+            out.write(data, offset, size)
+            out.flush()
+            writing.set(0)
+            offset += size
+        }
+        // the end of stdin; a command that already exited closed its channel, and with it this stream
+        if (cmd.isOpen && cmd.exitStatus == null) out.close()
+    }
+
+    private fun watchdog(cmd: Session.Command, deadlineMs: Long, writing: AtomicLong, cut: AtomicReference<SshFailure?>): Thread =
+        thread(isDaemon = true, name = "ssh-watch") {
+            val end = System.nanoTime() + deadlineMs * 1_000_000
+            try {
+                while (true) {
+                    Thread.sleep(250)
+                    val now = System.nanoTime()
+                    val since = writing.get()
+                    val kind = when {
+                        now > end -> SshFailure.TIMEOUT
+                        since != 0L && now - since > STALL_MS * 1_000_000 -> SshFailure.CLOSED
+                        else -> null
+                    } ?: continue
+                    cut.set(kind)
+                    if (kind == SshFailure.TIMEOUT) {
+                        // a live link closes the channel at once and the session stays usable
+                        val closer = thread(isDaemon = true, name = "ssh-close") { runCatching { cmd.close() } }
+                        closer.join(GRACE_MS)
+                        if (!closer.isAlive) return@thread
+                    }
+                    // the closest thing to the wire, which takes no sshj lock: the transport fails, every wait on it ends
+                    runCatching { client.socket?.close() }
+                    return@thread
+                }
+            } catch (_: InterruptedException) {
+                // the call ended first
+            }
+        }
+
     override fun close() {
         runCatching { client.disconnect() }
         runCatching { client.close() }
     }
 
     companion object {
+        /** stdin's chunk: no more than this, nor than the remote window, per write. */
+        private const val CHUNK = 32 * 1024
+
+        /** A deadline's channel close may take this long before the socket itself is closed. */
+        private const val GRACE_MS = 3_000L
+
+        /** A chunk that makes no progress this long: the link is lost (the keepalive's own bound, which cannot run then). */
+        private const val STALL_MS = 30_000L
+
         /** Before the one retry of a transient failure: a provider's brief refusal is often over a second later. */
         private const val RETRY_PAUSE_MS = 1_500L
 
@@ -158,10 +232,24 @@ class SshSession private constructor(private val client: SSHClient) : Closeable 
         }
 
         private fun newClient(timeouts: SshTimeouts): SSHClient {
-            val config = DefaultConfig().apply { keepAliveProvider = KeepAliveProvider.KEEP_ALIVE }
+            val config = DefaultConfig().apply {
+                keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
+                // sshj 0.38 offers an RSA certificate only as ssh-rsa-cert-v01, signed with SHA-1, which OpenSSH 8.8 and
+                // later refuse (review F3): the SHA-2 forms go just before it, so nothing else in the order moves (the
+                // host-key preference included, which the pins follow)
+                val at = keyAlgorithms.indexOfFirst { it.name == "ssh-rsa-cert-v01@openssh.com" }.let { if (it < 0) keyAlgorithms.size else it }
+                keyAlgorithms = keyAlgorithms.toMutableList().apply {
+                    addAll(at, listOf(
+                        KeyAlgorithms.Factory("rsa-sha2-512-cert-v01@openssh.com", SignatureRSA.FactoryRSASHA512(), KeyType.RSA_CERT),
+                        KeyAlgorithms.Factory("rsa-sha2-256-cert-v01@openssh.com", SignatureRSA.FactoryRSASHA256(), KeyType.RSA_CERT),
+                    ))
+                }
+            }
             return SSHClient(config).apply {
                 connectTimeout = timeouts.connectMs
-                timeout = timeouts.socketMs
+                // the socket's read bound only matters for the banner (sshj's reader carries on past a timeout after
+                // connect): the handshake's, not 60 s twice over (review F5)
+                timeout = timeouts.handshakeMs
                 transport.timeoutMs = timeouts.handshakeMs
                 // before connect: sshj starts the keepalive thread in connect, and only if an interval is set by then
                 connection.keepAlive.keepAliveInterval = timeouts.keepAliveSeconds

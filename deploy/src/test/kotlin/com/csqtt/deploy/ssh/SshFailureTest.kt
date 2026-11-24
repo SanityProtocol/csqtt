@@ -31,6 +31,12 @@ class SshFailureTest {
             TransportException("Server closed connection during identification exchange") to SshFailure.NOT_SSH,
             TransportException("Unable to reach a settlement: [a] and [b]") to SshFailure.KEX,
             IOException("Broken transport; encountered EOF") to SshFailure.CLOSED,
+            // review F4: the keepalive's verdict on a link that stopped answering, and a network switch's words
+            net.schmizz.sshj.connection.ConnectionException(DisconnectReason.CONNECTION_LOST,
+                "Did not receive any keep-alive response for 30 seconds") to SshFailure.CLOSED,
+            java.net.SocketException("Broken pipe") to SshFailure.CLOSED,
+            java.net.SocketException("Software caused connection abort") to SshFailure.CLOSED,
+            java.net.SocketException("Socket closed") to SshFailure.CLOSED,
             HostKeyChanged("vps", 22, "SHA256:a", "SHA256:b") to SshFailure.HOST_KEY_CHANGED,
             IllegalStateException("something new") to SshFailure.OTHER,
         )
