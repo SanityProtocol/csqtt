@@ -805,7 +805,9 @@ action_create() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	run_cmd systemctl enable --now "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_start_lines "$cr_unit")"
+	# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
+	run_cmd systemctl enable "$cr_unit" || cr_fail "$cr_unit could not be enabled"
+	run_cmd systemctl start "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_start_lines "$cr_unit")"
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80
@@ -1133,7 +1135,9 @@ action_restore() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	run_cmd systemctl enable --now "$in_unit" || cr_fail "$in_unit did not start: $(inst_start_lines "$in_unit")"
+	# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
+	run_cmd systemctl enable "$in_unit" || cr_fail "$in_unit could not be enabled"
+	run_cmd systemctl start "$in_unit" || cr_fail "$in_unit did not start: $(inst_start_lines "$in_unit")"
 	run_phase verify 80
 	rs_why=$(inst_verify "$in_unit" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
 	[ -z "$rs_why" ] || cr_fail "$rs_why"
