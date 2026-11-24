@@ -13,6 +13,13 @@ fun interface Remote {
 
 fun SshSession.asRemote(): Remote = Remote { command, stdin, deadline -> exec(command, stdin, deadline) }
 
+/**
+ * A plain command's own answer: its last non-empty line. The login shell runs the user's rc files first, and many print
+ * (a .bashrc that greets, a motd script); their lines come before the command's, never after (a non-login exec runs no
+ * logout script). Scripts of the bundle need none of this: their marker lines are found among any noise.
+ */
+internal fun ExecResult.answer(): String = stdoutText.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() }.orEmpty()
+
 /** How this login becomes root (M-145, #30). Decided once per session by [Privilege.detect]. */
 sealed interface Privilege {
     /** Logged in as root. */
@@ -29,15 +36,21 @@ sealed interface Privilege {
     companion object {
         private const val DEADLINE = 20_000L
         private val REFUSED = listOf("not in the sudoers", "not allowed", "may not run sudo", "afraid i can't")
+        private val C_LOCALE = arrayOf("env", "LC_ALL=C")
+        private val SHELL_PROBE = arrayOf("/bin/sh", "-c", "true")
 
         /**
-         * `id -u`, then `sudo -n true`, then, only when sudo asks for one, the given password once (`sudo -S -v`). No
-         * `-p ''`: without -p sudo's prompt goes to stderr, which nothing parses, so every word stays a safe word.
+         * `id -u`, then whether sudo runs `/bin/sh` without a password, then, only when sudo asks for one, the given password
+         * once (on stdin). The probes ask for exactly what every run needs, `/bin/sh` as root: a login sudo allows only some
+         * commands is refused here, by both sudos alike (classic sudo's `-v` would pass it, and the run fail later). They run
+         * in the C locale, since the refusals are told apart by their English words and pam_env hands sudo the box's
+         * locale (uk, de, fr, pl, tr, pt_BR and zh_CN translate them). No `-p ''`: without -p sudo's prompt goes to stderr,
+         * which nothing parses, so every word stays a safe word.
          */
         fun detect(remote: Remote, sudoPassword: String?): Privilege {
             val id = remote.exec(RemoteCommand.of("id", "-u"), null, DEADLINE)
-            if (id.exitStatus == 0 && id.stdoutText.trim() == "0") return Root
-            val probe = remote.exec(RemoteCommand.of("sudo", "-n", "true"), null, DEADLINE)
+            if (id.exitStatus == 0 && id.answer() == "0") return Root
+            val probe = remote.exec(RemoteCommand.of(*C_LOCALE, "sudo", "-n", *SHELL_PROBE), null, DEADLINE)
             if (probe.exitStatus == 0) return SudoNoPassword
             val said = probe.stderr.lowercase()
             // the login shell's own "not found" (exit 127): no sudo at all, doas-only included
@@ -47,12 +60,14 @@ sealed interface Privilege {
             if (REFUSED.any { it in said }) throw PrivilegeError(PrivilegeFailure.NOT_IN_SUDOERS, probe.stderr.trim().take(200))
             val password = sudoPassword?.takeIf { it.isNotEmpty() }
                 ?: throw PrivilegeError(PrivilegeFailure.SUDO_PASSWORD_NEEDED, "sudo asks for a password")
-            val check = remote.exec(RemoteCommand.of("sudo", "-S", "-v"), "$password\n".toByteArray(), DEADLINE)
+            val check = remote.exec(RemoteCommand.of(*C_LOCALE, "sudo", "-S", *SHELL_PROBE), "$password\n".toByteArray(), DEADLINE)
             if (check.exitStatus == 0) return SudoPassword(password)
             if (REFUSED.any { it in check.stderr.lowercase() }) {
                 throw PrivilegeError(PrivilegeFailure.NOT_IN_SUDOERS, check.stderr.trim().take(200))
             }
-            throw PrivilegeError(PrivilegeFailure.SUDO_PASSWORD_WRONG, "sudo refused the password")
+            // sudo's own last word (an attempt count, a lockout by pam_faillock) is kept: it never carries the password
+            val last = check.stderr.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() }.orEmpty().take(160)
+            throw PrivilegeError(PrivilegeFailure.SUDO_PASSWORD_WRONG, "sudo refused the password" + if (last.isEmpty()) "" else ": $last")
         }
     }
 }
@@ -87,7 +102,7 @@ class RootRunner(private val remote: Remote, private val privilege: Privilege) {
             Privilege.SudoNoPassword ->
                 remote.exec(RemoteCommand.of("sudo", "-n", "/bin/sh", "-s", *args.toTypedArray()), script, deadlineMs)
             is Privilege.SudoPassword -> {
-                val dir = Uploads.privateDir(remote)
+                val dir = Uploads.privateDir(remote, script.size.toLong())
                 try {
                     val path = "$dir/script.sh"
                     Uploads.writeFile(remote, path, script)
@@ -119,13 +134,26 @@ object Uploads {
     private const val DEADLINE = 30_000L
     private val PATH = Regex("/(tmp|var/tmp)/tmp\\.[A-Za-z0-9]+")
 
-    fun privateDir(remote: Remote): String {
-        for (parent in listOf("/tmp", "/var/tmp")) {
+    /**
+     * A fresh private directory, in /tmp unless /tmp lacks room for [needBytes] twice over (plus 1 MiB): a full tmpfs
+     * /tmp (Debian 13's, Fedora's and Arch's default) still lets mktemp make a directory, and only the write would fail.
+     */
+    fun privateDir(remote: Remote, needBytes: Long = 0): String {
+        for (parent in parentsByRoom(remote, needBytes)) {
             val made = remote.exec(RemoteCommand.of("mktemp", "-d", "-p", parent), null, DEADLINE)
-            val path = made.stdoutText.trim()
+            val path = made.answer()
             if (made.exitStatus == 0 && PATH.matches(path)) return path
         }
         throw SshError(SshFailure.OTHER, "mktemp -d failed in /tmp and /var/tmp")
+    }
+
+    private fun parentsByRoom(remote: Remote, needBytes: Long): List<String> {
+        val df = runCatching { remote.exec(RemoteCommand.of("df", "-Pk", "/tmp", "/var/tmp"), null, DEADLINE) }.getOrNull()
+        // df prints its rows in the order asked, after its header (and after anything an rc file printed)
+        val rows = df?.stdoutText?.lines()?.dropWhile { !it.startsWith("Filesystem") }?.drop(1)?.filter { it.isNotBlank() }.orEmpty()
+        val tmpFreeKb = rows.firstOrNull()?.trim()?.split(Regex("\\s+"))?.getOrNull(3)?.toLongOrNull()
+        val needKb = needBytes / 1024 * 2 + 1024
+        return if (tmpFreeKb != null && tmpFreeKb < needKb) listOf("/var/tmp", "/tmp") else listOf("/tmp", "/var/tmp")
     }
 
     /** Writes [bytes] to [path] (inside a privateDir) and checks its sha256 there. A large file: ~10 MB at the link's speed. */
@@ -138,7 +166,7 @@ object Uploads {
             throw SshError(SshFailure.OTHER, "writing $path failed: ${why ?: written.stderr.trim()}")
         }
         val sum = remote.exec(RemoteCommand.of("sha256sum", path), null, DEADLINE)
-        val got = sum.stdoutText.trim().substringBefore(' ')
+        val got = sum.answer().substringBefore(' ')
         val want = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         if (sum.exitStatus != 0 || got != want) {
             throw SshError(SshFailure.OTHER, "$path arrived damaged: sha256 $got, sent $want")

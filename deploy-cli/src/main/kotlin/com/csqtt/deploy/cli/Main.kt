@@ -185,27 +185,42 @@ private fun rootCheck(session: SshSession, p: Properties): Int {
 
 private fun loginKey(session: SshSession, keyFile: File, verb: String): Int {
     val remote = session.asRemote()
+    val pubFile = File(keyFile.path + ".pub")
+    // <target>.loginkey: the private key alone (0600, a key_file a later target can name); <target>.loginkey.pub its public half
+    fun saved(): LoginKey? = if (keyFile.isFile && pubFile.isFile) {
+        LoginKey(keyFile.readText(), pubFile.readText().trim().split(" ").getOrNull(1) ?: error("${pubFile.path} holds no public key"))
+    } else {
+        null
+    }
     if (verb == "add") {
-        val key = LoginKey.generate()
-        // saved first: a key installed and then lost would leave an orphan line on the box. The private key alone in
-        // <target>.loginkey (0600, a key_file a later target can name), its public half in <target>.loginkey.pub
-        save(File(keyFile.path + ".pub"), "${key.type} ${key.publicBlob}\n")
-        save(keyFile, key.privateKey)
-        println("saved ${keyFile.path} (${key.fingerprint})")
+        // a key saved by an earlier add is installed again (PRESENT if it is there): a new key each time would leave the
+        // earlier one's line on the box with nothing left to remove it
+        val key = saved() ?: LoginKey.generate().also { key ->
+            // saved first: a key installed and then lost would leave an orphan line on the box
+            save(pubFile, "${key.type} ${key.publicBlob}\n")
+            save(keyFile, key.privateKey)
+            println("saved ${keyFile.path} (${key.fingerprint})")
+        }
         println("login key ${LoginKeys.install(remote, key)}")
     } else {
-        val blob = File(keyFile.path + ".pub").readText().trim().split(" ").getOrNull(1)
-            ?: error("${keyFile.path}.pub holds no public key")
-        println("login key ${LoginKeys.remove(remote, blob)}")
+        val key = saved() ?: run {
+            println("no saved login key at ${keyFile.path}")
+            return 2
+        }
+        println("login key ${LoginKeys.remove(remote, key.publicBlob)}")
     }
     return 0
 }
 
+/** Written 0600 from the start (never at the umask's mode for a moment), then moved into place. */
 private fun save(file: File, text: String) {
-    val tmp = File(file.path + ".new")
-    tmp.writeText(text)
-    tmp.setReadable(false, false); tmp.setReadable(true, true); tmp.setWritable(false, false); tmp.setWritable(true, true)
-    if (!tmp.renameTo(file)) error("could not save ${file.path}")
+    val tmp = File(file.path + ".new").toPath()
+    java.nio.file.Files.deleteIfExists(tmp)
+    java.nio.file.Files.createFile(tmp, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+        java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")))
+    java.nio.file.Files.writeString(tmp, text)
+    java.nio.file.Files.move(tmp, file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+        java.nio.file.StandardCopyOption.ATOMIC_MOVE)
 }
 
 private fun inspect(session: SshSession, p: Properties, hosts: List<String>): Int {

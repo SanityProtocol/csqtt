@@ -24,6 +24,9 @@ private fun ok(out: String = "") = ExecResult(out.toByteArray(), "", 0)
 private fun fails(status: Int, err: String) = ExecResult(ByteArray(0), err, status)
 private fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
+private val SUDO_N = listOf("env", "LC_ALL=C", "sudo", "-n", "/bin/sh", "-c", "true")
+private val SUDO_S = listOf("env", "LC_ALL=C", "sudo", "-S", "/bin/sh", "-c", "true")
+
 class PrivilegeTest {
     private val password = "s3cret-sudo"
 
@@ -32,8 +35,8 @@ class PrivilegeTest {
     }) = FakeRemote { words, stdin ->
         when (words) {
             listOf("id", "-u") -> ok("$uid\n")
-            listOf("sudo", "-n", "true") -> sudoN
-            listOf("sudo", "-S", "-v") -> sudoV(stdin)
+            SUDO_N -> sudoN
+            SUDO_S -> sudoV(stdin)
             else -> fail("unexpected command $words").let { ok() }
         }
     }
@@ -41,6 +44,29 @@ class PrivilegeTest {
     @Test
     fun rootIsRoot() {
         assertEquals(Privilege.Root, Privilege.detect(box(uid = "0"), null))
+    }
+
+    @Test
+    fun aGreetingRcFileDoesNotHideRoot() {
+        // the zoo's noisy box (Debian 12, 2026-11-24): root's .bashrc echoes before every command, so `id -u` printed the
+        // greeting and then 0, and root was read as a sudo user (on a box without sudo: refused as one with no root at all)
+        val noisy = FakeRemote { words, _ ->
+            if (words == listOf("id", "-u")) ok("zoo-noise: bashrc says hello\n0\n") else fails(127, "sudo: command not found")
+        }
+        assertEquals(Privilege.Root, Privilege.detect(noisy, null))
+        // and an upload's private directory and checksum are read past the same greeting
+        var written: ByteArray? = null
+        val remote = FakeRemote { words, stdin ->
+            when (words.firstOrNull()) {
+                "mktemp" -> ok("hello from .bashrc\n/tmp/tmp.Zx9\n")
+                "dd" -> { written = stdin; ok("hello from .bashrc\n") }
+                "sha256sum" -> ok("hello from .bashrc\n${sha(written!!)}  ${words[1]}\n")
+                else -> ok("hello from .bashrc\n")
+            }
+        }
+        val dir = Uploads.privateDir(remote)
+        assertEquals("/tmp/tmp.Zx9", dir)
+        Uploads.writeFile(remote, "$dir/core", ByteArray(100) { it.toByte() })
     }
 
     @Test
@@ -54,7 +80,7 @@ class PrivilegeTest {
         val privilege = Privilege.detect(remote, password)
         assertTrue(privilege is Privilege.SudoPassword)
         for ((words, _) in remote.calls) assertFalse("the password reached argv: $words", words.any { password in it })
-        assertEquals(1, remote.calls.count { it.first == listOf("sudo", "-S", "-v") })
+        assertEquals(1, remote.calls.count { it.first == SUDO_S })
     }
 
     @Test
@@ -78,6 +104,18 @@ class PrivilegeTest {
             PrivilegeFailure.NOT_IN_SUDOERS,
             kindOf(box(sudoV = { fails(1, "zoo is not in the sudoers file.  This incident will be reported.") }), password),
         )
+        // a login sudo allows some commands only: the probe asks for /bin/sh itself (classic sudo's -v would have passed)
+        assertEquals(
+            PrivilegeFailure.NOT_IN_SUDOERS,
+            kindOf(box(sudoV = { fails(1, "Sorry, user zoo is not allowed to execute '/bin/sh -c true' as root on vps.") }), password),
+        )
+        // a refused password keeps sudo's own last word
+        try {
+            Privilege.detect(box(sudoV = { fails(1, "[sudo] password for zoo: \nsudo: 1 incorrect password attempt") }), "wrong")
+            fail("detected")
+        } catch (error: PrivilegeError) {
+            assertTrue(error.detail, error.detail.endsWith("sudo: 1 incorrect password attempt"))
+        }
     }
 
     @Test
@@ -106,6 +144,7 @@ class PrivilegeTest {
         val words = withPassword.calls.map { it.first }
         assertEquals(
             listOf(
+                listOf("df", "-Pk", "/tmp", "/var/tmp"),
                 listOf("mktemp", "-d", "-p", "/tmp"),
                 listOf("dd", "of=/tmp/tmp.Ab12Cd/script.sh", "bs=65536"),
                 listOf("sha256sum", "/tmp/tmp.Ab12Cd/script.sh"),
@@ -114,7 +153,7 @@ class PrivilegeTest {
             ),
             words,
         )
-        assertArrayEquals("$password\n".toByteArray(), withPassword.calls[3].second)
+        assertArrayEquals("$password\n".toByteArray(), withPassword.calls[4].second)
         assertArrayEquals(script, written)
     }
 
@@ -139,8 +178,24 @@ class PrivilegeTest {
         } catch (error: SshError) {
             assertTrue(error.detail, "damaged" in error.detail)
         }
-        // /tmp refused (a full tmpfs): /var/tmp
+        // /tmp refused: /var/tmp
         val varTmp = FakeRemote { words, _ -> if ("/tmp" in words) fails(1, "mktemp: failed") else ok("/var/tmp/tmp.Qw\n") }
         assertEquals("/var/tmp/tmp.Qw", Uploads.privateDir(varTmp))
+        // a full tmpfs /tmp, where mktemp still works and only the write would fail: /var/tmp first, by df
+        val fullTmp = FakeRemote { words, _ ->
+            when {
+                words.first() == "df" -> ok("Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+                    "tmpfs 2048 2048 0 100% /tmp\n/dev/vda1 20000000 1000000 19000000 5% /\n")
+                words == listOf("mktemp", "-d", "-p", "/var/tmp") -> ok("/var/tmp/tmp.Vt\n")
+                else -> ok("/tmp/tmp.Full\n")
+            }
+        }
+        assertEquals("/var/tmp/tmp.Vt", Uploads.privateDir(fullTmp, 20_000))
+        // and /tmp with room keeps the first place
+        val roomy = FakeRemote { words, _ ->
+            if (words.first() == "df") ok("Filesystem 1024-blocks Used Available Capacity Mounted on\ntmpfs 2048000 0 2048000 0% /tmp\n/dev/vda1 1 1 0 100% /\n")
+            else ok(if ("/tmp" in words) "/tmp/tmp.Ok\n" else "/var/tmp/tmp.No\n")
+        }
+        assertEquals("/tmp/tmp.Ok", Uploads.privateDir(roomy, 20_000))
     }
 }

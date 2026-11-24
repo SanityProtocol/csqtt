@@ -5,6 +5,10 @@ package com.csqtt.deploy.ssh
 import com.csqtt.deploy.bundle.Bundle
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assume
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -59,12 +63,49 @@ class LoginKeyTest {
     }
 
     @Test
-    fun whatTheScriptCreatesGetsStrictModes() {
+    fun whatTheScriptCreatesGetsStrictModesAndGoesWithOurKey() {
         val key = LoginKey.generate()
         assertEquals(LoginKeyState.ADDED, LoginKeys.install(box, key))
         val ssh = File(home, ".ssh")
         assertEquals("700", mode(ssh))
         assertEquals("600", mode(File(ssh, "authorized_keys")))
+        // the zoo's Ubuntu 26.04 cell: a login with no keys before has none after, not an empty file
+        assertEquals(LoginKeyState.REMOVED, LoginKeys.remove(box, key.publicBlob))
+        assertFalse(File(ssh, "authorized_keys").exists())
+        assertFalse(ssh.exists())
+    }
+
+    @Test
+    fun aKeyThatCannotBeWrittenOrRemovedFailsClosed() {
+        val ssh = File(home, ".ssh").apply { mkdirs() }
+        val keys = File(ssh, "authorized_keys").apply { writeText("ssh-rsa AAAAtheirs admin@laptop\n") }
+        val key = LoginKey.generate()
+        // review F3: an append that fails (a root-owned or immutable file) is an error, never "added"
+        keys.setWritable(false)
+        Assume.assumeFalse("running as root: permissions do not bind", keys.canWrite())
+        try {
+            LoginKeys.install(box, key)
+            fail("installed into a read-only file")
+        } catch (error: SshError) {
+            assertTrue(error.detail, "cannot write" in error.detail)
+        }
+        assertEquals(listOf("ssh-rsa AAAAtheirs admin@laptop"), keys.readLines())
+        keys.setWritable(true)
+        assertEquals(LoginKeyState.ADDED, LoginKeys.install(box, key))
+        // review F1: a directory no new file can be made in stands in for a full disk; the removal says so and the
+        // user's other keys stay (a full tmpfs was reproduced by hand under dash and BusyBox: 43 lines kept)
+        ssh.setWritable(false)
+        try {
+            LoginKeys.remove(box, key.publicBlob)
+            fail("removed")
+        } catch (error: SshError) {
+            assertTrue(error.detail, "unchanged" in error.detail)
+        } finally {
+            ssh.setWritable(true)
+        }
+        assertEquals(2, keys.readLines().size)
+        assertEquals(LoginKeyState.REMOVED, LoginKeys.remove(box, key.publicBlob))
+        assertEquals(listOf("ssh-rsa AAAAtheirs admin@laptop"), keys.readLines())
     }
 
     @Test
