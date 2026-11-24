@@ -432,7 +432,8 @@ $HOST_TUNING"
 		# the server's own tuning (in Docker its container cannot write /proc/sys): set as the server would, not raised
 		*.rp_filter | *.default_qdisc | *.tcp_congestion_control | *.tcp_sack | *.tcp_dsack | *.tcp_reordering | \
 			*.tcp_window_scaling | *.tcp_fastopen | *.tcp_slow_start_after_idle)
-			[ "$hs_now" != "$hs_floor" ] || continue
+			# (kept even where the box has it already: a running systemd instance's server may have set it, and may go before
+			# a reboot: P2 B13a verify)
 			hs_set=$hs_floor
 			;;
 		*)
@@ -505,6 +506,13 @@ host_firewall() {
 host_undo() {
 	hu_list=$(printf '%s\n' "$MF_HOST" | awk 'NF {l[++n] = $0} END {for (i = n; i > 0; i--) print l[i]}')
 	hu_reload=0
+	# Docker started or enabled by this run stays so while another instance of ours relies on it (this run's own container is
+	# gone by now): decided once, before anything is stopped, by our containers alone (old ones of others' revived by our start
+	# do not count; a docker call after the stop would start it again through its socket: P2 B13a verify N1)
+	hu_docker_kept=0
+	if printf '%s\n' "$hu_list" | grep -q '^service-'; then
+		[ -z "$(docker ps -aq --filter name=^sanity-csqtt- 2>/dev/null)" ] || hu_docker_kept=1
+	fi
 	while read -r hu_kind hu_rest; do
 		hu_key='' hu_was='' hu_rule='' hu_zone='' hu_port='' hu_policy='' hu_redir='' hu_unit=''
 		for hu_kv in $hu_rest; do
@@ -527,10 +535,10 @@ host_undo() {
 		firewalld-policy) firewall-cmd -q --permanent --delete-policy="$hu_policy" 2>/dev/null ;;
 		# this run reloaded: its permanent changes went live, so taking them back needs a reload too (B9 review F5)
 		firewalld-reload) hu_reload=1 ;;
-		# Docker enabled at boot or started by this run (P2 B13a): back as it was, unless a container (anyone's: another
-		# instance of ours made since) now relies on it (review F3)
-		service-enabled) [ -n "$(docker ps -aq 2>/dev/null)" ] || systemctl disable "$hu_unit" >/dev/null 2>&1 ;;
-		service-started) [ -n "$(docker ps -aq 2>/dev/null)" ] || systemctl stop "$hu_unit" >/dev/null 2>&1 ;;
+		# Docker enabled at boot or started by this run (P2 B13a): back as it was, unless another instance of ours made since
+		# relies on it (review F3, verify N1)
+		service-enabled) [ $hu_docker_kept = 1 ] || systemctl disable "$hu_unit" >/dev/null 2>&1 ;;
+		service-started) [ $hu_docker_kept = 1 ] || systemctl stop "$hu_unit" >/dev/null 2>&1 ;;
 		esac
 	done <<EOF
 $hu_list
@@ -1610,8 +1618,11 @@ action_restore() {
 	for rs_u in /etc/systemd/system/sanity-csqtt-*.service /var/lib/sanityprotocol/csqtt/*/docker; do
 		# (an instance of ours in Docker, or a kept store of one, by its docker file: P2 B13a)
 		[ "$rs_u" != "$in_state/docker" ] || continue
-		[ -f "$rs_u" ] && sed -n 's/^ExecStart=//p' "$rs_u" | grep -qE -- "--instance-slot $rs_slot( |\$)" &&
-			run_result failed-cleaned "slot $rs_slot is ${rs_u##*/}'s now" "remove the kept store, or that instance"
+		if [ -f "$rs_u" ] && sed -n 's/^ExecStart=//p' "$rs_u" | grep -qE -- "--instance-slot $rs_slot( |\$)"; then
+			rs_who=${rs_u##*/}
+			[ "$rs_who" != docker ] || rs_who=sanity-csqtt-$(basename "${rs_u%/docker}")
+			run_result failed-cleaned "slot $rs_slot is $rs_who's now" "remove the kept store, or that instance"
+		fi
 	done
 	cr_id=$rs_id cr_state=$in_state cr_unit=$in_unit cr_iface=$rs_iface
 	cr_open="$rs_udp/udp"

@@ -93,6 +93,8 @@ object DockerMode {
             if (docker["active"] != "active") "Запустит Docker (а с ним контейнеры, которым положено работать)" else null,
             if (docker["enabled"] != "enabled") "Включит запуск Docker при загрузке, иначе после перезагрузки сервер не поднимется" else null,
             "Соберёт образ sanity-csqtt из нашего ядра и закреплённой файловой системы Alpine, без скачивания из реестра",
+            // (in Docker the server cannot set them itself: the run sets and keeps them, as its server would in systemd mode)
+            "Закрепит в /etc/sysctl.d/99-sanity-csqtt.conf настройки сети, которые сервер задаёт сам вне Docker: BBR, fq, мягкий rp_filter",
         )
     }
 }

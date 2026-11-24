@@ -183,12 +183,15 @@ class DockerTest {
     }
 
     @Test
-    fun dockerIsLeftAsItIsWhileAContainerReliesOnIt() {
-        // B13a review F3: Docker's start or enable is undone only while no container (anyone's) is there
+    fun dockerIsLeftAsItIsWhileAnotherInstanceOfOursReliesOnIt() {
+        // B13a review F3 and its verify's N1: decided once, before anything is stopped, by our own containers alone (old ones
+        // of others' revived by our start do not count; no docker call after the stop, which its socket would answer by
+        // starting Docker again)
         val undo = body("host_undo")
-        for (kind in listOf("service-enabled", "service-started")) {
-            assertTrue(kind, "$kind) [ -n \"\$(docker ps -aq 2>/dev/null)\" ] ||" in undo)
-        }
+        val decide = undo.indexOf("[ -z \"\$(docker ps -aq --filter name=^sanity-csqtt- 2>/dev/null)\" ] || hu_docker_kept=1")
+        assertTrue(undo, decide in 0 until undo.indexOf("while read -r hu_kind hu_rest"))
+        for (kind in listOf("service-enabled", "service-started")) assertTrue(kind, "$kind) [ \$hu_docker_kept = 1 ] ||" in undo)
+        assertEquals(1, Regex("docker ps").findAll(undo).count())
     }
 
     @Test
@@ -225,6 +228,9 @@ class DockerTest {
         val tuning = runSh.substringAfter("HOST_TUNING='").substringBefore("'").lines().map { it.substringBefore(' ') to it.substringAfter(' ') }
         assertEquals(server.filter { it.first != "net.ipv4.ip_forward" }.toSet(), tuning.toSet())
         assertTrue("if [ \$cr_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi" in body("action_create"))
+        // kept even where the box has it already (a systemd instance's server may have set it at runtime, and go: B13a verify)
+        val tuningCase = body("host_sysctl").substringAfter("*.tcp_window_scaling | *.tcp_fastopen | *.tcp_slow_start_after_idle)").substringBefore(";;")
+        assertFalse(tuningCase, "continue" in tuningCase)
         // and a restore into Docker (B13c), as its create's
         assertTrue("if [ \$rs_docker = 1 ]; then host_sysctl tuning; else host_sysctl; fi" in body("action_restore"))
     }

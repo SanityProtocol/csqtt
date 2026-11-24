@@ -465,7 +465,8 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
     // Docker mode (P2 B13a): the inspection also checks the box reaches where the root filesystem is published (C3)
     val docker = edits["mode"] == "docker"
-    val reach = if (docker) listOf(com.csqtt.deploy.run.Rootfs.HOST) else emptyList()
+    // («Продолжить» too: a create cut during its download has no image yet, and its kept plan says Docker only later: B13a verify)
+    val reach = if (docker || "resume" in edits) listOf(com.csqtt.deploy.run.Rootfs.HOST) else emptyList()
     val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), reach, deadlineMs = 60_000)
     val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
     val preflight = Preflight.from(report.lines)
