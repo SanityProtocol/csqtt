@@ -80,6 +80,12 @@ class RepairTest {
         }
         assertTrue(stopped.any { "|active=inactive|sub=dead|" in it })
         assertFalse(Classifier.classify(inventory(stopped + dropIn)).problems.any { it.code == "S1" })
+        // MRTT's beta under the stock unit name, stopped, alike: the run keeps the drop-in for its unit file (B11c verify N1)
+        val beta = stopped.map { if (it.startsWith("CSQTT_INV|store|dir=/etc/csqtt|")) it.replace("|schema=", "|schema=devices_json,") else it }
+        Classifier.classify(inventory(beta + dropIn)).let { c ->
+            assertEquals(com.csqtt.deploy.inspect.Owner.MRTT_BETA, c.installations.single().owner)
+            assertFalse(c.problems.any { it.code == "S1" })
+        }
         // the run keeps it alike: by the stock unit files, as by ours
         val keep = script.substringAfter("host_dropin_drop() {").substringBefore("\n}\n")
         assertTrue("/etc/systemd/system/csqtt.service /etc/systemd/system/csqtt25.service" in keep)
@@ -98,6 +104,9 @@ class RepairTest {
         // its «Будет» is the rebuild's, never an update's (B11c review F1), whatever the build
         val will = com.csqtt.deploy.plan.Proposer.offerPlan(entry, entry.offers.first(), c, inv, Version(2, 6, 0)).will
         assertTrue(will.first(), will.first().startsWith("${entry.installation.name}: его манифест будет собран заново") && will.none { "сборка" in it })
+        // and its removal says what a lost manifest cannot find (B11c verify)
+        val remove = com.csqtt.deploy.plan.Proposer.offerPlan(entry, entry.offers.last(), c, inv, Version(2, 6, 0)).will
+        assertTrue(remove.joinToString(), remove.last().startsWith("Порт, который он открыл в общей зоне firewalld"))
         // its removal finds the openings by their names as the rebuild does (B11c review F2)
         val takeDown = script.substringAfter("inst_take_down() {").substringBefore("\n}\n")
         assertTrue(takeDown, "inst_found_host \"$1\"" in takeDown)

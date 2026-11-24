@@ -152,7 +152,10 @@ object Proposer {
             } else listOf("${install.name} переедет в наш формат как ${proposal?.instance}: клиенты, пароли, панель и порты сохранятся, " +
                 "старая установка будет удалена после проверки")
             Action.UPDATE_FROM_21 -> listOf("${install.name} переедет на $carried как ${proposal?.instance}: клиенты 2.1 перестанут подключаться")
-            Action.REMOVE -> listOf("${install.name} будет удалён" + (db?.let { "; база $it останется" + if (install.owner == Owner.OURS) " — «Восстановить» вернёт клиентов" else "" } ?: ""))
+            Action.REMOVE -> listOf("${install.name} будет удалён" + (db?.let { "; база $it останется" + if (install.owner == Owner.OURS) " — «Восстановить» вернёт клиентов" else "" } ?: "")) +
+                // its manifest lost: its openings are found by their names, a firewalld default-zone port cannot be (B11c verify)
+                if (Manager.manifestLost(install)) listOf("Порт, который он открыл в общей зоне firewalld (если такой есть), не отличить " +
+                    "от открытого раньше: он останется открытым") else emptyList()
             Action.REMOVE_WITH_STORE, Action.REINSTALL_CLEAN, Action.REMOVE_LEFTOVERS -> listOf("${install.name} будет удалён" +
                 if (install.stores.isNotEmpty()) " вместе с клиентами и настройками" else "") +
                 if (offer.action == Action.REINSTALL_CLEAN) listOf("на его месте — новый, пустой") else emptyList()
