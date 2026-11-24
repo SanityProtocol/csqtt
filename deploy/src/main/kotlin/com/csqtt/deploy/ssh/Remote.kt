@@ -148,7 +148,8 @@ object Uploads {
     }
 
     private fun parentsByRoom(remote: Remote, needBytes: Long): List<String> {
-        val df = runCatching { remote.exec(RemoteCommand.of("df", "-Pk", "/tmp", "/var/tmp"), null, DEADLINE) }.getOrNull()
+        // in the C locale: df translates its -P header too («Файловая система»), which would hide the rows (verify of F4)
+        val df = runCatching { remote.exec(RemoteCommand.of("env", "LC_ALL=C", "df", "-Pk", "/tmp", "/var/tmp"), null, DEADLINE) }.getOrNull()
         // df prints its rows in the order asked, after its header (and after anything an rc file printed)
         val rows = df?.stdoutText?.lines()?.dropWhile { !it.startsWith("Filesystem") }?.drop(1)?.filter { it.isNotBlank() }.orEmpty()
         val tmpFreeKb = rows.firstOrNull()?.trim()?.split(Regex("\\s+"))?.getOrNull(3)?.toLongOrNull()

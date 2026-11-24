@@ -144,7 +144,7 @@ class PrivilegeTest {
         val words = withPassword.calls.map { it.first }
         assertEquals(
             listOf(
-                listOf("df", "-Pk", "/tmp", "/var/tmp"),
+                listOf("env", "LC_ALL=C", "df", "-Pk", "/tmp", "/var/tmp"),
                 listOf("mktemp", "-d", "-p", "/tmp"),
                 listOf("dd", "of=/tmp/tmp.Ab12Cd/script.sh", "bs=65536"),
                 listOf("sha256sum", "/tmp/tmp.Ab12Cd/script.sh"),
@@ -184,7 +184,8 @@ class PrivilegeTest {
         // a full tmpfs /tmp, where mktemp still works and only the write would fail: /var/tmp first, by df
         val fullTmp = FakeRemote { words, _ ->
             when {
-                words.first() == "df" -> ok("Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+                // df asked in the C locale: a translated header would hide its rows
+                words.take(3) == listOf("env", "LC_ALL=C", "df") -> ok("Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
                     "tmpfs 2048 2048 0 100% /tmp\n/dev/vda1 20000000 1000000 19000000 5% /\n")
                 words == listOf("mktemp", "-d", "-p", "/var/tmp") -> ok("/var/tmp/tmp.Vt\n")
                 else -> ok("/tmp/tmp.Full\n")
@@ -193,7 +194,7 @@ class PrivilegeTest {
         assertEquals("/var/tmp/tmp.Vt", Uploads.privateDir(fullTmp, 20_000))
         // and /tmp with room keeps the first place
         val roomy = FakeRemote { words, _ ->
-            if (words.first() == "df") ok("Filesystem 1024-blocks Used Available Capacity Mounted on\ntmpfs 2048000 0 2048000 0% /tmp\n/dev/vda1 1 1 0 100% /\n")
+            if (words.take(3) == listOf("env", "LC_ALL=C", "df")) ok("Filesystem 1024-blocks Used Available Capacity Mounted on\ntmpfs 2048000 0 2048000 0% /tmp\n/dev/vda1 1 1 0 100% /\n")
             else ok(if ("/tmp" in words) "/tmp/tmp.Ok\n" else "/var/tmp/tmp.No\n")
         }
         assertEquals("/tmp/tmp.Ok", Uploads.privateDir(roomy, 20_000))
