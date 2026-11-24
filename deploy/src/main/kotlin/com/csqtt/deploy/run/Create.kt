@@ -76,7 +76,8 @@ object CreateRun {
     }
 
     /** The run «Создать новый» starts: the proposal's facts in the plan, the passwords and the panel's path in its secrets. */
-    fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials, resume: Boolean = false): RunPlan = RunPlan(
+    /** [resumeOf]: the run a reboot or a kill cut off, which this one continues («Продолжить»): only what it left is undone. */
+    fun plan(p: Proposal, publicIp: String, core: Core, credentials: Credentials, resumeOf: String? = null): RunPlan = RunPlan(
         action = "create",
         values = linkedMapOf(
             "id" to p.id, "iface" to p.iface, "subnet" to p.subnet, "udp" to p.udpPort.toString(), "web" to p.webPort.toString(),
@@ -84,7 +85,7 @@ object CreateRun {
             "public_ip" to publicIp, "web_user" to credentials.webUser,
             // what the run re-checks before it makes anything (§1.4): still free, or it fails cleaned
             "ports" to "${p.udpPort} ${p.webPort}",
-        ) + if (resume) mapOf("resume" to "1") else emptyMap(),
+        ) + if (resumeOf != null) mapOf("resume" to "1", "resume_of" to resumeOf) else emptyMap(),
         secrets = linkedMapOf("main_password" to credentials.mainPassword, "web_pass" to credentials.webPass,
             "secret_path" to credentials.secretPath),
         core = core.bytes,

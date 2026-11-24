@@ -273,7 +273,8 @@ action_selftest() {
 # four fields: schema, the instance id, the objects (kind and path, in the order made), the host changes (B9's).
 mf_write() {
 	{
-		printf '{"schema":1,"id":"%s","objects":[' "$MF_ID"
+		# run: the run that made the instance; a continuation may undo only what that run, cut off, left (B8 verify F8)
+		printf '{"schema":1,"id":"%s","run":"%s","objects":[' "$MF_ID" "$RUN_ID"
 		mf_sep=
 		while read -r mf_kind mf_path; do
 			[ -n "$mf_kind" ] || continue
@@ -575,7 +576,12 @@ action_create() {
 	# undoing this run can remove only what it made
 	run_phase stage 10
 	if [ -e "$cr_state" ] || [ -e "$cr_root" ] || [ -e "/etc/systemd/system/$cr_unit" ]; then
-		if [ "$(plan resume)" = 1 ] && grep -qs "\"id\":\"$cr_id\"" "$cr_state/manifest.json"; then
+		# «Продолжить» undoes only what the run it continues made and left with no result: never a finished instance (whose
+		# store holds its clients), never one a later run made (B8 verify F8)
+		cr_of=$(plan resume_of)
+		cr_made_by=$(sed -n 's/.*"run":"\([^"]*\)".*/\1/p' "$cr_state/manifest.json" 2>/dev/null)
+		if [ "$(plan resume)" = 1 ] && [ -n "$cr_of" ] && [ "$cr_made_by" = "$cr_of" ] && [ -f "$RUNS/$cr_of/log" ] &&
+			[ ! -s "$RUNS/$cr_of/result" ] && ! grep -q '^CSQTT_RESULT|' "$RUNS/$cr_of/log"; then
 			# «Продолжить» (B8 review F1): an earlier run of this plan was cut off; what its manifest names goes (its server
 			# stopped, its rules with it), and the create runs again from the start with this run's credentials
 			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
@@ -585,6 +591,9 @@ action_create() {
 			cr_server_undo
 			host_undo
 			MF_OBJECTS='' MF_HOST=''
+		elif [ "$(plan resume)" = 1 ]; then
+			run_result failed-cleaned "sqc-$cr_id is not what run ${cr_of:-?} left: it was finished or made again since (run ${cr_made_by:-?})" \
+				"check again; to use it, «Подключиться»"
 		else
 			run_result failed-cleaned "sqc-$cr_id exists already: an earlier run of this plan was cut off" \
 				"continue it («Продолжить»), or check again"

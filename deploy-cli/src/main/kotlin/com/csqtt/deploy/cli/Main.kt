@@ -443,10 +443,16 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
     val resumeOf = edits["resume"]
     if (resumeOf != null) {
         // «Продолжить»: the cut-off run's own plan again, new credentials, and run.sh undoes what that run left first
+        // only a create the box lists as cut off (no result, no live unit): a finished one is used by «Подключиться», never
+        // made again over its clients (B8 verify F8)
+        if (runner.status().none { it.id == resumeOf && it.interrupted && it.action == "create" }) {
+            println("run $resumeOf is not a create the box lists as cut off: nothing to continue")
+            return 2
+        }
         val proposal = runner.keptPlan(resumeOf)?.let { proposalOfKeptPlan(it) }
             ?: return 2.also { println("no create plan kept for run $resumeOf on the box") }
         println("will: «Продолжить» ${proposal.instance} from run $resumeOf: what it left goes, the create runs again")
-        return runCreate(remote, root, runner, target, proposal, preflight, core, p, resume = true)
+        return runCreate(remote, root, runner, target, proposal, preflight, core, p, resumeOf = resumeOf)
     }
     val proposed = try {
         Proposer.propose(classification, inventory)
@@ -471,14 +477,14 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
     val plan = Proposer.createPlan(proposal, classification)
     (plan.will + CreateRun.hostChanges(preflight, proposal)).forEach { println("will: $it") }
     plan.unchanged.forEach { println("unchanged: $it") }
-    return runCreate(remote, root, runner, target, proposal, preflight, core, p, resume = false)
+    return runCreate(remote, root, runner, target, proposal, preflight, core, p, resumeOf = null)
 }
 
 private fun runCreate(remote: com.csqtt.deploy.ssh.Remote, root: RootRunner, runner: Runner, target: File,
-    proposal: com.csqtt.deploy.plan.Proposal, preflight: Preflight, core: Core, p: Properties, resume: Boolean): Int {
+    proposal: com.csqtt.deploy.plan.Proposal, preflight: Preflight, core: Core, p: Properties, resumeOf: String?): Int {
     val credentials = Credentials.generate()
     val sshHost = p.prop("host").orEmpty()
-    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials, resume)
+    val runPlan = CreateRun.plan(proposal, CreateRun.publicAddress(preflight, sshHost), core, credentials, resumeOf)
     val coordinator = coordinator(target)
     val runId = Runner.newRunId()
     val before = coordinator.state

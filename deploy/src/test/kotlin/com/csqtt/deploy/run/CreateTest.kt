@@ -80,7 +80,7 @@ class CreateTest {
         val create = script.substringAfter("action_create() {").substringBefore("\n}\n")
         val used = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(create).map { it.groupValues[1] }.toSet()
         // (resume only on a continuation: «Продолжить», B8 review F1)
-        for (key in used - "resume") assertTrue("create reads $key", "\n$key=" in "\n$plan")
+        for (key in used - setOf("resume", "resume_of")) assertTrue("create reads $key", "\n$key=" in "\n$plan")
     }
 
     @Test
@@ -214,8 +214,8 @@ class CreateTest {
         val kept = CreateRun.plan(proposal.copy(webBind = "127.0.0.1"), "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate()).planText()
         assertEquals(proposal.copy(webBind = "127.0.0.1"), proposalOfKeptPlan(kept))
         assertEquals(null, proposalOfKeptPlan("action=selftest\nsteps=2\n"))
-        val again = CreateRun.plan(proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate(), resume = true).planText()
-        assertTrue("\nresume=1\n" in "\n$again")
+        val again = CreateRun.plan(proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate(), resumeOf = "20261124084322-26af").planText()
+        assertTrue("\nresume=1\n" in "\n$again" && "\nresume_of=20261124084322-26af\n" in "\n$again")
     }
 
     @Test
