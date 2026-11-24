@@ -74,9 +74,10 @@ class CreateTest {
         val recheck = script.substringAfter("run_recheck() {").substringBefore("\n}\n")
         val read = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(recheck).map { it.groupValues[1] }.toSet()
         // (action and id: an update cut off before holds the binary its plan expects, B10 review F2; core_sha: an update that
-        // landed before a cut finds its own target, B10 verify of round 2, L1; own_ports: a move's, B12)
+        // landed before a cut finds its own target, B10 verify of round 2, L1; own_ports: a move's, B12; move_role: a move cut
+        // off after its marker is settled first, B12 review F2)
         assertEquals(setOf("ports", "subnet", "iface", "resume", "expect_unit", "expect_sha", "expect_bin", "action", "id", "core_sha",
-            "own_ports"), read)
+            "own_ports", "move_role"), read)
         val plan = CreateRun.plan(proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate()).planText()
         for (key in listOf("ports", "subnet", "iface", "action")) assertTrue(key, "\n$key=" in "\n$plan")
         // and the create action reads only keys the plan has
@@ -86,6 +87,29 @@ class CreateTest {
         for (key in used - setOf("resume", "resume_of", "move_role", "move_unit", "move_store")) {
             assertTrue("create reads $key", "\n$key=" in "\n$plan")
         }
+    }
+
+    @Test
+    fun aMovedInstanceIsReadAndUndoneAsItsRulesSay() {
+        val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        fun body(f: String) = script.substringAfter("$f() {").substringBefore("\n}\n")
+        // B12 review F1: a moved instance's env carries the stock app's quoted lines, so every reader unquotes (one reader)
+        assertFalse(Regex("sed -n '?\"?s/\\^CSQTT_").containsMatchIn(script))
+        assertTrue("env_unquote" in script.substringAfter("inst_env() {").substringBefore("\n"))
+        for (f in listOf("action_update", "action_restore", "cmd_readback")) assertTrue(f, "inst_env " in body(f))
+        // F2: a move cut off after its marker is settled before the stock unit and binary are re-checked
+        val recheck = body("run_recheck")
+        assertTrue(recheck.indexOf("/moved\" ]; then") in 0 until recheck.indexOf("rr_unit is gone"))
+        // F3: a rolled-back move takes its marker before anything else; F4: the stock server starts again only if it ran
+        val create = body("action_create")
+        val cleanup = create.substringAfter("action_cleanup() {").substringBefore("\n\t}\n")
+        assertTrue(cleanup, cleanup.indexOf("rm -f \"\$cr_state/moved\"") in 0 until cleanup.indexOf("mf_undo"))
+        assertTrue(cleanup, "[ \$cr_mv_ran = 1 ]" in cleanup)
+        assertTrue(create.indexOf("stock-ran") in 0 until create.indexOf("systemctl stop \"\$cr_mv_unit\""))
+        assertTrue("[ \$cr_mv_ran = 0 ] || run_cmd systemctl start" in body("mv_settle"))
+        // F5: the stock store a move leaves is marked as moved, and inspect says so
+        assertTrue(".sanity-moved" in body("mv_finish"))
+        assertTrue("\"moved=\$is_moved\"" in com.csqtt.deploy.bundle.Bundle.bytes("inspect.sh").toString(Charsets.UTF_8))
     }
 
     @Test

@@ -630,8 +630,11 @@ inv_stores() {
 		# review F3: the listing says where the data stays)
 		is_link=''
 		[ ! -L "$is_d" ] || is_link=$(readlink "$is_d" 2>/dev/null)
+		# a stock store a move of ours left behind: the instance it went to (B12 review F5)
+		is_moved=''
+		[ ! -f "$is_d/.sanity-moved" ] || is_moved=$(head -n 1 "$is_d/.sanity-moved" | tr -cd 'a-z0-9-')
 		csqtt_emit INV store "dir=$is_d" "files=$is_files" "lock=$is_lock" "schema=${is_schema%,}" "env_keys=${is_keys%,}" \
-			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel" "link=$is_link"
+			"public_ip=$is_ip" "domain=$is_domain" "kept_flags=$is_kflags" "kept_release=$is_krel" "link=$is_link" "moved=$is_moved"
 	done
 }
 

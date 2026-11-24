@@ -778,14 +778,17 @@ private fun move(session: SshSession, p: Properties, target: File, name: String,
             return 2.also { println("refused: ${refused.reason}") }
         }
         val proposal = offered.proposal ?: return 2.also { println("$name is not a stock install to move") }
+        val preflight = Preflight.from(report.lines)
         plan = com.csqtt.deploy.run.MoveRun.plan(install, classification, inventory, proposal,
-            CreateRun.publicAddress(Preflight.from(report.lines), p.prop("host").orEmpty()), core, Credentials.generate())
+            CreateRun.publicAddress(preflight, p.prop("host").orEmpty()), core, Credentials.generate())
             ?: return 2.also { println("$name is not a stock systemd install to move") }
         id = proposal.id
         println("will: $name moves into ${proposal.instance}: ${proposal.iface} ${proposal.subnet} udp=${proposal.udpPort} " +
             "web=${proposal.webPort} slot=${proposal.slot}")
         offer.warning?.let { println("warning: $it") }
-        offered.will.forEach { println("will: $it") }
+        // a move prepares the host as a create does: its changes said as create says them (B12 review F6: a firewalld reload
+        // drops runtime rules, fail2ban's bans among them)
+        (offered.will + CreateRun.hostChanges(preflight, proposal)).forEach { println("will: $it") }
         com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inventory, purge = false)?.will?.forEach { println("will then: $it") }
     }
     val sshHost = p.prop("host").orEmpty()

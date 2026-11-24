@@ -355,4 +355,26 @@ class ManagerTest {
             "CSQTT_INV|proc|pid=99|exe=/usr/sbin/nginx|deleted=0|comm=nginx|unit=nginx.service|ctr=|tun=|sha=|flags=")
         assertEquals(Manager.Held("TCP 46002", "nginx"), Manager.heldBy(w.installations.single { it.name == "csqtt.service" }, w, winv))
     }
+
+    @Test
+    fun aStockStoreAMoveLeftIsRemovedNeverMovedAgain() {
+        // B12 review F5: after a move, the stock store stays (DE-T3), marked; its B5/B6 would otherwise offer a second move
+        val body = checkNotNull(Classifier::class.java.getResource("fixtures/v253main-systemd-noble+B5.report")).readText().lines()
+            .filter { it.startsWith("CSQTT_INV|") || it.startsWith("CSQTT_PRE|") }
+        fun report(lines: List<String>) = lines.joinToString("\n") + "\nCSQTT_END|${lines.size}\n"
+        val marked = { l: String -> if (l.startsWith("CSQTT_INV|store|dir=/etc/csqtt|")) "$l|moved=sqc-0a1b2c" else l }
+        val left = report(body.filterNot { it.startsWith("CSQTT_INV|unit|") || it.startsWith("CSQTT_INV|proc|") }.map(marked))
+        val inv = inventory(left)
+        val entry = Manager.entries(Classifier.classify(inv), carried, inv).single { it.installation.stores.any { s -> s.dir == "/etc/csqtt" } }
+        assertEquals(listOf(Action.REMOVE_LEFTOVERS), entry.offers.map { it.action })
+        assertEquals("Перенесена в sqc-0a1b2c: здесь осталась её прежняя база", entry.note)
+        // without the mark, the same leftover is offered the move (what F5 found)
+        val unmarked = inventory(left.replace("|moved=sqc-0a1b2c", ""))
+        assertTrue(Manager.entries(Classifier.classify(unmarked), carried, unmarked).single { it.installation.stores.any { s -> s.dir == "/etc/csqtt" } }
+            .offers.any { it.action == Action.REPAIR || it.action == Action.UPDATE })
+        // a stock server installed on it again (an old app run again) is an install, whatever the mark
+        val again = inventory(report(body.map(marked)))
+        assertFalse(Manager.entries(Classifier.classify(again), carried, again).single { it.installation.stores.any { s -> s.dir == "/etc/csqtt" } }
+            .offers.map { it.action } == listOf(Action.REMOVE_LEFTOVERS))
+    }
 }

@@ -240,6 +240,14 @@ object Manager {
     private fun stock(install: Installation, compatibility: Compatibility, classification: Classification, inv: Inventory): Entry {
         heldBy(install, classification, inv)?.let { return held(install, compatibility, it) }
         val confirm = "удалить ${install.name}"
+        // the store a move of ours left behind (no unit of its own since): its leftovers are removed, never moved a second time
+        // onto that instance's ports (B12 review F5); a stock server installed on it again (an old app run again) is an install
+        if (install.units.isEmpty() && install.containers.isEmpty()) {
+            install.stores.firstOrNull { it.movedTo.isNotEmpty() }?.let { moved ->
+                return Entry(install, compatibility, listOf(Offer(Action.REMOVE_LEFTOVERS, recommended = true, confirm = confirm)),
+                    "Перенесена в ${moved.movedTo}: здесь осталась её прежняя база")
+            }
+        }
         val database = hasDatabase(install)
         // a leftover with nothing to repair is removed, its every object listed and typed (§1.3); B2's binary with no unit is
         // an install cut off, and gets the move (B6 review F2)
