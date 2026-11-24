@@ -62,5 +62,5 @@ CSQTT_INV|file|path=/opt/csqtt-certbot|type=d
 CSQTT_INV|file|path=/var/log/csqtt-install.log|type=f|runs=1|last_run==== CSQTT Installer v2.5.3 — Tue Nov 24 06:15:15 UTC 2026 ===|last_line=[✓] Общее время deploy.sh: 41с|finished=1|failed_steps=0
 CSQTT_INV|file|path=/etc/systemd/system/csqtt.service|type=f
 CSQTT_INV|file|path=/run/csqtt|type=d
-CSQTT_INV|exe|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|path=/usr/local/bin/csqtt|size=11275784|label=v2.5.3|caption=1|startup=2.5.3 (SanityProtocol build of amurcanov 2.5.0) Tunnel|swg=1|mrtt=0
+CSQTT_INV|exe|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|path=/usr/local/bin/csqtt|size=11275784|label=v2.5.3|caption=1|startup=2.5.3 (SanityProtocol build of amurcanov 2.5.0)|swg=1|mrtt=0
 CSQTT_END|65

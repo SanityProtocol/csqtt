@@ -44,9 +44,12 @@ class ServerFlags(val values: Map<String, String?>) {
 data class Proc(val pid: Int, val exe: String, val deleted: Boolean, val comm: String, val unit: String, val container: String,
     val tuns: List<String>, val sha: String, val flags: ServerFlags)
 
-/** One distinct binary, by its sha256, with the strings that name its build (server-footprints.md §2). */
+/**
+ * One distinct binary, by its sha256, with the strings that name its build (server-footprints.md §2). [path] is the first
+ * place it was seen ([inContainer]: inside a container's image); [Inventory.bins] has every host path.
+ */
 data class Exe(val sha: String, val path: String, val size: Long?, val label: String, val caption: Boolean, val startup: String,
-    val swgFlags: Boolean, val mrtt: Boolean)
+    val swgFlags: Boolean, val mrtt: Boolean, val inContainer: Boolean = false)
 
 data class UnitView(val id: String, val load: String, val active: String, val sub: String, val result: String, val mainStatus: Int?,
     val restarts: Int?, val mainPid: Int?, val fileState: String, val fragment: String, val exec: String, val execPresent: Boolean?,
@@ -82,6 +85,8 @@ data class FileView(val path: String, val type: String, val facts: Facts)
 class Inventory(
     val procs: List<Proc>,
     val exes: Map<String, Exe>,
+    /** Every host path a family binary was found at, to its sha256 (B4 review F2): two installs sharing a build find it each. */
+    val bins: Map<String, String>,
     val units: List<UnitView>,
     val dockerRequires: List<String>,
     val dockerWants: List<String>,
@@ -99,12 +104,16 @@ class Inventory(
     /** Docker is installed and stopped: it was not asked (its socket would start it), so its containers are unknown. */
     val dockerStopped: Boolean,
 ) {
+    /** The binary at a host path: by its bin line, or (a report from before bin lines) the exe line first seen there. */
+    fun exeAt(path: String): Exe? = bins[path]?.let { exes[it] } ?: exes.values.find { it.path == path && !it.inContainer }
+
     companion object {
         private fun list(value: String): List<String> = value.split(',').map { it.trim() }.filter { it.isNotEmpty() }
 
         fun from(lines: List<Line>): Inventory {
             val procs = mutableListOf<Proc>()
             val exes = linkedMapOf<String, Exe>()
+            val bins = linkedMapOf<String, String>()
             val units = mutableListOf<UnitView>()
             var requires = emptyList<String>()
             var wants = emptyList<String>()
@@ -129,8 +138,9 @@ class Inventory(
                         list(f["tun"]), f["sha"], ServerFlags.parse(f["flags"]))
                     "exe" -> f["sha"].takeIf { it.isNotEmpty() }?.let { sha ->
                         exes[sha] = Exe(sha, f["path"], f.long("size"), f["label"], f["caption"] == "1", f["startup"], f["swg"] == "1",
-                            f["mrtt"] == "1")
+                            f["mrtt"] == "1", f["ctr"] == "1")
                     }
+                    "bin" -> if (f["path"].isNotEmpty() && f["sha"].isNotEmpty()) bins[f["path"]] = f["sha"]
                     "unit" -> units += UnitView(f["id"], f["load"], f["active"], f["sub"], f["result"], int("status"), int("restarts"),
                         int("pid"), f["file_state"], f["fragment"], f["exec"], f["exec_ok"].takeIf { it.isNotEmpty() }?.let { it == "1" },
                         ServerFlags.parse(f["flags"]), list(f["pre"]), list(f["env"]), int("pre_status"))
@@ -156,7 +166,7 @@ class Inventory(
                     "docker" -> dockerStopped = f["daemon"] == "inactive"
                 }
             }
-            return Inventory(procs, exes, units, requires, wants, containers, images, stores, tuns, addrs, routes, ipRules, listens,
+            return Inventory(procs, exes, bins, units, requires, wants, containers, images, stores, tuns, addrs, routes, ipRules, listens,
                 firewall, nft, files, dockerStopped)
         }
     }

@@ -306,7 +306,8 @@ tmo_s() {  # tmo_s <seconds> <command…>
 # The daemon is asked only when it runs: docker.socket starts a stopped Docker on the first connect, and with it every
 # container with a restart policy, which an inspection never does. Its client says the flavour without a daemon.
 docker_live() {
-	[ "$(systemctl is-active docker 2>/dev/null)" = active ] || ! have systemctl
+	! have systemctl || [ "$(systemctl is-active docker 2>/dev/null)" = active ] ||
+		[ "$(systemctl is-active snap.docker.dockerd 2>/dev/null)" = active ]
 }
 
 pre_docker() {
@@ -317,6 +318,11 @@ pre_docker() {
 		if have systemctl; then
 			pdk_enabled=$(systemctl is-enabled docker 2>/dev/null || true)
 			pdk_active=$(systemctl is-active docker 2>/dev/null || true)
+			# snap's daemon is a unit of its own (B4 review F1)
+			[ "$pdk_active" = active ] || [ "$(systemctl is-active snap.docker.dockerd 2>/dev/null)" != active ] || {
+				pdk_active=active
+				pdk_enabled=$(systemctl is-enabled snap.docker.dockerd 2>/dev/null || true)
+			}
 		fi
 		docker_live && pdk_version=$(tmo docker version --format '{{.Server.Version}}' 2>/dev/null || true)
 		# snap's commands are links to /usr/bin/snap; podman-docker's is a script that runs podman
@@ -361,17 +367,28 @@ inv_note_dir() {
 	return 0
 }
 
+# A bin line for every host path a binary of the family is found at (its sha256), so each install sharing a build finds it
+# by its own path, running or not (B4 review F2); the strings are read once per sha (inv_exe).
+inv_bins=' '
+inv_bin() {  # inv_bin <host path> [its sha256, when known]
+	case $inv_bins in *" $1 "*) return 0 ;; esac
+	[ -f "$1" ] || return 0
+	inv_bins="$inv_bins$1 "
+	if [ -n "${2:-}" ]; then inv_sha=$2; else inv_exe "$1" "$1"; fi
+	[ -z "$inv_sha" ] || csqtt_emit INV bin "path=$1" "sha=$inv_sha"
+}
+
 # One exe line per distinct binary (by sha256), with the strings that name a csqtt build (server-footprints.md §2), read in
 # one pass: the panel's version label, our caption, the startup line, swg-panel's flag help, MRTT's wire revision. Leaves the
-# sha in inv_sha for the caller.
+# sha in inv_sha for the caller. Its path is the first one seen (a container's, inside its image, is marked ctr=1).
 inv_seen=''
-inv_exe() {  # inv_exe <file to read> <path to report>
+inv_exe() {  # inv_exe <file to read> <path to report> [ctr]
 	inv_sha=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)
 	[ -n "$inv_sha" ] || return 0
 	case " $inv_seen " in *" $inv_sha "*) return 0 ;; esac
 	inv_seen="$inv_seen $inv_sha"
 	ie_label='' ie_startup='' ie_caption=0 ie_swg=0 ie_mrtt=0
-	ie_sig=$(grep -a -o -E 'aria-label="v[0-9][^"]{0,30} by amurcanov"|CSQTT Server [0-9][0-9A-Za-z .()+-]{0,70}|swg-panel: TUN interface name|MRTT-WIRE-3|сборка SanityProtocol' "$1" 2>/dev/null | sort -u)
+	ie_sig=$(grep -a -o -E 'aria-label="v[0-9][^"]{0,30} by amurcanov"|CSQTT Server [0-9][0-9A-Za-z.+-]{0,30}( \([^)]{0,60}\))?|swg-panel: TUN interface name|MRTT-WIRE-3|сборка SanityProtocol' "$1" 2>/dev/null | sort -u)
 	while IFS= read -r ie_s; do
 		case $ie_s in
 		aria-label=*) ie_label=${ie_s#aria-label=\"}; ie_label=${ie_label% by amurcanov\"} ;;
@@ -384,7 +401,7 @@ inv_exe() {  # inv_exe <file to read> <path to report>
 $ie_sig
 EOF
 	csqtt_emit INV exe "sha=$inv_sha" "path=$2" "size=$(wc -c <"$1" 2>/dev/null | tr -d ' ')" "label=$ie_label" \
-		"caption=$ie_caption" "startup=$ie_startup" "swg=$ie_swg" "mrtt=$ie_mrtt"
+		"caption=$ie_caption" "startup=$ie_startup" "swg=$ie_swg" "mrtt=$ie_mrtt" "ctr=${3:-0}"
 }
 
 # View 1, processes: a csqtt or mrtt binary by name, and every TUN holder (a foreign one still claims its interface).
@@ -398,7 +415,10 @@ inv_procs() {
 		$NF == "/dev/net/tun" {for (i = 2; i < NF; i++) if ($i == "->") print "/proc/" pid "/fdinfo/" $(i - 1)}')
 	ip_holders=''
 	# shellcheck disable=SC2086 # one path per word
-	[ -z "$ip_fds" ] || ip_holders=$(awk -v us="$inv_us" '/^iff:/ {f = FILENAME; sub("^/proc/", "", f); sub("/fdinfo/.*", "", f); print f us $2}' $ip_fds 2>/dev/null)
+	# each file read in BEGIN, so one whose fd closed since the ls is skipped (as input, mawk and BusyBox awk stop at it)
+	[ -z "$ip_fds" ] || ip_holders=$(awk -v us="$inv_us" 'BEGIN {for (i = 1; i < ARGC; i++) {f = ARGV[i]
+		while ((getline l < f) > 0) if (l ~ /^iff:/) {split(l, w, /[ \t]+/); p = f; sub("^/proc/", "", p); sub("/fdinfo/.*", "", p); print p us w[2]}
+		close(f)}; exit}' $ip_fds 2>/dev/null)
 	ip_pids=$( { printf '%s\n' "$ip_exes" | awk -F"$inv_us" '{n = $2; sub(".*/", "", n)} n ~ /csqtt|mrtt/ {print $1}'
 		printf '%s\n' "$ip_holders" | awk -F"$inv_us" 'NF > 1 {print $1}'; } | sort -un)
 	while IFS= read -r ip_pid; do
@@ -413,7 +433,18 @@ inv_procs() {
 		ip_flags=$(tr '\0' '\n' <"/proc/$ip_pid/cmdline" 2>/dev/null | inv_flags)
 		inv_note_dir "$ip_flags"
 		inv_sha=''
-		case ${ip_exe##*/} in *csqtt* | *mrtt*) inv_exe "/proc/$ip_pid/exe" "$ip_exe" ;; esac
+		case ${ip_exe##*/} in
+		*csqtt* | *mrtt*)
+			if [ -n "$ip_ctr" ]; then
+				inv_exe "/proc/$ip_pid/exe" "$ip_exe" 1
+			else
+				inv_exe "/proc/$ip_pid/exe" "$ip_exe"
+				# the host path too, when it is the running file (not replaced or deleted since the start)
+				[ "${ip_del:-0}" = 1 ] || [ "$(sha256sum "$ip_exe" 2>/dev/null | cut -d' ' -f1)" != "$inv_sha" ] ||
+					inv_bin "$ip_exe" "$inv_sha"
+			fi
+			;;
+		esac
 		csqtt_emit INV proc "pid=$ip_pid" "exe=$ip_exe" "deleted=${ip_del:-0}" "comm=$(readf "/proc/$ip_pid/comm")" \
 			"unit=$ip_unit" "ctr=$(printf '%.12s' "$ip_ctr")" "tun=$ip_tun" "sha=$inv_sha" "flags=$ip_flags"
 		[ -z "$ip_unit" ] || inv_proc_units="$inv_proc_units $ip_unit"
@@ -449,6 +480,10 @@ EOF
 		inv_note_dir "$iu_flags"
 		iu_ok=''
 		[ -z "$iu_path" ] || { [ -e "$iu_path" ] && iu_ok=1 || iu_ok=0; }
+		# the binary a stopped server would start (B4 review F4): a server's unit only, not every TUN holder's
+		if [ "$iu_ok" = 1 ] && { [ -n "$iu_flags" ] || case ${iu_path##*/} in *csqtt* | *mrtt*) true ;; *) false ;; esac; }; then
+			inv_bin "$iu_path"
+		fi
 		csqtt_emit INV unit "id=$iu" "load=$iu_load" "active=$iu_active" "sub=$iu_sub" "result=$iu_result" "status=$iu_status" \
 			"restarts=$iu_restarts" "pid=$iu_pid" "file_state=$iu_file" "fragment=$iu_frag" "exec=$iu_path" "exec_ok=$iu_ok" \
 			"flags=$iu_flags" "pre=$iu_pre" "pre_status=$iu_prest" "env=$iu_env"
@@ -474,13 +509,13 @@ inv_ctrs() {
 		have $ic_rt || continue
 		if [ "$ic_rt" = docker ] && ! docker_live; then
 			# a stopped Docker is not asked (its socket would start it, and its containers with it): they stay unknown, and
-			# the engine is told so (podman, daemonless, is asked next)
-			if [ -e /lib/systemd/system/docker.service ] || [ -e /usr/lib/systemd/system/docker.service ] ||
-				[ -e /etc/systemd/system/docker.service ]; then
-				csqtt_emit INV docker "daemon=inactive"
-			fi
+			# the engine is told so, wherever its unit lives (podman, daemonless, is asked next)
+			csqtt_emit INV docker "daemon=inactive"
 			continue
 		fi
+		# podman builds its store on its first command as root: asked only where that store exists, so an inspection never
+		# leaves one behind, and a box with none holds no podman container (B4 review F5)
+		[ "$ic_rt" != podman ] || [ -d /var/lib/containers/storage ] || continue
 		ic_all=$(tmo $ic_rt ps -a --no-trunc --format "{{.ID}}$inv_us{{.Names}}$inv_us{{.Image}}$inv_us{{.State}}" 2>/dev/null)
 		while IFS=$inv_us read -r ic_id ic_name ic_image ic_state; do
 			[ -n "$ic_id" ] || continue
@@ -526,7 +561,7 @@ inv_stores() {
 		is_seen="$is_seen$is_d "
 		is_files=''
 		for is_f in csqtt.db csqtt.db-wal passwords.json passwords.json.imported csqtt.env env .server.lock deploy-overrides.json \
-			web_cert.pem letsencrypt.env manifest.json runtime-archive docker mrtt.db mrtt.db-wal mrtt.env; do
+			web_cert.pem letsencrypt.env letsencrypt-ip.env manifest.json runtime-archive docker mrtt.db mrtt.db-wal mrtt.env; do
 			[ -e "$is_d/$is_f" ] && is_files="$is_files${is_files:+,}$is_f"
 		done
 		[ -n "$is_files" ] || continue
@@ -647,11 +682,13 @@ inv_files() {
 				"version=$(sed -n -E 's/^SCRIPT_VERSION="?([^" ]*).*/\1/p' "$if_p" 2>/dev/null | head -n 1)" ;;
 		*-install.log)
 			# the last run finished when, after its header, a successful install logged its total time or an uninstall its
-			# removal (server-footprints.md §4 B11, every version; status and uninstall runs write a header too)
-			if_run=$(awk '/^=== / {fin = 0; bad = 0; next} /Общее время deploy\.sh|удалён/ {fin = 1} /\[✗\]/ {bad++}
-				END {print fin + 0, bad + 0}' "$if_p" 2>/dev/null)
+			# removal (server-footprints.md §4 B11, every version; status and uninstall runs write a header too). steps: the
+			# install's own [►] lines after it, which a status run never writes (B5 review F11)
+			if_run=$(awk '/^=== / {fin = 0; bad = 0; st = 0; next} /Общее время deploy\.sh|удалён/ {fin = 1} /\[✗\]/ {bad++}
+				/\[►\]/ {st++} END {print fin + 0, bad + 0, st + 0}' "$if_p" 2>/dev/null)
 			set -- "$@" "runs=$(grep -c '^=== ' "$if_p" 2>/dev/null)" "last_run=$(grep '^=== ' "$if_p" 2>/dev/null | tail -n 1 | cut -c1-100)" \
-				"last_line=$(tail -n 1 "$if_p" 2>/dev/null | cut -c1-100)" "finished=${if_run%% *}" "failed_steps=${if_run##* }" ;;
+				"last_line=$(tail -n 1 "$if_p" 2>/dev/null | cut -c1-100)" "finished=${if_run%% *}" \
+				"failed_steps=$(echo "$if_run" | cut -d' ' -f2)" "steps=${if_run##* }" ;;
 		esac
 		[ "$if_t" = l ] && set -- "$@" "target=$(readlink "$if_p" 2>/dev/null)"
 		csqtt_emit INV file "$@"
@@ -668,7 +705,7 @@ inv_all() {
 	inv_files
 	# our own binaries, running or not
 	for io_b in /opt/sanityprotocol/csqtt/*/current/csqtt-server /usr/local/bin/csqtt /usr/local/lib/csqtt25/csqtt25 /usr/local/bin/mrtt; do
-		[ -f "$io_b" ] && inv_exe "$io_b" "$io_b"
+		inv_bin "$io_b"
 	done
 	return 0
 }

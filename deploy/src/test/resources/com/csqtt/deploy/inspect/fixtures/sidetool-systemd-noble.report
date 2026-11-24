@@ -17,7 +17,7 @@ CSQTT_PRE|ram|total_kb=1499116|available_kb=1196940|swap_kb=0
 CSQTT_PRE|clock|epoch=1795501744|ntp=no
 CSQTT_PRE|rundir|noexec=
 CSQTT_PRE|docker|bin=|version=|flavour=|enabled=|rootless=0
-CSQTT_INV|exe|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|path=/usr/local/lib/csqtt25/csqtt25|size=11275784|label=v2.5.3|caption=1|startup=2.5.3 (SanityProtocol build of amurcanov 2.5.0) Tunnel|swg=1|mrtt=0
+CSQTT_INV|exe|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|path=/usr/local/lib/csqtt25/csqtt25|size=11275784|label=v2.5.3|caption=1|startup=2.5.3 (SanityProtocol build of amurcanov 2.5.0)|swg=1|mrtt=0
 CSQTT_INV|proc|pid=826|exe=/usr/local/lib/csqtt25/csqtt25|deleted=0|comm=csqtt25|unit=csqtt25.service|ctr=|tun=csqtt25|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|flags=--listen 0.0.0.0:46100 --web-port 46102 --config-dir /etc/csqtt25 --instance csqtt25 --iface csqtt25 --tun-addr 10.66.68.1/24 --no-nat
 CSQTT_INV|unit|id=csqtt25.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=826|file_state=enabled|fragment=/etc/systemd/system/csqtt25.service|exec=/usr/local/lib/csqtt25/csqtt25|exec_ok=1|flags=--listen 0.0.0.0:46100 --web-port 46102 --config-dir /etc/csqtt25 --instance csqtt25 --iface csqtt25 --tun-addr 10.66.68.1/24 --no-nat|pre=/usr/local/lib/csqtt25/network-up.sh,/usr/local/lib/csqtt25/tun-recover.sh|pre_status=|env=/etc/csqtt25/csqtt.env
 CSQTT_INV|dockerdeps|requires=|wants=

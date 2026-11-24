@@ -17,7 +17,7 @@ CSQTT_PRE|ram|total_kb=1499116|available_kb=1211076|swap_kb=0
 CSQTT_PRE|clock|epoch=1795501789|ntp=no
 CSQTT_PRE|rundir|noexec=
 CSQTT_PRE|docker|bin=|version=|flavour=|enabled=|rootless=0
-CSQTT_INV|exe|sha=e6f5b785feda10991060f6ac024a8faf5e740b168a991ab2a0e065505b215e8c|path=/usr/local/bin/csqtt|size=10999960|label=v2.5.0|caption=0|startup=2.5.0 Tunnel|swg=0|mrtt=0
+CSQTT_INV|exe|sha=e6f5b785feda10991060f6ac024a8faf5e740b168a991ab2a0e065505b215e8c|path=/usr/local/bin/csqtt|size=10999960|label=v2.5.0|caption=0|startup=2.5.0|swg=0|mrtt=0
 CSQTT_INV|proc|pid=783|exe=/usr/local/bin/csqtt|deleted=0|comm=csqtt|unit=csqtt.service|ctr=|tun=csqtt1|sha=e6f5b785feda10991060f6ac024a8faf5e740b168a991ab2a0e065505b215e8c|flags=--listen 0.0.0.0:46000 --web-port 46002 --config-dir /etc/csqtt
 CSQTT_INV|unit|id=csqtt.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=783|file_state=enabled|fragment=/etc/systemd/system/csqtt.service|exec=/usr/local/bin/csqtt|exec_ok=1|flags=--listen 0.0.0.0:46000 --web-port 46002 --config-dir /etc/csqtt|pre=/usr/local/lib/csqtt/network-up.sh,/usr/local/lib/csqtt/tun-recover.sh|pre_status=|env=/etc/csqtt/csqtt.env
 CSQTT_INV|dockerdeps|requires=|wants=
