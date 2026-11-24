@@ -199,15 +199,22 @@ object Manager {
                 purge,
             )
             InstallState.STOPPED, InstallState.DORMANT -> listOf(Offer(Action.START, recommended = true), Offer(Action.REMOVE), purge)
-            // «Восстановить» needs the flags «Удалить» kept: a create cut off leaves a store without them («Продолжить» is its)
+            // «Восстановить» needs the flags «Удалить» kept: a create cut off leaves a store without them («Продолжить» is its).
+            // A store a newer build ran is another app's to restore: its removal is folded, never recommended (B11a verify N2)
             InstallState.LEFTOVER -> (!newer && install.stores.any { it.keptFlags != null }).let { restorable ->
                 listOfNotNull(
                     if (restorable) Offer(Action.RESTORE, recommended = true) else null,
-                    Offer(Action.REMOVE_LEFTOVERS, recommended = !restorable, confirm = if (install.stores.isNotEmpty()) "удалить ${install.name}" else null),
+                    Offer(Action.REMOVE_LEFTOVERS, recommended = !restorable && !newer, folded = newer,
+                        confirm = if (install.stores.isNotEmpty()) "удалить ${install.name}" else null),
                 )
             }
         }.sortedByDescending { it.recommended }
-        return Entry(install, compatibility, offers, if (newer) "Обновить нельзя: установлена более новая версия" else null)
+        val note = when {
+            newer && install.state == InstallState.LEFTOVER -> "Восстановить можно приложением версии ${install.build?.version} или новее"
+            newer -> "Обновить нельзя: установлена более новая версия"
+            else -> null
+        }
+        return Entry(install, compatibility, offers, note)
     }
 
     private fun stock(install: Installation, compatibility: Compatibility, classification: Classification, inv: Inventory): Entry {

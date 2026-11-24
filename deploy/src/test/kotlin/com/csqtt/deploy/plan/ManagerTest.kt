@@ -270,6 +270,10 @@ class ManagerTest {
         Manager.entries(c3, carried, inv3).single().let { newer ->
             assertEquals(Compatibility.NEWER_THAN_APP, newer.compatibility)
             assertEquals(listOf(Action.REMOVE_LEFTOVERS), newer.offers.map { it.action })
+            // verify N2: its clients are the newer app's to bring back, so its removal is folded and typed, recommended to nobody
+            val removal = newer.offers.single()
+            assertTrue(removal.folded && !removal.recommended && removal.confirm != null)
+            assertEquals("Восстановить можно приложением версии 2.6.1 или новее", newer.note)
         }
     }
 

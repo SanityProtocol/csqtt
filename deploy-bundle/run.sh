@@ -997,23 +997,24 @@ inst_paths() {  # inst_paths <id>: sets in_root in_state in_unit
 	in_root=/opt/sanityprotocol/csqtt/$1 in_state=/var/lib/sanityprotocol/csqtt/$1 in_unit=sanity-csqtt-$1.service
 }
 
-# Our drop-in goes with the last instance of ours. A floor goes back to what its comment says it was only while its live value
-# is still the one the drop-in set and no csqtt server runs (a stock one leans on the same floors): one raised since by someone
-# else keeps its value. ip_forward is never written back: Docker, a WireGuard, any router may have come to rely on it, and
-# writing it resets every device's forwarding and accept_redirects (B11a review F1); it is the server's own tuning as well.
-# The iptables-nft tables the server's rules made stay, empty and inert, until the next boot: telling them from an admin's
-# (a DROP policy and nothing else) is not safe (B11a review F2)
+# Our drop-in goes with the last instance of ours, unless a csqtt server still runs beside (a stock one, the side tool's, swg's):
+# that one leans on the same floors, so the drop-in stays and keeps them across a boot, and a later create or restore finds
+# them recorded there; a later removal when none runs takes it (B11a verify N1). A floor goes back to what its comment says it
+# was only while its live value is still the one the drop-in set: one raised since by someone else keeps its value.
+# ip_forward is never written back: Docker, a WireGuard, any router may have come to rely on it, and writing it resets every
+# device's forwarding and accept_redirects (B11a review F1); it is the server's own tuning as well. The iptables-nft tables
+# the server's rules made stay, empty and inert, until the next boot: telling them from an admin's (a DROP policy and nothing
+# else) is not safe (B11a review F2)
 host_dropin_drop() {
 	for hd_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$hd_u" ] && return 0; done
 	[ -f "$HOST_DROPIN" ] || return 0
-	if ! pgrep -x csqtt-server >/dev/null 2>&1 && ! pgrep -x csqtt >/dev/null 2>&1 && ! pgrep -x csqtt25 >/dev/null 2>&1; then
-		sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1 \2/p' "$HOST_DROPIN" | while read -r hd_k hd_was; do
-			[ "$hd_k" != net.ipv4.ip_forward ] || continue
-			hd_set=$(sed -n "s/^$hd_k = //p" "$HOST_DROPIN" | head -n 1)
-			[ "$(sysctl -n "$hd_k" 2>/dev/null | tr -s '\t ' '  ')" = "$hd_set" ] || continue
-			sysctl -q -w "$hd_k=$hd_was" 2>/dev/null
-		done
-	fi
+	! pgrep -x 'csqtt(25|-server|-swg)?' >/dev/null 2>&1 || return 0
+	sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1 \2/p' "$HOST_DROPIN" | while read -r hd_k hd_was; do
+		[ "$hd_k" != net.ipv4.ip_forward ] || continue
+		hd_set=$(sed -n "s/^$hd_k = //p" "$HOST_DROPIN" | head -n 1)
+		[ "$(sysctl -n "$hd_k" 2>/dev/null | tr -s '\t ' '  ')" = "$hd_set" ] || continue
+		sysctl -q -w "$hd_k=$hd_was" 2>/dev/null
+	done
 	rm -f "$HOST_DROPIN"
 }
 
