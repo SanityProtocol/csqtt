@@ -80,6 +80,8 @@ cmd_start() {
 cmd_tail() {
 	rt_dir=$(run_dir "$1")
 	[ -f "$rt_dir/log" ] || { printf 'CSQTT_TAIL|missing|0\n'; return 0; }
+	# another login's run (its log is that login's own): said so, and the engine reads it through root
+	[ -r "$rt_dir/log" ] || { printf 'CSQTT_TAIL|unreadable|0\n'; return 0; }
 	rt_state=ended
 	[ "$(systemctl is-active "sanity-csqtt-deploy-$1" 2>/dev/null)" = active ] && rt_state=active
 	rt_size=$(wc -c <"$rt_dir/log" | tr -d ' ')
@@ -109,7 +111,8 @@ cmd_status() {
 		st_id=$(basename "$st_dir")
 		st_active=0
 		[ "$(systemctl is-active "sanity-csqtt-deploy-$st_id" 2>/dev/null)" = active ] && st_active=1
-		st_result=$(grep '^CSQTT_RESULT|' "$st_dir/log" 2>/dev/null | tail -n 1 | cut -d'|' -f2)
+		st_result=$(cat "$st_dir/result" 2>/dev/null)
+		[ -n "$st_result" ] || st_result=$(grep '^CSQTT_RESULT|' "$st_dir/log" 2>/dev/null | tail -n 1 | cut -d'|' -f2)
 		csqtt_emit RUN "id=$st_id" "active=$st_active" "result=$st_result" "action=$(sed -n 's/^action=//p' "$st_dir/plan" 2>/dev/null)"
 	done
 	csqtt_end
@@ -182,6 +185,8 @@ run_cmd() {
 run_result() {  # run_result <kind> <cause> <next action>
 	run_beat_stop
 	run_emit RESULT "$1" "$RUN_STEP" "$2" "$3"
+	# the kind alone (no secret) where every login reads it: the log is its starting login's own (B7 verify N2)
+	printf '%s\n' "$1" >"$RUN_DIR/result" && chmod 644 "$RUN_DIR/result"
 	rm -f "$RUN_DIR/secrets"
 	printf 'CSQTT_END|%s\n' "$(grep -c '^CSQTT_' "$RUN_LOG")" >>"$RUN_LOG"
 	exit 0
@@ -211,9 +216,10 @@ run_recheck() {
 	done
 	rr_net=$(plan subnet)
 	if [ -n "$rr_net" ] && [ "$(plan resume)" != 1 ]; then
-		# every address and route on the box, against the planned /24 (the default route aside)
+		# every address and route on the box against the planned /24, read as inspect.sh reads them, which is all the planner
+		# saw: a typed route (a swg-panel exit table's `prohibit 10.0.0.0/8`) bends only the traffic sent to its table (B7 verify N1)
 		rr_hit=$( { ip -4 -o addr show 2>/dev/null | awk '{print $4}'
-			ip -4 route show table all 2>/dev/null | awk '$1 != "default" {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) {print $i; break}}'; } |
+			ip -4 route show table all 2>/dev/null | awk '$1 != "default" && $1 != "broadcast" && $1 != "local" && $1 ~ /^[0-9]/ {print $1}'; } |
 			awk -v net="$rr_net" 'function n(a, p) {split(a, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4]}
 				BEGIN {split(net, w, "/"); s = n(w[1])}
 				{split($0, c, "/"); l = (c[2] == "") ? 32 : c[2] + 0; m = (l < 24) ? l : 24; d = 1; for (i = m; i < 32; i++) d *= 2
