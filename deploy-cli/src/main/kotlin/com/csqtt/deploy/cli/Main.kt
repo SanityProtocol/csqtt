@@ -752,7 +752,7 @@ private fun repairBox(session: SshSession, p: Properties, target: File, code: St
     return follow(runner, coordinator, runId, before)
 }
 
-/** A stock systemd install removed (P2 B11b): inspected, its every object listed as the app lists them, then the run. */
+/** A stock install removed (P2 B11b; a Docker one, P2 B13b): inspected, its every object listed as the app lists them, then the run. */
 private fun removeForeign(session: SshSession, p: Properties, target: File, name: String, purge: Boolean): Int {
     val remote = session.asRemote()
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
@@ -762,7 +762,7 @@ private fun removeForeign(session: SshSession, p: Properties, target: File, name
     val classification = Classifier.classify(inventory)
     val install = classification.installations.firstOrNull { it.name == name } ?: return 2.also { println("no installation $name on this box") }
     val listing = com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inventory, purge)
-        ?: return 2.also { println("$name is not a stock systemd install") }
+        ?: return 2.also { println("$name is not a stock install this removal knows") }
     listing.will.forEach { println("will: $it") }
     val runner = Runner(remote, root)
     val coordinator = coordinator(target)
@@ -786,8 +786,9 @@ private fun removeForeign(session: SshSession, p: Properties, target: File, name
 }
 
 /**
- * «Обновить» a stock systemd install = its move into our layout (P2 B12): inspected (the disk and run-dir stops of a core run
- * first), the move proposed (our id, interface, subnet and slot; its ports), what it takes said, the run, then ours read back
+ * «Обновить» a stock install = its move into our layout (P2 B12; a Docker one into our Docker mode, P2 B13b): inspected (the
+ * disk and run-dir stops of a core run first), the move proposed (our id, interface, subnet and slot; its ports), what it takes
+ * said, the run, then ours read back
  * (the same main password from the copied store, the same certificate pin) and checked from here.
  */
 private fun move(session: SshSession, p: Properties, target: File, name: String, resumeOf: String? = null): Int {
@@ -808,13 +809,20 @@ private fun move(session: SshSession, p: Properties, target: File, name: String,
             ?: return 2.also { println("no plan kept for run $resumeOf on the box") }
         if (kept["move_role"].isNullOrEmpty()) return 2.also { println("run $resumeOf was no move") }
         id = kept["id"] ?: return 2.also { println("run $resumeOf kept no id") }
-        val credentials = Credentials.generate()
-        plan = RunPlan("create", kept - "action" + mapOf("resume" to "1", "resume_of" to resumeOf),
-            linkedMapOf("main_password" to credentials.mainPassword, "web_pass" to credentials.webPass, "secret_path" to credentials.secretPath),
-            core.bytes)
+        // a move into Docker (P2 B13b): its root filesystem chosen again from the box as it is now
+        val rootfs = if (kept["mode"] == "docker") {
+            val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), listOf(com.csqtt.deploy.run.Rootfs.HOST),
+                deadlineMs = 60_000)
+            val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+            rootfsChoice(Preflight.from(report.lines), Inventory.from(report.lines), core, p) ?: return 2
+        } else null
+        plan = com.csqtt.deploy.run.MoveRun.resumePlan(kept, resumeOf, core, Credentials.generate(), rootfs)
+            ?: return 2.also { println("run $resumeOf was no move") }
         println("will: «Продолжить» the move into sqc-$id from run $resumeOf")
     } else {
-        val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+        // (the release's reach too: a stock Docker install moves into Docker, its root filesystem fetched where the box can, P2 B13b)
+        val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), listOf(com.csqtt.deploy.run.Rootfs.HOST),
+            deadlineMs = 60_000)
         val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
         if (coreRunStopped(report)) return 6
         val inventory = Inventory.from(report.lines)
@@ -834,16 +842,25 @@ private fun move(session: SshSession, p: Properties, target: File, name: String,
         }
         val proposal = offered.proposal ?: return 2.also { println("$name is not a stock install to move") }
         val preflight = Preflight.from(report.lines)
+        // a stock Docker install (P2 B13b) moves into our Docker mode where the box allows one; else into a unit, its container
+        // switched off by its restart policy all the same
+        val rootfs = if (com.csqtt.deploy.run.MoveRun.inDocker(install)) {
+            val refusal = com.csqtt.deploy.run.DockerMode.refusal(preflight)
+            if (refusal != null) null.also { println("will: Docker: $refusal: the new instance runs as a systemd unit") }
+            else rootfsChoice(preflight, inventory, core, p) ?: return 2
+        } else null
         plan = com.csqtt.deploy.run.MoveRun.plan(install, classification, inventory, proposal,
-            CreateRun.publicAddress(preflight, p.prop("host").orEmpty()), core, Credentials.generate())
-            ?: return 2.also { println("$name is not a stock systemd install to move") }
+            CreateRun.publicAddress(preflight, p.prop("host").orEmpty()), core, Credentials.generate(), rootfs)
+            ?: return 2.also { println("$name is not a stock install to move") }
         id = proposal.id
         println("will: $name moves into ${proposal.instance}: ${proposal.iface} ${proposal.subnet} udp=${proposal.udpPort} " +
             "web=${proposal.webPort} slot=${proposal.slot}")
         offer.warning?.let { println("warning: $it") }
         // a move prepares the host as a create does: its changes said as create says them (B12 review F6: a firewalld reload
         // drops runtime rules, fail2ban's bans among them)
-        (offered.will + CreateRun.hostChanges(preflight, proposal)).forEach { println("will: $it") }
+        (offered.will + CreateRun.hostChanges(preflight, proposal.copy(docker = rootfs != null)) + (if (rootfs != null) {
+            com.csqtt.deploy.run.DockerMode.hostChanges(preflight) + com.csqtt.deploy.run.DockerMode.sourceWill(rootfs)
+        } else emptyList())).forEach { println("will: $it") }
         com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inventory, purge = false)?.will?.forEach { println("will then: $it") }
     }
     val sshHost = p.prop("host").orEmpty()

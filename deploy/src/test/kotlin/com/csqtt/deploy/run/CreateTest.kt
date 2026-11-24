@@ -83,9 +83,10 @@ class CreateTest {
         // and the create action reads only keys the plan has
         val create = script.substringAfter("action_create() {").substringBefore("\n}\n")
         val used = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(create).map { it.groupValues[1] }.toSet()
-        // (resume only on a continuation: «Продолжить», B8 review F1; the move's keys only on a move, B12; Docker's only in its
-        // mode, B13a: DockerTest)
-        for (key in used - setOf("resume", "resume_of", "move_role", "move_unit", "move_store", "mode", "rootfs_sha256", "rootfs_url")) {
+        // (resume only on a continuation: «Продолжить», B8 review F1; the move's keys only on a move, B12, its stock container's
+        // B13b; Docker's only in its mode, B13a: DockerTest)
+        for (key in used - setOf("resume", "resume_of", "move_role", "move_unit", "move_store", "move_container", "mode", "rootfs_sha256",
+            "rootfs_url")) {
             assertTrue("create reads $key", "\n$key=" in "\n$plan")
         }
     }

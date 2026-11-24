@@ -91,9 +91,10 @@ object Manager {
 
     /**
      * §1.3's stock «Починить» list (B1, B2, B5, B6, B11, B18), with a crash loop and an exited container: the move fixes them;
-     * and B7, a 2.1 binary failing on a 2.5 store, which «Обновить до 2.6» cures (B6 verify N1).
+     * and B7, a 2.1 binary failing on a 2.5 store, which «Обновить до 2.6» cures (B6 verify N1); and B16, both runtimes: the move
+     * goes from the one that serves and takes both (P2 B13b).
      */
-    private val MOVABLE = setOf("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B11", "B18")
+    private val MOVABLE = setOf("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B11", "B16", "B18")
 
     /** Instances of ours one box holds: the local-proxy slots 2–7. */
     const val MAX_OURS = 6

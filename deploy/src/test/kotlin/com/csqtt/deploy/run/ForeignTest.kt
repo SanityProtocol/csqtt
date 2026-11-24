@@ -185,6 +185,11 @@ class ForeignTest {
             add(Triple("unit", "ssh.service", 1)); add(Triple("unit", "csqtt25.service", 1)); add(Triple("store", "/etc", 1))
             add(Triple("tag", "SQC-0A1B2C_MANAGED", 1)); add(Triple("table", "254", 1))
             add(Triple("lineage", "csqtt-ip-1-2-3-4/../..", 1)); add(Triple("lineage", "csqtt-ip-", 1)); add(Triple("lineage", "other", 1))
+            // a stock Docker install's (P2 B13b): its container by its role's name, its repository's images by a plain tag
+            add(Triple("container", "csqtt", 0)); add(Triple("image", "csqtt:2.5.3", 0))
+            add(Triple("container", "csqtt25", 1)); add(Triple("container", "sanity-csqtt-0a1b2c", 1)); add(Triple("container", "swg-node", 1))
+            add(Triple("image", "csqtt25:2.5.3", 1)); add(Triple("image", "csqtt:", 1)); add(Triple("image", "csqtt:../x", 1))
+            add(Triple("image", "sanity-csqtt:2.6.0-0123abcd", 1)); add(Triple("image", "alpine:3.21", 1))
         }
         val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
         val frOk = script.substring(script.indexOf("fr_ok() {"), script.indexOf("\n}\n", script.indexOf("fr_ok() {")) + 3)
@@ -201,5 +206,62 @@ class ForeignTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    private fun runShell(script: String): String {
+        val dir = kotlin.io.path.createTempDirectory("csqtt-fr").toFile()
+        try {
+            val sh = File(dir, "check.sh").apply { writeText(script) }
+            val proc = ProcessBuilder("sh", sh.path).redirectErrorStream(true).start()
+            assertTrue(proc.waitFor(30, TimeUnit.SECONDS))
+            return proc.inputStream.bufferedReader().readText()
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    private fun function(name: String): String {
+        val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        val at = script.indexOf("\n$name() {") + 1
+        return script.substring(at, script.indexOf("\n}\n", at) + 3)
+    }
+
+    @Test
+    fun aStockDockerPrereqIsStoppedOnlyOnceDockerNoLongerRequiresIt() {
+        // P2 B13b: the prereq is RequiredBy=docker.service; a stop through that link stops Docker and every container on the box
+        val stubs = "run_cmd() { echo \"run \$*\"; }\nsystemctl() { [ \"\$1\" = show ] && printf '%s\\n\\n' \"\$REQ\"; return 0; }\n" +
+            "rm() { echo \"rm \$*\"; }\n"
+        val prereq = "csqtt-docker-prereq.service"
+        val required = runShell(stubs + function("fr_stop_unit") + "REQ='containerd.service $prereq'\nfr_stop_unit $prereq\n")
+        // its links taken by hand too (a link its [Install] no longer names would make Docker require a unit that is gone: B14)
+        val links = "rm -f /etc/systemd/system/docker.service.requires/$prereq /etc/systemd/system/docker.service.wants/$prereq"
+        assertEquals("run systemctl disable $prereq\n$links", required.trim())
+        val freed = runShell(stubs + function("fr_stop_unit") + "REQ='containerd.service'\nfr_stop_unit $prereq\n")
+        assertEquals("run systemctl disable $prereq\n$links\nrun systemctl stop $prereq", freed.trim())
+        // any other stock unit: disabled and stopped at once, as before
+        assertEquals("run systemctl disable --now csqtt.service", runShell(stubs + function("fr_stop_unit") + "fr_stop_unit csqtt.service\n").trim())
+    }
+
+    @Test
+    fun aMovedStockContainerIsPutBackAsTheMoveFoundIt() {
+        // P2 B13b: its restart policy back, started again only if it ran; nothing for a move with no stock container
+        val stubs = "run_cmd() { echo \"run \$*\"; }\n"
+        assertEquals("run docker update --restart=unless-stopped csqtt\nrun docker start csqtt",
+            runShell(stubs + function("mv_container_back") + "cr_mv_ctr=csqtt\nmv_container_back unless-stopped 1\n").trim())
+        assertEquals("run docker update --restart=always csqtt",
+            runShell(stubs + function("mv_container_back") + "cr_mv_ctr=csqtt\nmv_container_back always 0\n").trim())
+        assertEquals("", runShell(stubs + function("mv_container_back") + "cr_mv_ctr=\nmv_container_back unless-stopped 1\n").trim())
+        // the switch keeps its policy and whether it ran before it stops it; the undo, a «Продолжить» and a settle put it back
+        val create = function("action_create")
+        assertTrue(create, create.indexOf(">\"\$cr_state/stock-container\"") in 0 until create.indexOf("fr_stop_containers move_"))
+        assertEquals(2, Regex("mv_container_back \"\\\$cr_mv_pol\" \"\\\$cr_mv_cran\"").findAll(create).count())
+        assertTrue(function("mv_settle").contains("mv_container_back \"\$cr_mv_pol\" \"\$cr_mv_cran\""))
+        // a settle in Docker: its container started, or made from its docker file; kept as a Docker removal keeps it
+        val settle = function("mv_settle")
+        assertTrue(settle, "run_cmd dk_run \"\$ms_ctr\"" in settle && "cat \"\$cr_state/docker\"; } >\"\$cr_state/unit.saved\"" in settle &&
+            "rm -f \"\$cr_state/docker\"" in settle)
+        // its finish edits no unit in Docker
+        assertTrue(function("mv_finish").contains("if [ \$cr_docker = 0 ]; then"))
+        assertFalse(create.contains("a move into Docker is not built yet"))
     }
 }

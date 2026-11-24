@@ -109,30 +109,61 @@ object CreateRun {
 }
 
 /**
- * «Обновить» (also «Починить» and «Обновить до 2.6») on a stock systemd install = moving it into our layout (P2-PLAN §1.7;
- * P2 B12): a create of [proposal] (Proposer.proposeMove: our id, interface, subnet and slot, the stock install's ports) that
- * takes its place through one marker, its store, certificate and panel login copied over at the switch; once verified, the
- * stock install goes through the foreign removal's list, its store kept (DE-T3) and its LE lineage kept for ours (B14). The
- * run re-checks the stock unit and binary as inspected; the stock server's hold on its own ports is no conflict.
+ * «Обновить» (also «Починить» and «Обновить до 2.6») on a stock install = moving it into our layout (P2-PLAN §1.7; P2 B12):
+ * a create of [proposal] (Proposer.proposeMove: our id, interface, subnet and slot, the stock install's ports) that takes its
+ * place through one marker, its store, certificate and panel login copied over at the switch; once verified, the stock install
+ * goes through the foreign removal's list, its store kept (DE-T3) and its LE lineage kept for ours (B14). The run re-checks the
+ * stock unit and binary as inspected; the stock server's hold on its own ports is no conflict. A stock Docker install (P2
+ * B13b): its container's restart policy is the switch (kept, set to `no`, the container stopped; put back by an undo), ours in
+ * Docker with a root filesystem, else a unit; the finish takes its container and images as its removal does.
  */
 object MoveRun {
     fun plan(install: com.csqtt.deploy.inspect.Installation, classification: com.csqtt.deploy.inspect.Classification,
-        inv: com.csqtt.deploy.inspect.Inventory, proposal: Proposal, publicIp: String, core: Core, credentials: Credentials): RunPlan? {
+        inv: com.csqtt.deploy.inspect.Inventory, proposal: Proposal, publicIp: String, core: Core, credentials: Credentials,
+        rootfs: RootfsChoice? = null): RunPlan? {
         val listing = ForeignRemoval.listing(install, classification, inv, purge = false) ?: return null
         val role = listing.role
         val store = listing.store ?: return null
         val unit = install.units.firstOrNull { it.id == role.units.first() }
         val sha = unit?.let { inv.exeAt(it.exec)?.sha }
-        val create = CreateRun.plan(proposal, publicIp, core, credentials)
+        // a stock Docker install (P2 B13b): its container's restart policy is the switch; ours in Docker with [rootfs], else a unit
+        val container = listing.containers.firstOrNull()
+        val create = CreateRun.plan(proposal.copy(docker = rootfs != null), publicIp, core, credentials, rootfs = rootfs)
         val move = linkedMapOf(
             "move_role" to role.word, "move_unit" to unit?.id.orEmpty(), "move_store" to store,
+            "move_container" to container.orEmpty(),
             "move_units" to listing.units.joinToString(","), "move_paths" to listing.paths.joinToString(","),
             "move_tags" to listing.tags.joinToString(","), "move_tables" to listing.tables.joinToString(","),
+            "move_containers" to listing.containers.joinToString(","), "move_images" to listing.images.joinToString(","),
             "move_lineage" to "", "move_untagged" to if (listing.untagged) "1" else "0",
             "own_ports" to listOfNotNull(install.claims.udpPort, install.claims.webPort).joinToString(","),
         ) + (if (unit != null) mapOf("expect_unit" to unit.id) else emptyMap()) +
             (if (unit != null && sha != null) mapOf("expect_bin" to unit.exec, "expect_sha" to sha) else emptyMap())
-        return RunPlan(create.action, create.values + move, create.secrets, create.core)
+        return RunPlan(create.action, create.values + move, create.secrets, create.core, create.rootfs)
+    }
+
+    /**
+     * The stock runtime that serves is Docker (P2 B13b): its container, unless a unit of it runs instead (B16, both there: the
+     * unit when neither runs). Its move goes into our Docker mode where the box allows one (DockerMode.refusal), else a unit.
+     */
+    fun inDocker(install: com.csqtt.deploy.inspect.Installation): Boolean {
+        val container = install.containers.firstOrNull() ?: return false
+        val unit = install.units.firstOrNull() ?: return true
+        return container.state == "running" && unit.active != "active"
+    }
+
+    /**
+     * «Продолжить» a move a reboot or a kill cut off: the cut run's own plan again with resume, new credentials (only the
+     * fallbacks of a stock env that had none), and a move into Docker's root filesystem chosen again ([rootfs], required then:
+     * P2 B13b), as a Docker create's «Продолжить». Null: the kept plan is no move.
+     */
+    fun resumePlan(kept: Map<String, String>, resumeOf: String, core: Core, credentials: Credentials, rootfs: RootfsChoice? = null): RunPlan? {
+        if (kept["move_role"].isNullOrEmpty()) return null
+        val choice = if (kept["mode"] == "docker") checkNotNull(rootfs) { "a move into Docker needs its root filesystem" } else null
+        return RunPlan("create", kept - "action" + (if (choice != null) CreateRun.dockerKeys(choice) else emptyMap()) +
+            mapOf("resume" to "1", "resume_of" to resumeOf),
+            linkedMapOf("main_password" to credentials.mainPassword, "web_pass" to credentials.webPass, "secret_path" to credentials.secretPath),
+            core.bytes, choice?.let { CreateRun.upload(it) })
     }
 }
 

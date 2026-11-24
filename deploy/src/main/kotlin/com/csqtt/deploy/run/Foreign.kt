@@ -9,22 +9,27 @@ import com.csqtt.deploy.inspect.Inventory
 import com.csqtt.deploy.inspect.Owner
 
 /**
- * Removal of a stock systemd install (P2-PLAN §3 B11b; APP-PLAN §6.10; M-116, M-120, M-126, M-131): every object it has on the
- * box, listed before the typed confirmation, each from its stock role's own namespace (server-footprints.md §1.6, §1.7), which
- * run.sh checks again, so a plan cannot widen it. Its store stays unless [purge]; what is shared or generic is named as left.
+ * Removal of a stock install, systemd or Docker (P2-PLAN §3 B11b, B13b; APP-PLAN §6.10; M-116, M-120, M-126, M-131): every
+ * object it has on the box, listed before the typed confirmation, each from its stock role's own namespace (server-footprints.md
+ * §1.6, §1.7), which run.sh checks again, so a plan cannot widen it. Its store stays unless [purge]; what is shared or generic is
+ * named as left.
  */
 object ForeignRemoval {
     /** A stock role's namespace: what its deploy.sh writes, by name (2.0.0 → 2.5.3, slim and the side tool share them). */
     enum class Role(val word: String, val store: String, val tags: List<String>, val tables: List<Int>, val units: List<String>,
-        val paths: List<String>) {
+        val paths: List<String>,
+        /** Its Docker mode's container and image repository (P2 B13b): `csqtt` / `csqtt:<ver>`, `csqtt25` / `csqtt25:<ver>`. */
+        val container: String) {
         MAIN("main", "/etc/csqtt", listOf("CSQTT_MANAGED", "CSQTT_TPROXY"), listOf(30001, 1066),
             listOf("csqtt.service", "csqtt-docker-prereq.service", "csqtt-letsencrypt.service", "csqtt-letsencrypt.timer"),
             listOf("/usr/local/bin/csqtt", "/usr/local/lib/csqtt", "/usr/local/lib/csqtt-letsencrypt-renew.sh", "/opt/csqtt-certbot",
-                "/run/csqtt", "/etc/sysctl.d/99-csqtt.conf", "/etc/sysctl.d/99-csqtt-udp-buffers.conf", "/var/log/csqtt-install.log")),
+                "/run/csqtt", "/etc/sysctl.d/99-csqtt.conf", "/etc/sysctl.d/99-csqtt-udp-buffers.conf", "/var/log/csqtt-install.log"),
+            "csqtt"),
         SIDE("side", "/etc/csqtt25", listOf("CSQTT25_MANAGED", "CSQTT25_TPROXY"), listOf(30002),
             listOf("csqtt25.service", "csqtt25-docker-prereq.service", "csqtt25-letsencrypt.service", "csqtt25-letsencrypt.timer"),
             listOf("/usr/local/lib/csqtt25", "/opt/csqtt25-certbot", "/run/csqtt25", "/etc/sysctl.d/99-csqtt25.conf",
-                "/etc/sysctl.d/99-csqtt25-udp-buffers.conf", "/var/log/csqtt25-install.log")),
+                "/etc/sysctl.d/99-csqtt25-udp-buffers.conf", "/var/log/csqtt25-install.log"),
+            "csqtt25"),
     }
 
     /** The untagged rule every stock network-up puts at FORWARD's top, v4 and v6 (#10, M-126), as `iptables -S` prints it. */
@@ -39,9 +44,12 @@ object ForeignRemoval {
     data class Listing(val role: Role, val units: List<String>, val paths: List<String>, val tags: List<String>, val tables: List<Int>,
         val lineages: List<String>, val untagged: Boolean, val store: String?, val purge: Boolean, val left: List<String>,
         /** Where a symlinked store points: its removal takes the link alone (B11b review F3). */
-        val storeLink: String = "") {
+        val storeLink: String = "",
+        /** Its Docker mode's container and images (P2 B13b): none for a systemd install. */
+        val containers: List<String> = emptyList(), val images: List<String> = emptyList()) {
         val will: List<String> get() = listOfNotNull(
-            "Будет удалено: " + (units + paths + tags.map { "правила $it" } + tables.map { "маршрутизация $it" } +
+            "Будет удалено: " + (units + containers.map { "контейнер $it" } + images.map { "образ $it" } + paths +
+                tags.map { "правила $it" } + tables.map { "маршрутизация $it" } +
                 lineages.map { "сертификат $it" } + (if (untagged) listOf("общее правило FORWARD RELATED,ESTABLISHED") else emptyList()))
                 .joinToString(", ").ifEmpty { "ничего" },
             store?.let {
@@ -75,7 +83,10 @@ object ForeignRemoval {
 
     fun listing(install: Installation, classification: Classification, inv: Inventory, purge: Boolean): Listing? {
         val role = roleOf(install) ?: return null
-        if (install.containers.isNotEmpty()) return null
+        // a stock Docker install (P2 B13b): its own container, by its role's name alone, and every image of its repository
+        val containers = install.containers.map { it.name }.filter { it == role.container }
+        if (containers.size != install.containers.size) return null
+        val images = inv.images.map { it.ref }.filter { it.substringBefore(':') == role.container && ':' in it }.distinct()
         val others = classification.installations.filter { it !== install }
         val left = mutableListOf<String>()
         val units = role.units.filter { u -> inv.units.any { it.id == u } || inv.files.any { it.path == "/etc/systemd/system/$u" } }
@@ -123,7 +134,7 @@ object ForeignRemoval {
         if (inv.firewall.any { !it.isChain && it.text == CLAMP }) left += "общий TCPMSS-clamp в FORWARD (такой ставят и другие программы)"
         val store = install.stores.firstOrNull { it.dir == role.store }
         return Listing(role, units, paths, tags, tables, if (lastStock) lineages else emptyList(), untaggedOurs && other25 == null, store?.dir,
-            purge, left, store?.linkTarget.orEmpty())
+            purge, left, store?.linkTarget.orEmpty(), containers, images)
     }
 
     /**
@@ -139,6 +150,7 @@ object ForeignRemoval {
             "tags" to listing.tags.joinToString(","), "tables" to listing.tables.joinToString(","),
             "lineage" to listing.lineages.joinToString(","), "untagged" to if (listing.untagged) "1" else "0",
             "store" to listing.store.orEmpty(),
+            "containers" to listing.containers.joinToString(","), "images" to listing.images.joinToString(","),
         ) + (if (unit != null) mapOf("expect_unit" to unit.id) else emptyMap()) +
             (if (unit != null && sha != null) mapOf("expect_bin" to unit.exec, "expect_sha" to sha) else emptyMap()))
     }

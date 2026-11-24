@@ -287,4 +287,85 @@ class DockerTest {
         assertTrue(restore, "[ \$rs_dk_live = 1 ] && docker container inspect" in restore)
         assertTrue(restore, restore.indexOf("mf_add file \"\$in_state/docker\"") in 0 until restore.indexOf(">\"\$in_state/docker\""))
     }
+
+    // the stock 2.5.3 app's Docker install, as the zoo's seed inspects (P2 B13b)
+    private val stockDocker: List<String> by lazy {
+        checkNotNull(Classifier::class.java.getResource("fixtures/v253main-docker-noble.report")).readText().lines()
+            .filter { it.startsWith("CSQTT_INV|") || it.startsWith("CSQTT_PRE|") }
+    }
+
+    private fun values(plan: String) = plan.lines().filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
+
+    @Test
+    fun aStockDockerInstallIsRemovedWithItsContainerAndImages() {
+        val inv = inventory(*stockDocker.toTypedArray())
+        val c = Classifier.classify(inv)
+        val install = c.installations.single()
+        val l = checkNotNull(ForeignRemoval.listing(install, c, inv, purge = false))
+        assertEquals(ForeignRemoval.Role.MAIN, l.role)
+        assertEquals(listOf("csqtt"), l.containers)
+        assertEquals(listOf("csqtt:2.5.3"), l.images)
+        assertTrue(l.units.joinToString(), "csqtt-docker-prereq.service" in l.units)
+        assertTrue(l.will.joinToString(), "контейнер csqtt" in l.will.first() && "образ csqtt:2.5.3" in l.will.first())
+        val v = values(ForeignRemoval.plan(install, inv, l).planText())
+        assertEquals("csqtt" to "csqtt:2.5.3", v["containers"] to v["images"])
+        // the manager offers its move, and its removal
+        val entry = Manager.entries(c, checkNotNull(Version.parse("2.6.0")), inv).single()
+        assertTrue(entry.offers.joinToString { it.action.name }, entry.offers.any { it.action in setOf(Action.UPDATE, Action.REPAIR) })
+        assertTrue(entry.offers.any { it.action == Action.REMOVE })
+    }
+
+    @Test
+    fun aStockDockerInstallMovesIntoDockerAndItsContainerIsTheSwitch() {
+        val inv = inventory(*stockDocker.toTypedArray())
+        val c = Classifier.classify(inv)
+        val stock = c.installations.single()
+        assertTrue(MoveRun.inDocker(stock))
+        val proposal = com.csqtt.deploy.plan.Proposer.proposeMove(stock, c, inv, kotlin.random.Random(3))
+        val core = Core(ByteArray(1), "2.6.0")
+        val pin = checkNotNull(Rootfs.pin("amd64"))
+        val v = values(checkNotNull(MoveRun.plan(stock, c, inv, proposal, "203.0.113.7", core, Credentials.generate(),
+            RootfsChoice(pin, DockerMode.Source.Present))).planText())
+        assertEquals("docker", v["mode"])
+        assertEquals("46000" to "46002", v["udp"] to v["web"])
+        assertEquals(listOf("csqtt", "csqtt", "csqtt:2.5.3"), listOf(v["move_container"], v["move_containers"], v["move_images"]))
+        // no stock server unit to switch or re-check: its prereq goes with the finish
+        assertEquals("", v["move_unit"])
+        assertFalse(v.toString(), "expect_unit" in v)
+        assertTrue(v["move_units"].orEmpty(), "csqtt-docker-prereq.service" in v["move_units"].orEmpty())
+        // where Docker mode is refused: ours a unit, the stock container switched off by its policy all the same
+        val unit = values(checkNotNull(MoveRun.plan(stock, c, inv, proposal, "203.0.113.7", core, Credentials.generate())).planText())
+        assertFalse("mode" in unit)
+        assertEquals("csqtt", unit["move_container"])
+        // «Продолжить»: the kept plan again, its root filesystem chosen again
+        val resumed = values(checkNotNull(MoveRun.resumePlan(v + ("action" to "create"), "0123-ab", core, Credentials.generate(),
+            RootfsChoice(pin, DockerMode.Source.Fetch("https://example.invalid/rootfs.tar.gz")))).planText())
+        assertEquals(listOf("1", "0123-ab", "https://example.invalid/rootfs.tar.gz", "csqtt"),
+            listOf(resumed["resume"], resumed["resume_of"], resumed["rootfs_url"], resumed["move_container"]))
+        assertNull(MoveRun.resumePlan(mapOf("id" to "0a1b2c"), "0123-ab", core, Credentials.generate()))
+    }
+
+    @Test
+    fun bothRuntimesMoveFromTheOneThatServes() {
+        // B16: the stock unit beside the container; the move goes from the runtime that serves (the unit when neither does) and
+        // takes both
+        fun unit(active: String) = "CSQTT_INV|unit|id=csqtt.service|load=loaded|active=$active|sub=${if (active == "active") "running" else "dead"}|" +
+            "result=success|status=0|restarts=0|pid=0|file_state=disabled|fragment=/etc/systemd/system/csqtt.service|exec=/usr/local/bin/csqtt|" +
+            "exec_ok=0|flags=--listen 0.0.0.0:46000 --web-port 46002 --config-dir /etc/csqtt|pre=|pre_status=|env="
+        val inv = inventory(*(stockDocker + unit("inactive")).toTypedArray())
+        val c = Classifier.classify(inv)
+        val both = c.installations.single()
+        assertTrue(both.broken.joinToString(), "B16" in both.broken)
+        assertTrue(MoveRun.inDocker(both))
+        val entry = Manager.entries(c, checkNotNull(Version.parse("2.6.0")), inv).single()
+        assertTrue(entry.offers.joinToString { it.action.name } + " / " + entry.note, entry.offers.any { it.action == Action.REPAIR })
+        val proposal = com.csqtt.deploy.plan.Proposer.proposeMove(both, c, inv, kotlin.random.Random(3))
+        val v = values(checkNotNull(MoveRun.plan(both, c, inv, proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate(),
+            RootfsChoice(checkNotNull(Rootfs.pin("amd64")), DockerMode.Source.Present))).planText())
+        assertEquals("csqtt.service" to "csqtt", v["move_unit"] to v["move_container"])
+        assertTrue(v["move_units"].orEmpty(), v["move_units"].orEmpty().startsWith("csqtt.service"))
+        // the unit serving, the container not: the unit's runtime
+        val unitServes = stockDocker.map { it.replace("|state=running|", "|state=exited|") } + unit("active")
+        assertFalse(MoveRun.inDocker(Classifier.classify(inventory(*unitServes.toTypedArray())).installations.single()))
+    }
 }
