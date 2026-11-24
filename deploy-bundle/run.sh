@@ -547,6 +547,25 @@ EOF
 	return 0
 }
 
+# mf_objects_ours <id> (stdin: a manifest's objects, `kind path` lines): those that are the instance's own by their names: its two
+# directories, its unit, its docker file, a move's drop-in on the stock unit, its container, our images. A cut-off run's undo
+# («Продолжить», a move's settle) removes what the manifest it reads from the box names: a corrupt one must not reach a path
+# outside our roots (P2-PLAN §2.4 «a corrupt manifest»; the operator's word of 2026-11-24, the guard)
+mf_objects_ours() {
+	while read -r mo_kind mo_path; do
+		[ -n "$mo_kind" ] || continue
+		case $mo_path in *..*) continue ;; esac
+		case "$mo_kind $mo_path" in
+		"dir /opt/sanityprotocol/csqtt/$1" | "dir /var/lib/sanityprotocol/csqtt/$1" | "unit /etc/systemd/system/sanity-csqtt-$1.service" | \
+			"file /var/lib/sanityprotocol/csqtt/$1/docker" | "container sanity-csqtt-$1") ;;
+		"file /etc/systemd/system/"*".service.d/sanity-move.conf" | "image sanity-csqtt:"* | "image sanity-csqtt-rootfs:"*) ;;
+		*) continue ;;
+		esac
+		printf '%s %s\n' "$mo_kind" "$mo_path"
+	done
+	return 0
+}
+
 # removes what this run made, newest first: the unit before the files it runs, then any parent left empty
 mf_undo() {
 	mu_list=$(printf '%s\n' "$MF_OBJECTS" | awk 'NF {l[++n] = $0} END {for (i = n; i > 0; i--) print l[i]}')
@@ -821,7 +840,9 @@ mv_settle() {
 	# (the stock server is started again only if it ran when the move stopped it: B12 review F4)
 	cr_mv_ran=0
 	[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
-	MF_OBJECTS=$(mf_objects_of "$MF") MF_HOST=$(mf_host_of "$MF")
+	# (what the cut run's manifest names, only as far as it is the instance's own: the guard)
+	MF_OBJECTS=$(mf_objects_of "$MF" | mf_objects_ours "$cr_id")
+	MF_HOST=$(mf_host_of "$MF" | in_unit=$cr_unit in_state=$cr_state inst_ours_only "$cr_id")
 	# ours as the cut run made it: its unit, or in Docker its container, made from its docker file when the cut came first (P2 B13b)
 	cr_docker=0 ms_check=$cr_unit
 	if [ -f "$cr_state/docker" ]; then
@@ -1085,8 +1106,8 @@ action_create() {
 			[ ! -s "$RUNS/$cr_of/result" ] && ! grep -q '^CSQTT_RESULT|' "$RUNS/$cr_of/log"; then
 			# «Продолжить» (B8 review F1): an earlier run of this plan was cut off; what its manifest names goes (its server
 			# stopped, its rules with it), and the create runs again from the start with this run's credentials
-			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json")
-			MF_HOST=$(mf_host_of "$cr_state/manifest.json")
+			MF_OBJECTS=$(mf_objects_of "$cr_state/manifest.json" | mf_objects_ours "$cr_id")
+			MF_HOST=$(mf_host_of "$cr_state/manifest.json" | in_unit=$cr_unit in_state=$cr_state inst_ours_only "$cr_id")
 			[ ! -f "$cr_state/stock-ran" ] || cr_mv_ran=1
 			# the images that run made (pinned, the same again) stay for this one, its own to take if it fails (P2 B13a review F1)
 			cr_kept_images=$(printf '%s\n' "$MF_OBJECTS" | grep '^image ')
@@ -1624,12 +1645,15 @@ inst_found_host() {
 	return 0
 }
 
-# inst_ours_only <id> (after inst_paths; stdin: the host changes a manifest names, its sysctl and service- ones taken out): those
-# that are this instance's own by their names. A manifest is trusted for what its create recorded, never for another's: a
-# corrupt one naming an admin's ufw rule, or another instance's, must not take it (P2-PLAN §2.4 «a corrupt manifest», the
-# zoo's corrupt cell). ufw's rules commented sqc-<id>, as ufw keeps them whether it is on or off; firewalld's zone sqc<id>, its
-# policy sqc<id>-fwd, a port in that zone or one of the instance's own ports in another, and the reload
+# inst_ours_only <id> (after inst_paths; stdin: the host changes a manifest names): those that are this instance's own by their
+# names. A manifest is trusted for what its create recorded, never for another's: a corrupt one naming an admin's ufw rule, or
+# another instance's, must not take it (P2-PLAN §2.4 «a corrupt manifest», the zoo's corrupt cell). ufw's rules commented
+# sqc-<id>, as ufw keeps them whether it is on or off; firewalld's zone sqc<id>, its policy sqc<id>-fwd, a port in that zone or
+# one of the instance's own ports in another, and the reload; a raised floor or the server's tuning by its key (run.sh's own
+# lists), Docker's unit as a create enabled or started it. (A removal takes the last two out before: they stay with the box.
+# A cut-off run's undo, «Продолжить» and a move's settle, keeps them: the operator's word of 2026-11-24, the guard)
 inst_ours_only() {
+	io_keys=" $(printf '%s\n%s\n' "$HOST_FLOORS" "$HOST_TUNING" | awk '{print $1}' | tr '\n' ' ') "
 	io_ufw=''
 	! command -v ufw >/dev/null 2>&1 || io_ufw=$(ufw show added 2>/dev/null)
 	# its own ports, from its flags: its unit's, its container's, or those kept for «Восстановить»
@@ -1643,11 +1667,11 @@ inst_ours_only() {
 	done
 	while read -r io_kind io_rest; do
 		[ -n "$io_kind" ] || continue
-		io_zone='' io_port='' io_rule='' io_policy=''
+		io_zone='' io_port='' io_rule='' io_policy='' io_key='' io_unit=''
 		for io_kv in $io_rest; do
 			case $io_kv in
 			zone=*) io_zone=${io_kv#zone=} ;; port=*) io_port=${io_kv#port=} ;; rule=*) io_rule=${io_kv#rule=} ;;
-			policy=*) io_policy=${io_kv#policy=} ;;
+			policy=*) io_policy=${io_kv#policy=} ;; key=*) io_key=${io_kv#key=} ;; unit=*) io_unit=${io_kv#unit=} ;;
 			esac
 		done
 		case $io_kind in
@@ -1660,6 +1684,12 @@ inst_ours_only() {
 			[ "$io_zone" = "sqc$1" ] || [ $io_own = 1 ] || continue
 			;;
 		firewalld-reload) ;;
+		sysctl)
+			io_own=0
+			case $io_keys in *" $io_key "*) [ -z "$io_key" ] || io_own=1 ;; esac
+			[ $io_own = 1 ] || continue
+			;;
+		service-enabled | service-started) [ "$io_unit" = docker.service ] || continue ;;
 		*) continue ;;
 		esac
 		printf '%s\n' "$io_kind${io_rest:+ $io_rest}"

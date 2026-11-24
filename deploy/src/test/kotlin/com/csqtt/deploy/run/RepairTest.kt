@@ -170,4 +170,48 @@ class RepairTest {
         val takeDown = function("inst_take_down")
         assertTrue(takeDown, "grep -v '^service-' | inst_ours_only \"\$1\")" in takeDown)
     }
+
+    @Test
+    fun aCutRunsUndoTakesOnlyWhatIsTheInstancesOwn() {
+        // the guard (the operator's word of 2026-11-24): «Продолжить» and a move's settle undo what the manifest they read from
+        // the box names; a corrupt one must reach no path outside our roots and no host change of another's
+        fun sh(body: String): List<String> {
+            val dir = kotlin.io.path.createTempDirectory("csqtt-guard").toFile()
+            try {
+                val f = File(dir, "check.sh")
+                f.writeText(body)
+                val proc = ProcessBuilder("sh", f.path).redirectErrorStream(true).start()
+                assertTrue(proc.waitFor(30, TimeUnit.SECONDS))
+                return proc.inputStream.bufferedReader().readText().lines().filter { it.isNotEmpty() }
+            } finally {
+                dir.deleteRecursively()
+            }
+        }
+        val own = listOf("dir /opt/sanityprotocol/csqtt/0a1b2c", "dir /var/lib/sanityprotocol/csqtt/0a1b2c",
+            "unit /etc/systemd/system/sanity-csqtt-0a1b2c.service", "file /var/lib/sanityprotocol/csqtt/0a1b2c/docker",
+            "file /etc/systemd/system/csqtt.service.d/sanity-move.conf", "container sanity-csqtt-0a1b2c",
+            "image sanity-csqtt:2.6.0-1abc2def", "image sanity-csqtt-rootfs:9f8e7d6c")
+        val foreign = listOf("dir /srv/admin", "dir /", "dir /var/lib/sanityprotocol/csqtt/9f8e7d", "dir /opt/sanityprotocol",
+            "unit /etc/systemd/system/ssh.service", "unit /etc/systemd/system/sanity-csqtt-9f8e7d.service",
+            "file /etc/passwd", "file /etc/systemd/system/../../../root/x.service.d/sanity-move.conf",
+            "container sanity-csqtt-9f8e7d", "container postgres", "image postgres:16", "dir /opt/sanityprotocol/csqtt/0a1b2c/../../..")
+        val lines = (own + foreign).shuffled(java.util.Random(7))
+        assertEquals(lines.filter { it in own }, sh(function("mf_objects_ours") + "mf_objects_ours 0a1b2c <<'EOF'\n" +
+            lines.joinToString("\n") + "\nEOF\n"))
+        // the host list: a floor or the server's tuning by its key, Docker's unit as a create enabled or started it
+        val lists = Regex("(?s)\nHOST_FLOORS='.*?'\n").find(script)!!.value + Regex("(?s)\nHOST_TUNING='.*?'\n").find(script)!!.value
+        val host = listOf("sysctl key=net.core.rmem_max was=212992 set=67108864", "sysctl key=net.ipv4.ip_forward was=0 set=1",
+            "sysctl key=net.ipv4.tcp_congestion_control was=cubic set=bbr", "sysctl key=kernel.panic was=0 set=1",
+            "sysctl key=net.ipv4.ip_forward_use_pmtu was=0 set=1", "sysctl key= was=0", "service-started unit=docker.service",
+            "service-enabled unit=docker.service", "service-enabled unit=ssh.service", "service-started unit=")
+        assertEquals(listOf(host[0], host[1], host[2], host[6], host[7]),
+            sh(lists + "ufw() { :; }\nin_unit=sanity-csqtt-zz-no-such.service in_state=/nonexistent\n" + function("inst_ours_only") +
+                "inst_ours_only 0a1b2c <<'EOF'\n" + host.joinToString("\n") + "\nEOF\n"))
+        // both paths read the cut run's manifest through the two (a removal's own stays as it was)
+        for (path in listOf(function("mv_settle"), function("action_create"))) {
+            assertTrue(path, "| mf_objects_ours \"\$cr_id\")" in path)
+            assertTrue(path, "| in_unit=\$cr_unit in_state=\$cr_state inst_ours_only \"\$cr_id\")" in path)
+        }
+        assertFalse(Regex("MF_OBJECTS=\\$\\(mf_objects_of \"[^\"]+\"\\)").containsMatchIn(function("mv_settle") + function("action_create")))
+    }
 }
