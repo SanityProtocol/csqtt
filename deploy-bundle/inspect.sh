@@ -123,10 +123,10 @@ pre_nat() {
 			pn_probe=ok
 			pn_err=''
 		else
-			# iptables exits 4 when another program holds the xtables lock past -w (fail2ban, a Docker start): busy, not "no NAT"
-			pn_rc=$?
+			# another program held the xtables lock past -w (fail2ban, a Docker start): busy, not "no NAT". By its words only:
+			# iptables-nft exits 4 for an unusable nf_tables too (OpenVZ 7), and that box has no NAT (verify N1)
 			pn_probe=failed
-			case "$pn_rc:$pn_err" in 4:* | *"xtables lock"*) pn_probe=busy ;; esac
+			case $pn_err in *"xtables lock"*) pn_probe=busy ;; esac
 			pn_err=$(printf '%s\n' "$pn_err" | head -n 1)
 		fi
 		if [ "$probe_ns" = 0 ]; then
@@ -256,21 +256,23 @@ pre_clock() {
 }
 
 # Each host's DNS and HTTPS, every call bounded: a dead resolver is what this check exists to report, and an unbounded wait
-# (5 s per silent nameserver, wget's 20 tries) would cost the whole report its deadline. No host is started past 12 s: it is
-# reported unchecked (dns empty), which is no finding. wget's exit 8 is the server's error answer: the host was reached.
+# (5 s per silent nameserver, wget's 20 tries) would cost the whole report its deadline. glibc's resolver is told to give
+# each nameserver one try of 2 s, so a dead first one and a live second still answer inside the 8 s bound (verify N2); wget
+# asks for headers only, bounded too (a full page at a trickle took 39 s, verify N3), and its exit 8 is the server's error
+# answer: the host was reached. No host is started past 12 s: it is reported unchecked (dns empty), which is no finding.
 pre_reach() {
 	pr_start=$(date +%s)
 	for pr_host in "$@"; do
 		pr_dns='' pr_https=skipped
 		if [ $(($(date +%s) - pr_start)) -lt 12 ]; then
 			pr_dns=0
-			if have getent; then tmo getent ahosts "$pr_host" >/dev/null 2>&1 && pr_dns=1; fi
+			if have getent; then tmo_s 8 env RES_OPTIONS='timeout:2 attempts:1' getent ahosts "$pr_host" >/dev/null 2>&1 && pr_dns=1; fi
 			if [ "$pr_dns" = 1 ]; then
 				if have curl; then
 					curl -s -o /dev/null -m 5 -I "https://$pr_host/" && pr_https=ok || pr_https=failed
 				elif have wget; then
 					pr_rc=0
-					wget -q -t 1 -T 5 -O /dev/null "https://$pr_host/" 2>/dev/null || pr_rc=$?
+					tmo_s 8 wget -q -t 1 -T 5 --spider "https://$pr_host/" 2>/dev/null || pr_rc=$?
 					case $pr_rc in 0 | 8) pr_https=ok ;; *) pr_https=failed ;; esac
 				fi
 			fi
@@ -290,7 +292,13 @@ pre_rundir() {
 
 # a docker CLI whose daemon hangs would hang the inspection: every call to it is bounded
 tmo() {
-	if have timeout; then timeout 5 "$@"; else "$@"; fi
+	tmo_s 5 "$@"
+}
+
+tmo_s() {  # tmo_s <seconds> <command…>
+	tm_s=$1
+	shift
+	if have timeout; then timeout "$tm_s" "$@"; else "$@"; fi
 }
 
 # The daemon is asked only when it runs: docker.socket starts a stopped Docker on the first connect, and with it every
