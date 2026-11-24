@@ -74,15 +74,49 @@ class CreateTest {
         val recheck = script.substringAfter("run_recheck() {").substringBefore("\n}\n")
         val read = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(recheck).map { it.groupValues[1] }.toSet()
         // (action and id: an update cut off before holds the binary its plan expects, B10 review F2; core_sha: an update that
-        // landed before a cut finds its own target, B10 verify of round 2, L1)
-        assertEquals(setOf("ports", "subnet", "iface", "resume", "expect_unit", "expect_sha", "expect_bin", "action", "id", "core_sha"), read)
+        // landed before a cut finds its own target, B10 verify of round 2, L1; own_ports: a move's, B12)
+        assertEquals(setOf("ports", "subnet", "iface", "resume", "expect_unit", "expect_sha", "expect_bin", "action", "id", "core_sha",
+            "own_ports"), read)
         val plan = CreateRun.plan(proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate()).planText()
         for (key in listOf("ports", "subnet", "iface", "action")) assertTrue(key, "\n$key=" in "\n$plan")
         // and the create action reads only keys the plan has
         val create = script.substringAfter("action_create() {").substringBefore("\n}\n")
         val used = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(create).map { it.groupValues[1] }.toSet()
-        // (resume only on a continuation: «Продолжить», B8 review F1)
-        for (key in used - setOf("resume", "resume_of")) assertTrue("create reads $key", "\n$key=" in "\n$plan")
+        // (resume only on a continuation: «Продолжить», B8 review F1; the move's keys only on a move, B12)
+        for (key in used - setOf("resume", "resume_of", "move_role", "move_unit", "move_store")) {
+            assertTrue("create reads $key", "\n$key=" in "\n$plan")
+        }
+    }
+
+    @Test
+    fun aMovePlanCarriesWhatItsRunReadsAndLeavesWhatOursTakesOver() {
+        fun fixture(name: String) = checkNotNull(com.csqtt.deploy.inspect.Classifier::class.java.getResource("fixtures/$name.report"))
+            .readText().let { com.csqtt.deploy.inspect.Inventory.from((com.csqtt.deploy.wire.LineCodec.parse(it) as com.csqtt.deploy.wire.Report.Complete).lines) }
+        val inv = fixture("v253main-systemd-noble")
+        val c = com.csqtt.deploy.inspect.Classifier.classify(inv)
+        val stock = c.installations.single()
+        val proposal = com.csqtt.deploy.plan.Proposer.proposeMove(stock, c, inv, kotlin.random.Random(3))
+        val text = checkNotNull(MoveRun.plan(stock, c, inv, proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate())).planText()
+        val v = text.lines().filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
+        // it is a create on the stock ports, which the stock server holds until the switch
+        assertEquals("create", v["action"])
+        assertEquals("46000" to "46002", v["udp"] to v["web"])
+        assertEquals("46000,46002", v["own_ports"])
+        assertEquals(Triple("main", "csqtt.service", "/etc/csqtt"), Triple(v["move_role"], v["move_unit"], v["move_store"]))
+        assertEquals("csqtt.service", v["expect_unit"])
+        // its finish takes the stock objects, and never the LE lineage ours takes over (B14)
+        assertTrue(v["move_units"]!!.startsWith("csqtt.service") && "/usr/local/bin/csqtt" in v["move_paths"]!!)
+        assertEquals("", v["move_lineage"])
+        // what create's run, its finish and its settle read is all in the plan
+        val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        val reads = listOf("action_create", "mv_finish", "mv_settle").flatMap { f ->
+            Regex("\\$\\(plan ([a-z_]+)\\)").findAll(script.substringAfter("$f() {").substringBefore("\n}\n")).map { it.groupValues[1] }.toList()
+        }.toSet() - setOf("resume", "resume_of")
+        for (key in reads) assertTrue("the move reads $key", key in v)
+        // a non-stock installation has no move
+        val ours = fixture("handmade-systemd-noble")
+        val oc = com.csqtt.deploy.inspect.Classifier.classify(ours)
+        assertEquals(null, MoveRun.plan(oc.installations.single(), oc, ours, proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate()))
     }
 
     @Test

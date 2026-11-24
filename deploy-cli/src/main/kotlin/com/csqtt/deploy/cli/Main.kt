@@ -81,6 +81,10 @@ private const val USAGE = """usage: deploy-cli <command>
   repair <target> <code>  «Исправить» a box problem (B11c): B14/B24 a Docker prereq without its helper, B15 the stock
                           certificate timer beside swg's take-over, S1 our sysctl drop-in left with no instance of ours
   rebuild-manifest <target> <id>   «Починить» an instance of ours whose manifest was lost (B11c): rebuilt from what lives
+  move <target> <name> [resume=<run id>]   «Обновить» a stock systemd install = move it into our layout (B12; <name> as
+                          inspect prints it): our instance on its ports with its store, certificate and panel login, through
+                          one marker, the stock install removed after the verify (its store kept); then ours read back and
+                          checked from here. resume=<run id>: «Продолжить» a move a reboot or a kill cut off, with its kept plan
   update <target> <id>    an instance of ours to the target's core (B10): stage, switch, verify, rolled back on a failure;
                           then its connection read back (the same passwords and pin) and checked from here
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
@@ -117,6 +121,8 @@ private fun dispatch(args: Array<String>): Int {
         args.size == 3 && args[0] in setOf("restore", "restart", "rebuild-manifest") ->
             withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], args[0]) }
         args.size == 3 && args[0] == "repair" -> withSession(File(args[1])) { session, p -> repairBox(session, p, File(args[1]), args[2]) }
+        args.size in 3..4 && args[0] == "move" && (args.size == 3 || args[3].startsWith("resume=")) ->
+            withSession(File(args[1])) { session, p -> move(session, p, File(args[1]), args[2], args.getOrNull(3)?.removePrefix("resume=")) }
         args.size in 3..4 && args[0] == "remove-foreign" && (args.size == 3 || args[3] == "purge") ->
             withSession(File(args[1])) { session, p -> removeForeign(session, p, File(args[1]), args[2], args.size == 4) }
         args.size in 3..4 && args[0] == "journal" -> withSession(File(args[1])) { session, p ->
@@ -722,4 +728,75 @@ private fun removeForeign(session: SshSession, p: Properties, target: File, name
         }
     }
     return follow(runner, coordinator, runId, before)
+}
+
+/**
+ * «Обновить» a stock systemd install = its move into our layout (P2 B12): inspected (the disk and run-dir stops of a core run
+ * first), the move proposed (our id, interface, subnet and slot; its ports), what it takes said, the run, then ours read back
+ * (the same main password from the copied store, the same certificate pin) and checked from here.
+ */
+private fun move(session: SshSession, p: Properties, target: File, name: String, resumeOf: String? = null): Int {
+    val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
+    val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
+    val remote = session.asRemote()
+    val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+    val runner = Runner(remote, root)
+    val plan: RunPlan
+    val id: String
+    if (resumeOf != null) {
+        // «Продолжить» a move a reboot or a kill cut off: the same plan (its id, its stock objects), resent with resume; its
+        // credentials are only the fallbacks of a stock env that had none, so new ones serve
+        if (runner.status().none { it.id == resumeOf && it.interrupted && it.action == "create" }) {
+            return 2.also { println("run $resumeOf is not a move the box lists as cut off: nothing to continue") }
+        }
+        val kept = runner.keptPlan(resumeOf)?.lines()?.filter { '=' in it }?.associate { it.substringBefore('=') to it.substringAfter('=') }
+            ?: return 2.also { println("no plan kept for run $resumeOf on the box") }
+        if (kept["move_role"].isNullOrEmpty()) return 2.also { println("run $resumeOf was no move") }
+        id = kept["id"] ?: return 2.also { println("run $resumeOf kept no id") }
+        val credentials = Credentials.generate()
+        plan = RunPlan("create", kept - "action" + mapOf("resume" to "1", "resume_of" to resumeOf),
+            linkedMapOf("main_password" to credentials.mainPassword, "web_pass" to credentials.webPass, "secret_path" to credentials.secretPath),
+            core.bytes)
+        println("will: «Продолжить» the move into sqc-$id from run $resumeOf")
+    } else {
+        val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+        val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+        if (coreRunStopped(report)) return 6
+        val inventory = Inventory.from(report.lines)
+        val classification = Classifier.classify(inventory)
+        val install = classification.installations.firstOrNull { it.name == name } ?: return 2.also { println("no installation $name on this box") }
+        val proposal = try {
+            Proposer.proposeMove(install, classification, inventory)
+        } catch (refused: ProposalRefused) {
+            return 2.also { println("refused: ${refused.reason}") }
+        }
+        plan = com.csqtt.deploy.run.MoveRun.plan(install, classification, inventory, proposal,
+            CreateRun.publicAddress(Preflight.from(report.lines), p.prop("host").orEmpty()), core, Credentials.generate())
+            ?: return 2.also { println("$name is not a stock systemd install to move") }
+        id = proposal.id
+        println("will: $name moves into ${proposal.instance}: ${proposal.iface} ${proposal.subnet} udp=${proposal.udpPort} " +
+            "web=${proposal.webPort} slot=${proposal.slot}")
+        com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inventory, purge = false)?.will?.forEach { println("will then: $it") }
+    }
+    val sshHost = p.prop("host").orEmpty()
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    when (val outcome = runner.start(runId, plan)) {
+        is StartOutcome.Started -> {}
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            return 8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            return 7
+        }
+    }
+    val code = follow(runner, coordinator, runId, before)
+    if (code != 0) return code
+    return readBack(root, id, sshHost, null)
 }

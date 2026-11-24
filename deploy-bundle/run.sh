@@ -219,6 +219,8 @@ run_recheck() {
 		rr_holder=$(printf '%s\n' "$rr_line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')
 		# a re-run after an interruption finds its own server on the port: ours, so it goes on
 		[ "$(plan resume)" = 1 ] && [ "$rr_holder" = csqtt-server ] && continue
+		# a move takes over the stock install's ports: its stock server holds them until the switch (P2 B12)
+		case ",$(plan own_ports)," in *",$rr_port,"*) [ "$rr_holder" = csqtt ] || [ "$rr_holder" = csqtt25 ] && continue ;; esac
 		run_result failed-cleaned "port $rr_port is now held by ${rr_holder:-the kernel (a VPN interface)}" "check again: the app proposes another port"
 	done
 	rr_net=$(plan subnet)
@@ -516,6 +518,11 @@ mf_undo() {
 			systemctl reset-failed "${mu_path##*/}" >/dev/null 2>&1
 			;;
 		dir) rm -rf "$mu_path" ;;
+		# a single file this run wrote (the move's drop-in on the stock unit)
+		file)
+			rm -f "$mu_path"
+			case $mu_path in /etc/systemd/system/*) rmdir "${mu_path%/*}" 2>/dev/null; systemctl daemon-reload ;; esac
+			;;
 		esac
 	done <<EOF
 $mu_list
@@ -642,12 +649,10 @@ inst_open_sh() {  # inst_open_sh <id> <state dir> <openings: port/proto…>
 }
 
 # an instance's unit
-inst_unit_text() {  # inst_unit_text <id> <root> <state> <flags> <open lines>
+inst_unit_text() {  # inst_unit_text <id> <root> <state> <flags> <open lines> [a [Unit] line: a move's marker condition]
+	printf '[Unit]\nDescription=csqtt server sqc-%s (SanityProtocol)\nWants=network-online.target\nAfter=network-online.target\n' "$1"
+	[ -z "${6:-}" ] || printf '%s\n' "$6"
 	cat <<EOF
-[Unit]
-Description=csqtt server sqc-$1 (SanityProtocol)
-Wants=network-online.target
-After=network-online.target
 
 [Service]
 # no CSQTT_SERVICE_MANAGER: the panel's «Перезапустить» then ends the server, and Restart=always starts it again (the
@@ -677,6 +682,76 @@ CR_SERVER_SYSCTLS='net.ipv4.ip_forward net.ipv4.conf.all.accept_redirects net.ip
 net.ipv4.tcp_congestion_control net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_reordering net.ipv4.tcp_window_scaling
 net.ipv4.tcp_fastopen net.ipv4.tcp_slow_start_after_idle'
 
+# an env value as systemd's EnvironmentFile reads it: a surrounding pair of double quotes taken off and \" \\ unescaped (the
+# stock apps' systemd mode quotes their env so); a bare value as it stands
+env_unquote() { sed '/^".*"$/ { s/^"//; s/"$//; s/\\\(["\\]\)/\1/g; }'; }
+
+# ── the move (P2 B12, P2-PLAN §1.7): create's run taking a stock install's place through one marker. Our unit carries
+# ConditionPathExists=<state>/moved and a drop-in on the stock unit its negation: renaming the marker into place moves the
+# box from theirs to ours, and a reboot at any instant starts exactly one of the two ──────────────────────────────────────
+# what is copied from the stock config dir once its server is stopped (consistent then): the store, its certificate (the
+# panel's pin stays), a one-shot overrides file it had not yet consumed (B6)
+MV_STORE='csqtt.db csqtt.db-wal csqtt.db-shm passwords.json passwords.json.imported web_cert.pem web_key.pem deploy-overrides.json'
+
+mv_line() {  # mv_line <key> <fallback>: the stock env's line for <key>, its value as it stands (quoted or not), or <fallback>
+	ml_v=$(sed -n "s/^\(export \)\{0,1\}$1=//p" "$cr_mv_store/csqtt.env" 2>/dev/null | head -n 1)
+	[ -n "$ml_v" ] || ml_v=$2
+	[ -z "$ml_v" ] || printf '%s=%s\n' "$1" "$ml_v"
+}
+
+mv_secret() { sed -n 's/^CSQTT_WEB_SECRET_PATH=//p' "$cr_state/env" | head -n 1 | env_unquote; }
+
+# the move's end, in the plan's order: our unit without its condition (a marker gone later must never skip it at a boot), the
+# stock install's objects through the foreign removal (its store kept: DE-T3), its drop-in, the marker last
+mv_finish() {
+	run_phase finish 90
+	sed '/^ConditionPathExists=/d' "/etc/systemd/system/$cr_unit" >"/etc/systemd/system/$cr_unit.new" &&
+		mv -f "/etc/systemd/system/$cr_unit.new" "/etc/systemd/system/$cr_unit" ||
+		run_result failed-not-rolled-back "cannot write $cr_unit without its marker condition" "«Починить»: it serves while the marker stays"
+	systemctl daemon-reload
+	for cr_u in $(plan move_units | tr , ' '); do run_cmd systemctl disable --now "$cr_u"; done
+	fr_take move_ 0
+	if [ -n "$cr_mv_unit" ]; then
+		rm -f "/etc/systemd/system/$cr_mv_unit.d/sanity-move.conf"
+		rmdir "/etc/systemd/system/$cr_mv_unit.d" 2>/dev/null
+		MF_OBJECTS=$(printf '%s\n' "$MF_OBJECTS" | grep -v "^file /etc/systemd/system/$cr_mv_unit.d/sanity-move.conf\$")
+	fi
+	systemctl daemon-reload
+	mf_write
+	rm -f "$cr_state/moved"
+}
+
+# A move cut off after its switch (a reboot, a kill): the marker holds ours as the box's server. Serving, the move is finished;
+# not, the box goes back to the stock install, which was never changed, and ours stays as a kept store «Восстановить» knows:
+# it may have served its clients since, so nothing of it is deleted
+mv_settle() {
+	run_phase recover 8
+	: >"$RUN_DIR/switching"
+	MF_OBJECTS=$(mf_objects_of "$MF") MF_HOST=$(mf_host_of "$MF")
+	systemctl is-active --quiet "$cr_unit" || run_cmd systemctl start "$cr_unit"
+	cr_why=$(inst_verify "$cr_unit" "$cr_udp" "$cr_web" "$cr_iface" "$(mv_secret)")
+	if [ -z "$cr_why" ]; then
+		mv_finish
+		run_phase "done" 100
+		run_result ok "" "the move cut off before is finished: read the connection back"
+	fi
+	systemctl stop "$cr_unit" 2>/dev/null
+	{ printf '# release %s\n' "$(basename "$(readlink "$cr_root/current" 2>/dev/null)" 2>/dev/null)"
+		sed '/^ConditionPathExists=/d' "/etc/systemd/system/$cr_unit"; } >"$cr_state/unit.saved"
+	rm -f "$cr_state/moved"
+	MF_OBJECTS=$(printf '%s\n' "$MF_OBJECTS" | grep -v "^dir $cr_state\$")
+	mf_undo
+	inst_sweep "$cr_id"
+	MF_HOST=$(printf '%s\n' "$MF_HOST" | grep -v '^sysctl ')
+	host_undo
+	MF_OBJECTS="dir $cr_state" MF_HOST=''
+	mf_write
+	systemctl daemon-reload
+	[ -z "$cr_mv_unit" ] || run_cmd systemctl start "$cr_mv_unit"
+	run_result failed-rolled-back "the move cut off before does not serve: $cr_why" \
+		"the stock install runs again; the new instance's store is kept («Восстановить» brings it back)"
+}
+
 action_create() {
 	cr_id=$(plan id) cr_iface=$(plan iface) cr_subnet=$(plan subnet) cr_udp=$(plan udp) cr_web=$(plan web)
 	cr_slot=$(plan slot) cr_bind=$(plan web_bind) cr_version=$(plan version) cr_sha=$(plan core_sha)
@@ -691,12 +766,22 @@ action_create() {
 	for cr_d in /opt/sanityprotocol /opt/sanityprotocol/csqtt /var/lib/sanityprotocol/csqtt; do
 		[ -e "$cr_d" ] || cr_parents="$cr_d $cr_parents"
 	done
+	# a move (P2 B12, §1.7): the stock install this instance takes the place of, its role, its server unit (none when its unit
+	# is gone, B2) and its config dir; all empty for a plain create
+	cr_mv_role=$(plan move_role) cr_mv_unit=$(plan move_unit) cr_mv_store=$(plan move_store)
+	cr_move=0 cr_mv_stopped=0
+	[ -z "$cr_mv_role" ] || cr_move=1
 	action_cleanup() {
 		mf_undo
 		# the server's own footprint back to before the switch, then our host changes back to before this run
 		[ ! -e "$RUN_DIR/switching" ] || cr_server_undo
 		host_undo
 		for cr_d in $cr_parents; do rmdir "$cr_d" 2>/dev/null; done
+		# a move undone: the stock install runs again, never changed (its drop-in and the marker went with the objects above)
+		if [ "$cr_mv_stopped" = 1 ] && [ -n "$cr_mv_unit" ]; then
+			systemctl daemon-reload
+			run_cmd systemctl start "$cr_mv_unit"
+		fi
 		return 0
 	}
 	cr_fail() { action_cleanup; run_result failed-cleaned "$1" "${2:-check again}"; }
@@ -709,6 +794,14 @@ action_create() {
 	# stage: nothing is made until the box and the binary have answered, and every object the manifest will name is new, so
 	# undoing this run can remove only what it made
 	run_phase stage 10
+	if [ $cr_move = 1 ]; then
+		# every stock object the move will take, in its role's namespace, before anything changes
+		fr_validate "$cr_mv_role" move_
+		fr_ok "$cr_mv_role" store "$cr_mv_store" || run_result failed-cleaned "$cr_mv_store is not the stock $cr_mv_role store" "update the app"
+		[ -z "$cr_mv_unit" ] || fr_ok "$cr_mv_role" unit "$cr_mv_unit" ||
+			run_result failed-cleaned "$cr_mv_unit is not the stock $cr_mv_role unit" "update the app"
+		[ ! -f "$cr_state/moved" ] || mv_settle
+	fi
 	if [ -e "$cr_state" ] || [ -e "$cr_root" ] || [ -e "/etc/systemd/system/$cr_unit" ]; then
 		# «Продолжить» undoes only what the run it continues made and left with no result: never a finished instance (whose
 		# store holds its clients), never one a later run made (B8 verify F8)
@@ -731,6 +824,11 @@ action_create() {
 			cr_server_undo
 			host_undo
 			MF_OBJECTS='' MF_HOST=''
+			# a move cut off before its switch: the stock install it stopped serves again until this run stops it in turn
+			if [ $cr_move = 1 ] && [ -n "$cr_mv_unit" ] && ! systemctl is-active --quiet "$cr_mv_unit"; then
+				systemctl daemon-reload
+				run_cmd systemctl start "$cr_mv_unit"
+			fi
 		elif [ "$(plan resume)" = 1 ]; then
 			run_result failed-cleaned "sqc-$cr_id is not what run ${cr_of:-?} left: it was finished or made again since (run ${cr_made_by:-?})" \
 				"check again; to use it, «Подключиться»"
@@ -782,19 +880,34 @@ action_create() {
 	run_phase "state and unit" 30
 	# env (0600): the panel login, its secret path, the public address; never the main password, which env would apply over
 	# the store at every start (undoing a change made in the panel): it goes in the one-shot overrides the server consumes
-	{
-		printf 'CSQTT_WEB_USER=%s\n' "$(plan web_user)"
-		sed -n 's/^web_pass=/CSQTT_WEB_PASS=/p; s/^secret_path=/CSQTT_WEB_SECRET_PATH=/p' "$RUN_DIR/secrets"
-		printf 'CSQTT_PUBLIC_IP=%s\n' "$(plan public_ip)"
-	} >"$cr_state/env" && chmod 600 "$cr_state/env" || cr_fail "cannot write $cr_state/env"
-	( umask 077 && printf '{"main_password":"%s"}\n' "$(sed -n 's/^main_password=//p' "$RUN_DIR/secrets" | sed 's/[\\"]/\\&/g')" \
-		>"$cr_state/deploy-overrides.json" ) || cr_fail "cannot write the main password"
+	if [ $cr_move = 1 ]; then
+		# a move: the stock install's own login, password, secret path and address, each value as its line had it (systemd reads
+		# both files alike); one missing (B5) is this plan's new one, which the app shows. Its main password is in its store
+		{
+			mv_line CSQTT_WEB_USER "$(plan web_user)"
+			mv_line CSQTT_WEB_PASS "$(sed -n 's/^web_pass=//p' "$RUN_DIR/secrets")"
+			mv_line CSQTT_WEB_SECRET_PATH ""
+			mv_line CSQTT_PUBLIC_IP "$(plan public_ip)"
+		} >"$cr_state/env" && chmod 600 "$cr_state/env" || cr_fail "cannot write $cr_state/env"
+	else
+		{
+			printf 'CSQTT_WEB_USER=%s\n' "$(plan web_user)"
+			sed -n 's/^web_pass=/CSQTT_WEB_PASS=/p; s/^secret_path=/CSQTT_WEB_SECRET_PATH=/p' "$RUN_DIR/secrets"
+			printf 'CSQTT_PUBLIC_IP=%s\n' "$(plan public_ip)"
+		} >"$cr_state/env" && chmod 600 "$cr_state/env" || cr_fail "cannot write $cr_state/env"
+		( umask 077 && printf '{"main_password":"%s"}\n' "$(sed -n 's/^main_password=//p' "$RUN_DIR/secrets" | sed 's/[\\"]/\\&/g')" \
+			>"$cr_state/deploy-overrides.json" ) || cr_fail "cannot write the main password"
+	fi
 	cr_open_unit=''
 	if [ "$cr_fw" = iptables ]; then
 		cr_open_unit=$(inst_open_sh "$cr_id" "$cr_state" "$cr_open") || cr_fail "cannot write $cr_state/open.sh"
 	fi
+	# a move's unit starts only once the marker is there: until the switch, a boot starts the stock one
+	cr_cond=''
+	[ $cr_move = 0 ] || cr_cond="ConditionPathExists=$cr_state/moved"
 	mf_add unit "/etc/systemd/system/$cr_unit"
-	inst_unit_text "$cr_id" "$cr_root" "$cr_state" "$cr_flags" "$cr_open_unit" >"/etc/systemd/system/$cr_unit" || cr_fail "cannot write $cr_unit"
+	inst_unit_text "$cr_id" "$cr_root" "$cr_state" "$cr_flags" "$cr_open_unit" "$cr_cond" >"/etc/systemd/system/$cr_unit" ||
+		cr_fail "cannot write $cr_unit"
 	systemctl daemon-reload
 	run_safe_point
 
@@ -813,14 +926,41 @@ action_create() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
-	run_cmd systemctl enable "$cr_unit" || cr_fail "$cr_unit could not be enabled"
+	if [ $cr_move = 1 ]; then
+		# the stock unit starts no more once the marker is there (a drop-in on it, this run's object), ours only then
+		if [ -n "$cr_mv_unit" ]; then
+			cr_mv_dropin=/etc/systemd/system/$cr_mv_unit.d/sanity-move.conf
+			mf_add file "$cr_mv_dropin"
+			mkdir -p "${cr_mv_dropin%/*}" && printf '[Unit]\nConditionPathExists=!%s/moved\n' "$cr_state" >"$cr_mv_dropin" ||
+				cr_fail "cannot write $cr_mv_dropin"
+			systemctl daemon-reload
+		fi
+		run_cmd systemctl enable "$cr_unit" || cr_fail "$cr_unit could not be enabled"
+		# the stock server stops (its tagged rules go with a graceful stop); nothing of it may run on outside its unit (M-120)
+		cr_mv_stopped=1
+		[ -z "$cr_mv_unit" ] || run_cmd systemctl stop "$cr_mv_unit"
+		[ -z "$(fr_outside "$cr_mv_role")" ] || cr_fail "the stock $cr_mv_role server runs outside its unit" "stop it, then try again"
+		# its store, consistent now it is stopped, read through a symlinked config dir (M-131), with its certificate (the
+		# panel's pin stays) and an overrides file it had not consumed (B6)
+		for cr_f in $MV_STORE; do
+			[ ! -f "$cr_mv_store/$cr_f" ] || cp -p "$cr_mv_store/$cr_f" "$cr_state/$cr_f" || cr_fail "cannot copy the stock $cr_f"
+		done
+		sync
+		# the switch: one rename moves the box from theirs to ours
+		: >"$cr_state/moved.new" && mv -f "$cr_state/moved.new" "$cr_state/moved" || cr_fail "cannot switch"
+	else
+		# enabled, then started on its own: systemd 255's `enable --now` exits 0 for a start that failed (the zoo, Ubuntu 24.04)
+		run_cmd systemctl enable "$cr_unit" || cr_fail "$cr_unit could not be enabled"
+	fi
 	run_cmd systemctl start "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_start_lines "$cr_unit")"
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80
-	cr_why=$(inst_verify "$cr_unit" "$cr_udp" "$cr_web" "$cr_iface" "$(sed -n 's/^secret_path=//p' "$RUN_DIR/secrets")")
+	if [ $cr_move = 1 ]; then cr_secret=$(mv_secret); else cr_secret=$(sed -n 's/^secret_path=//p' "$RUN_DIR/secrets"); fi
+	cr_why=$(inst_verify "$cr_unit" "$cr_udp" "$cr_web" "$cr_iface" "$cr_secret")
 	[ -z "$cr_why" ] || cr_fail "$cr_why"
+	# a move ends in the plan's order: its unit without the condition, the stock install's objects, the marker last
+	[ $cr_move = 0 ] || mv_finish
 	run_phase "done" 100
 	run_result ok "" "read the connection back"
 }
@@ -1475,7 +1615,8 @@ cmd_readback() {
 		exit 1
 	fi
 	rb_exec=$(sed -n 's/^ExecStart=//p' "$rb_unit" | head -n 1)
-	rb_env() { sed -n "s/^$1=//p" "$rb_state/env" | head -n 1; }
+	# (a moved instance's env carries the stock app's values as they were, quoted or not: read as systemd reads them, B12)
+	rb_env() { sed -n "s/^$1=//p" "$rb_state/env" | head -n 1 | env_unquote; }
 	csqtt_emit RB public_ip "$(rb_env CSQTT_PUBLIC_IP)"
 	csqtt_emit RB udp_port "$(printf '%s\n' "$rb_exec" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')"
 	csqtt_emit RB web_port "$(printf '%s\n' "$rb_exec" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')"

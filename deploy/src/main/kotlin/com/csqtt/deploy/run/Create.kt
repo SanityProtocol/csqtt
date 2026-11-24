@@ -95,6 +95,34 @@ object CreateRun {
 }
 
 /**
+ * «Обновить» (also «Починить» and «Обновить до 2.6») on a stock systemd install = moving it into our layout (P2-PLAN §1.7;
+ * P2 B12): a create of [proposal] (Proposer.proposeMove: our id, interface, subnet and slot, the stock install's ports) that
+ * takes its place through one marker, its store, certificate and panel login copied over at the switch; once verified, the
+ * stock install goes through the foreign removal's list, its store kept (DE-T3) and its LE lineage kept for ours (B14). The
+ * run re-checks the stock unit and binary as inspected; the stock server's hold on its own ports is no conflict.
+ */
+object MoveRun {
+    fun plan(install: com.csqtt.deploy.inspect.Installation, classification: com.csqtt.deploy.inspect.Classification,
+        inv: com.csqtt.deploy.inspect.Inventory, proposal: Proposal, publicIp: String, core: Core, credentials: Credentials): RunPlan? {
+        val listing = ForeignRemoval.listing(install, classification, inv, purge = false) ?: return null
+        val role = listing.role
+        val store = listing.store ?: return null
+        val unit = install.units.firstOrNull { it.id == role.units.first() }
+        val sha = unit?.let { inv.exeAt(it.exec)?.sha }
+        val create = CreateRun.plan(proposal, publicIp, core, credentials)
+        val move = linkedMapOf(
+            "move_role" to role.word, "move_unit" to unit?.id.orEmpty(), "move_store" to store,
+            "move_units" to listing.units.joinToString(","), "move_paths" to listing.paths.joinToString(","),
+            "move_tags" to listing.tags.joinToString(","), "move_tables" to listing.tables.joinToString(","),
+            "move_lineage" to "", "move_untagged" to if (listing.untagged) "1" else "0",
+            "own_ports" to listOfNotNull(install.claims.udpPort, install.claims.webPort).joinToString(","),
+        ) + (if (unit != null) mapOf("expect_unit" to unit.id) else emptyMap()) +
+            (if (unit != null && sha != null) mapOf("expect_bin" to unit.exec, "expect_sha" to sha) else emptyMap())
+        return RunPlan(create.action, create.values + move, create.secrets, create.core)
+    }
+}
+
+/**
  * «Продолжить» (B8 review F1): the proposal of a create a reboot or a kill cut off, from the plan its run kept on the box
  * (no secret in it); run again with resume, it undoes what that run left and creates again, with new credentials.
  */
