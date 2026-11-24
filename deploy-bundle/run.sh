@@ -241,6 +241,8 @@ run_recheck() {
 		run_result failed-cleaned "$rr_unit is gone" "check again"
 	fi
 	rr_sha=$(plan expect_sha) rr_bin=$(plan expect_bin)
+	# an update cut off before holds the binary until this run resolves it (action_update's up_recover, B10 review F2)
+	[ "$(plan action)" != update ] || [ ! -f "/var/lib/sanityprotocol/csqtt/$(plan id)/update.pending" ] || rr_sha=''
 	if [ -n "$rr_sha" ] && [ "$(sha256sum "$rr_bin" 2>/dev/null | cut -d' ' -f1)" != "$rr_sha" ]; then
 		run_result failed-cleaned "$rr_bin changed since the check" "check again"
 	fi
@@ -523,6 +525,22 @@ mf_host_of() {
 		sed -n 's/^{"kind":"\([^"]*\)"\(.*\)}$/\1\2/p' | sed 's/,"\([^"]*\)":"\([^"]*\)"/ \1=\2/g'
 }
 
+# A unit's last lines since <cursor> (taken before its start with inst_cursor), so a start that fails names its own words, never
+# what the build before printed as it stopped (B10 review F4). systemctl returns as the server exits, often before journald has
+# read its last line from the stream: up to ~2 s are waited for one
+inst_cursor() { journalctl -n 1 --show-cursor -o cat --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' | tail -n 1; }
+inst_lines_since() {  # inst_lines_since <unit> <cursor>
+	ils_n=0
+	while :; do
+		ils_l=$(if [ -n "$2" ]; then journalctl _SYSTEMD_UNIT="$1" --after-cursor="$2" -n 3 -o cat --no-pager
+			else journalctl _SYSTEMD_UNIT="$1" -n 3 -o cat --no-pager; fi 2>/dev/null)
+		[ -z "$ils_l" ] && [ "$ils_n" -lt 10 ] || break
+		ils_n=$((ils_n + 1))
+		sleep 0.2
+	done
+	printf '%s\n' "$ils_l" | run_redact | tr '\n' ' '
+}
+
 # An instance of ours serves (create's and update's verify): its unit active, its UDP and web ports held by its own pid alone
 # (SO_REUSEADDR makes a bind prove nothing), its interface up, its panel answering on 127.0.0.1 where curl is. Prints why
 # not, or nothing.
@@ -786,8 +804,8 @@ action_create() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	run_cmd systemctl enable --now "$cr_unit" ||
-		cr_fail "$cr_unit did not start: $(journalctl _SYSTEMD_UNIT="$cr_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')"
+	cr_cursor=$(inst_cursor)
+	run_cmd systemctl enable --now "$cr_unit" || cr_fail "$cr_unit did not start: $(inst_lines_since "$cr_unit" "$cr_cursor")"
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80
@@ -803,71 +821,161 @@ action_create() {
 # instance's config is written: ports, env, its certificate, the secret path all stay (M-133, M-148).
 UP_STORE='csqtt.db csqtt.db-wal csqtt.db-shm passwords.json passwords.json.imported'
 
-up_rollback() {  # up_rollback <why the update failed>
-	run_phase "roll back" 90
+# The store copied aside whole before the new build can touch it: built beside, synced (a reboot after the flip finds it on
+# disk), then put in place of the last copy, so a copy that fails or is cut off leaves the store and that copy as they were
+# (B10 review F1)
+up_copy_store() {
+	rm -rf "$up_copy.new" && mkdir -m 700 "$up_copy.new" || return 1
+	for up_f in $UP_STORE; do
+		[ ! -f "$up_state/$up_f" ] || cp -p "$up_state/$up_f" "$up_copy.new/$up_f" || return 1
+	done
+	sync
+	rm -rf "$up_copy" && mv "$up_copy.new" "$up_copy"
+}
+
+# The store put back from that copy: every file copied beside its place first, then renamed into it, so neither a full disk nor
+# a cut leaves a file missing; a file the copy has not (a WAL the new build made) goes
+up_store_back() {
+	rm -rf "$up_state/.restore" && mkdir -m 700 "$up_state/.restore" || return 1
+	for up_f in $UP_STORE; do
+		[ ! -f "$up_copy/$up_f" ] || cp -p "$up_copy/$up_f" "$up_state/.restore/$up_f" || return 1
+	done
+	for up_f in $UP_STORE; do
+		if [ -f "$up_state/.restore/$up_f" ]; then mv -f "$up_state/.restore/$up_f" "$up_state/$up_f" || return 1
+		else rm -f "$up_state/$up_f" || return 1; fi
+	done
+	rmdir "$up_state/.restore"
+}
+
+up_prune() {  # the release before stays for one more update; older ones go
+	for up_r in "$up_root"/releases/*/; do
+		up_r=${up_r%/}
+		[ "$up_r" = "$up_new" ] || [ "$up_r" = "$up_old" ] || rm -rf "$up_r"
+	done
+}
+
+# up_back <why> [store]: back to the build before, setting up_why (empty: it serves). With `store` (the new build has run on it)
+# the store comes back from the copy first; without, the new build never ran and the store stays as it is. The record goes once
+# the box is back on disk; a store that cannot be put back keeps it, the unit stopped, so the next run tries again. Never run
+# inside $(…): its results end the run
+up_back() {
 	systemctl stop "$up_unit" 2>/dev/null
-	for up_f in $UP_STORE; do rm -f "$up_state/$up_f"; [ ! -f "$up_copy/$up_f" ] || cp -p "$up_copy/$up_f" "$up_state/$up_f"; done
-	ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current"
-	# the failed build's release goes; the same build again («Починить») has none of its own
-	[ "$up_new" = "$up_old" ] || rm -rf "$up_new"
+	if [ "${2:-}" = store ] && ! up_store_back 2>"$RUN_DIR/restore.err"; then
+		run_result failed-not-rolled-back "$1; the store could not be put back: $(head -c 200 "$RUN_DIR/restore.err" | tr '\n' ' ')" \
+			"free some disk, then «Починить»: the store before the update is whole in $up_copy"
+	fi
+	if [ "$up_new" != "$up_old" ]; then
+		ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" ||
+			run_result failed-not-rolled-back "$1; cannot switch back to $up_old" "«Починить»: the store before the update is whole in $up_copy"
+		rm -rf "$up_new"
+	fi
+	rm -f "$UP_PENDING"
 	systemctl start "$up_unit" 2>/dev/null
 	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
-	if [ -z "$up_why" ]; then
-		run_result failed-rolled-back "$1" "the build it ran before runs again, its store as it was"
-	fi
-	run_result failed-not-rolled-back "$1; the rollback did not serve either: $up_why ($(systemctl is-active "$up_unit"), current -> $(readlink "$up_root/current"))" \
+	[ -z "$up_why" ] || run_result failed-not-rolled-back \
+		"$1; the rollback did not serve either: $up_why ($(systemctl is-active "$up_unit"), current -> $(readlink "$up_root/current"))" \
 		"read its journal; the store before the update is in $up_copy"
+}
+
+up_rollback() {  # up_rollback <why> [store]: up_back, and the run ends there
+	run_phase "roll back" 90
+	up_back "$1" "${2:-}"
+	run_result failed-rolled-back "$1" "the build it ran before runs again, its store as it was"
+}
+
+# An update left unfinished inside its switch (a reboot, a kill, a store that could not be put back) is settled first, from its
+# record (B10 review F2):
+#  - left before its flip (current still the build before), or the same build again: the build before runs on its own store,
+#    which it may have served on since, so the store stays; what that update made goes; its unit is started if it is not running
+#  - left after its flip: the new build is verified where it is; serving, the update is finished; not, it is rolled back with
+#    the store from the copy (whole: the flip follows the synced copy). up_settled names the build that then serves, up_failed
+#    the one rolled back from
+up_recover() {
+	rc_old=$(sed -n 's/^old=//p' "$UP_PENDING" | head -n 1) rc_new=$(sed -n 's/^new=//p' "$UP_PENDING" | head -n 1)
+	# both are releases of this instance, or the record is not one this file wrote: it names nothing to remove then
+	for rc_p in "$rc_old" "$rc_new"; do
+		case ${rc_p#"$up_root/releases/"} in "$rc_p" | '' | */* | .*) rm -f "$UP_PENDING"; return 0 ;; esac
+	done
+	run_phase recover 8
+	: >"$RUN_DIR/switching"
+	rm -rf "$up_copy.new" "$up_state/.restore"
+	if [ "$(readlink "$up_root/current")" != "$rc_new" ] || [ "$rc_new" = "$rc_old" ]; then
+		[ "$rc_new" = "$rc_old" ] || [ "$rc_new" = "$(readlink "$up_root/current")" ] || rm -rf "$rc_new"
+		rm -f "$UP_PENDING"
+		systemctl is-active --quiet "$up_unit" || run_cmd systemctl start "$up_unit"
+		return 0
+	fi
+	up_old=$rc_old up_new=$rc_new
+	systemctl is-active --quiet "$up_unit" || run_cmd systemctl start "$up_unit"
+	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
+	if [ -n "$up_why" ]; then
+		rc_cause="the update to ${rc_new##*/} left unfinished before does not serve: $up_why"
+		up_back "$rc_cause" store
+		up_settled=$rc_old up_failed=$rc_new
+		return 0
+	fi
+	up_prune
+	rm -f "$UP_PENDING"
+	up_settled=$rc_new
 }
 
 action_update() {
 	up_id=$(plan id) up_version=$(plan version) up_sha=$(plan core_sha)
 	case $up_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) run_result failed-cleaned "bad instance id $up_id" "update the app" ;; esac
 	up_root=/opt/sanityprotocol/csqtt/$up_id up_state=/var/lib/sanityprotocol/csqtt/$up_id up_unit=sanity-csqtt-$up_id.service
-	up_new=$up_root/releases/$up_version-$(printf '%.8s' "$up_sha") up_copy=$up_state/pre-update
+	up_target=$up_root/releases/$up_version-$(printf '%.8s' "$up_sha") up_copy=$up_state/pre-update UP_PENDING=$up_state/update.pending
 	[ -f "/etc/systemd/system/$up_unit" ] && [ -L "$up_root/current" ] || run_result failed-cleaned "sqc-$up_id is not installed here" "check again"
-	up_old=$(readlink "$up_root/current")
 	up_flags=$(sed -n "s|^ExecStart=$up_root/current/csqtt-server ||p" "/etc/systemd/system/$up_unit" | head -n 1)
 	up_udp=$(printf '%s\n' "$up_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
 	up_web=$(printf '%s\n' "$up_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
 	up_iface=$(printf '%s\n' "$up_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')
 	up_secret=$(sed -n 's/^CSQTT_WEB_SECRET_PATH=//p' "$up_state/env" | head -n 1)
-	action_cleanup() { [ ! -d "$up_new" ] || [ "$up_new" = "$up_old" ] || rm -rf "$up_new"; }
+	up_settled='' up_failed=''
 
 	run_phase stage 10
 	[ "$(sha256sum "$RUN_DIR/core" 2>/dev/null | cut -d' ' -f1)" = "$up_sha" ] || run_result failed-cleaned "the uploaded core is damaged" "try again"
 	# shellcheck disable=SC2086 # the unit's own flags
 	up_said=$("$RUN_DIR/core" $up_flags --version 2>&1 | head -n 1)
 	[ "$up_said" = "csqtt $up_version CSQTT-WIRE-3" ] || run_result failed-cleaned "the new core does not run here with this instance's flags: $up_said" "check the box's architecture"
+	[ ! -f "$UP_PENDING" ] || up_recover
+	up_old=$(readlink "$up_root/current") up_new=$up_target
+	if [ -n "$up_settled" ]; then
+		# what an update left unfinished was settled on this very build, and it serves: nothing is left to do
+		[ "$up_settled" != "$up_new" ] || run_result ok "" "read the connection back"
+		# it was rolled back from this very build just now: going to it again would fail as it did
+		[ "$up_failed" != "$up_new" ] || run_result failed-rolled-back "$rc_cause" "the build it ran before runs again, its store as it was"
+	fi
+	action_cleanup() { [ ! -d "$up_new" ] || [ "$up_new" = "$up_old" ] || rm -rf "$up_new"; }
 	if [ "$up_new" != "$up_old" ]; then
 		mkdir -p "$up_new" && install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" ||
 			{ action_cleanup; run_result failed-cleaned "cannot install the new release in $up_new" "check the box's disk"; }
 	fi
 	run_safe_point
 
-	# switch (D4: a cancel is refused from here): stopped, its store copied aside, `current` flipped, started
+	# switch (D4: a cancel is refused from here): recorded, stopped, its store copied aside, `current` flipped, started
 	run_phase switch 60
 	: >"$RUN_DIR/switching"
+	printf 'old=%s\nnew=%s\n' "$up_old" "$up_new" >"$UP_PENDING.new" && mv -f "$UP_PENDING.new" "$UP_PENDING" ||
+		{ rm -f "$UP_PENDING.new"; action_cleanup; run_result failed-cleaned "cannot write $UP_PENDING" "check the box's disk"; }
 	run_cmd systemctl stop "$up_unit"
-	rm -rf "$up_copy" && mkdir -m 700 "$up_copy" || up_rollback "cannot keep a copy of the store"
-	for up_f in $UP_STORE; do [ ! -f "$up_state/$up_f" ] || cp -p "$up_state/$up_f" "$up_copy/$up_f" || up_rollback "cannot copy $up_f aside"; done
+	if ! up_copy_store 2>"$RUN_DIR/copy.err"; then
+		rm -rf "$up_copy.new"
+		up_rollback "cannot keep a copy of the store aside: $(head -c 200 "$RUN_DIR/copy.err" | tr '\n' ' ')"
+	fi
 	if [ "$up_new" = "$up_old" ]; then
 		# «Починить»: the same build again, over a damaged or missing binary
 		install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" || up_rollback "cannot reinstall the binary"
 	else
 		ln -sfn "$up_new" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" || up_rollback "cannot switch to $up_new"
 	fi
-	run_cmd systemctl start "$up_unit" ||
-		up_rollback "$up_unit did not start on the new build: $(journalctl _SYSTEMD_UNIT="$up_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')"
+	up_cursor=$(inst_cursor)
+	run_cmd systemctl start "$up_unit" || up_rollback "$up_unit did not start on the new build: $(inst_lines_since "$up_unit" "$up_cursor")" store
 
 	run_phase verify 80
 	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
-	[ -z "$up_why" ] || up_rollback "the new build does not serve: $up_why"
-
-	# the release before stays for one more update; older ones go
-	for up_r in "$up_root"/releases/*/; do
-		up_r=${up_r%/}
-		[ "$up_r" = "$up_new" ] || [ "$up_r" = "$up_old" ] || rm -rf "$up_r"
-	done
+	[ -z "$up_why" ] || up_rollback "the new build does not serve: $up_why" store
+	up_prune
+	rm -f "$UP_PENDING"
 	run_phase "done" 100
 	run_result ok "" "read the connection back"
 }
@@ -1008,8 +1116,8 @@ action_restore() {
 	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
 	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
 	: >"$RUN_DIR/switching"
-	run_cmd systemctl enable --now "$in_unit" ||
-		cr_fail "$in_unit did not start: $(journalctl _SYSTEMD_UNIT="$in_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')"
+	rs_cursor=$(inst_cursor)
+	run_cmd systemctl enable --now "$in_unit" || cr_fail "$in_unit did not start: $(inst_lines_since "$in_unit" "$rs_cursor")"
 	run_phase verify 80
 	rs_why=$(inst_verify "$in_unit" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
 	[ -z "$rs_why" ] || cr_fail "$rs_why"
@@ -1030,8 +1138,9 @@ action_restart() {
 	run_phase switch 50
 	: >"$RUN_DIR/switching"
 	run_cmd systemctl enable "$in_unit"
+	rt_cursor=$(inst_cursor)
 	run_cmd systemctl restart "$in_unit" ||
-		run_result failed-not-rolled-back "$in_unit did not start: $(journalctl _SYSTEMD_UNIT="$in_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')" "read its journal («Журнал»)"
+		run_result failed-not-rolled-back "$in_unit did not start: $(inst_lines_since "$in_unit" "$rt_cursor")" "read its journal («Журнал»)"
 	run_phase verify 80
 	rt_why=$(inst_verify "$in_unit" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')" \
 		"$(printf '%s\n' "$rt_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')" \

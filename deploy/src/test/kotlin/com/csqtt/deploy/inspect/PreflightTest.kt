@@ -123,6 +123,20 @@ class PreflightTest {
     }
 
     @Test
+    fun aRunBringingACoreToAnInstanceStopsOnRoomAndAnExecutableRunDirAlone() {
+        // B10 review F3: a box short of disk walks into an update's store copy; a mixed iptables box runs its instance all along
+        val parsed = LineCodec.parse(report(clean + mapOf(
+            "disk" to "root_kb=200000|varlib_kb=200000|opt_kb=200000|docker_kb=", "rundir" to "noexec=/opt,",
+            "firewall" to "firewalld=inactive|ufw=absent|backend=nft|docker_forward=1|nft_drop=|mixed=1|nftables_service=",
+        ))) as Report.Complete
+        val verdicts = PreflightRules.verdicts(Preflight.from(parsed.lines), now)
+        assertEquals(setOf(Finding.DISK_LOW, Finding.RUNDIR_NOEXEC, Finding.MIXED_IPTABLES), PreflightRules.stops(verdicts).map { it.finding }.toSet())
+        assertEquals(setOf(Finding.DISK_LOW, Finding.RUNDIR_NOEXEC), PreflightRules.stopsACoreRun(verdicts).map { it.finding }.toSet())
+        assertEquals(emptyList<Verdict>(), PreflightRules.stopsACoreRun(PreflightRules.verdicts(Preflight.from(
+            (LineCodec.parse(report(clean)) as Report.Complete).lines), now)))
+    }
+
+    @Test
     fun inspectShRunsWhereverItIsAndAlwaysEnds() {
         // the collector itself on this machine's sh (dash in CI), unprivileged: every check reports, the end line counts
         val dir = kotlin.io.path.createTempDirectory("csqtt-inspect").toFile()

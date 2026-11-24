@@ -176,6 +176,14 @@ object PreflightRules {
 
     fun stops(verdicts: List<Verdict>): List<Verdict> = verdicts.filter { it.level == Level.FAIL }
 
+    /**
+     * What stops a run that brings a core to an instance already there (an update, «Починить», «Восстановить»): the room for the
+     * core, a release beside it and a copy of the store, and a run dir that executes (B10 review F3). Create's other stops are the
+     * box's own, passed or lived with since its create, and stop none of these.
+     */
+    fun stopsACoreRun(verdicts: List<Verdict>): List<Verdict> =
+        verdicts.filter { it.finding == Finding.DISK_LOW || it.finding == Finding.RUNDIR_NOEXEC }
+
     /** The support table (APP-PLAN §6.4a): Debian 11+, Ubuntu 20.04+, Alma/Rocky/RHEL/Oracle 8+, a current Fedora; Arch warned. */
     private fun os(f: Facts): Pair<Finding, String>? {
         val id = f["id"]

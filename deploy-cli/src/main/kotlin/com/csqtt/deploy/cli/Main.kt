@@ -560,6 +560,13 @@ private fun readBack(root: RootRunner, id: String, sshHost: String, set: Credent
 private fun sha8(secret: String): String =
     java.security.MessageDigest.getInstance("SHA-256").digest(secret.toByteArray()).take(4).joinToString("") { "%02x".format(it) }
 
+/** The environment's stops for a run that brings a core to an instance already there, each printed (exit 6 follows). */
+private fun coreRunStopped(report: Report.Complete): Boolean {
+    val stops = PreflightRules.stopsACoreRun(PreflightRules.verdicts(Preflight.from(report.lines), System.currentTimeMillis() / 1000))
+    stops.forEach { println("FAIL ${it.finding}" + if (it.detail.isEmpty()) "" else " ${it.detail}") }
+    return stops.isNotEmpty()
+}
+
 /** An instance of ours to the target's core (P2 B10). */
 private fun update(session: SshSession, p: Properties, target: File, id: String): Int {
     val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
@@ -568,6 +575,7 @@ private fun update(session: SshSession, p: Properties, target: File, id: String)
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
     val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
     val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    if (coreRunStopped(report)) return 6
     val inventory = Inventory.from(report.lines)
     val install = Classifier.classify(inventory).installations.firstOrNull { com.csqtt.deploy.run.UpdateRun.idOf(it) == id }
         ?: return 2.also { println("no instance of ours sqc-$id on this box") }
@@ -609,6 +617,7 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
         "purge" -> com.csqtt.deploy.run.Maintenance.remove(install, purge = true)
         "restart" -> com.csqtt.deploy.run.Maintenance.restart(install)
         else -> {
+            if (coreRunStopped(report)) return 6
             val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
             com.csqtt.deploy.run.Maintenance.restore(install,
                 Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") }))

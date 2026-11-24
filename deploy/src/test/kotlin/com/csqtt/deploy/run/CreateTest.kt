@@ -73,9 +73,10 @@ class CreateTest {
         val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
         val recheck = script.substringAfter("run_recheck() {").substringBefore("\n}\n")
         val read = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(recheck).map { it.groupValues[1] }.toSet()
-        assertEquals(setOf("ports", "subnet", "iface", "resume", "expect_unit", "expect_sha", "expect_bin"), read)
+        // (action and id: an update cut off before holds the binary its plan expects, B10 review F2)
+        assertEquals(setOf("ports", "subnet", "iface", "resume", "expect_unit", "expect_sha", "expect_bin", "action", "id"), read)
         val plan = CreateRun.plan(proposal, "203.0.113.7", Core(ByteArray(1), "2.6.0"), Credentials.generate()).planText()
-        for (key in listOf("ports", "subnet", "iface")) assertTrue(key, "\n$key=" in "\n$plan")
+        for (key in listOf("ports", "subnet", "iface", "action")) assertTrue(key, "\n$key=" in "\n$plan")
         // and the create action reads only keys the plan has
         val create = script.substringAfter("action_create() {").substringBefore("\n}\n")
         val used = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(create).map { it.groupValues[1] }.toSet()
