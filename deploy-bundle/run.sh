@@ -836,6 +836,26 @@ dk_entrypoint() {
 case ${SANITY_IPTABLES:-nft} in legacy) m=xtables-legacy-multi ;; *) m=xtables-nft-multi ;; esac
 for t in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do ln -sf "$m" "/usr/sbin/$t"; done
 [ -z "${SANITY_OPEN:-}" ] || sh "$SANITY_OPEN" add
+# an update's record from an earlier boot goes once this server holds its port, seen twice 5 s apart, as a unit's ExecStartPost
+# drops it after READY=1; a record of this boot is its run's own, and a build that never serves leaves it for the next run's
+# rollback (P2 B13c verify N1)
+d='' u='' w=''
+for a in "$@"; do
+	case $w in --config-dir) d=$a ;; --listen) u=${a##*:} ;; esac
+	w=$a
+done
+r=$d/update.pending b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+if [ -n "$d" ] && [ -n "$u" ] && [ -f "$r" ]; then
+	(
+		h=0 n=0
+		while [ $n -lt 120 ] && [ -f "$r" ] && [ "$(sed -n 's/^boot=//p' "$r")" != "$b" ]; do
+			sleep 5
+			n=$((n + 1))
+			if netstat -lnup 2>/dev/null | grep -q ":$u .*/csqtt-server"; then h=$((h + 1)); else h=0; fi
+			[ $h -lt 2 ] || { rm -f "$r"; break; }
+		done
+	) </dev/null >/dev/null 2>&1 &
+fi
 exec "$@"
 EOF
 }
@@ -1345,14 +1365,8 @@ up_recover() {
 		fi
 		return 0
 	fi
-	# In Docker, a record from an earlier boot whose new build's container came back with it: the store has served on that
-	# build since, so the copy is no rollback point any more (a unit's ExecStartPost drops such a record at its first start
-	# outside a run, B10 verify N1). The record goes; the run goes on from that build (B13c review F2)
-	if [ $up_docker = 1 ] && [ "$(sed -n 's/^boot=//p' "$UP_PENDING" | head -n 1)" != "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] &&
-		up_running; then
-		rm -f "$UP_PENDING"
-		return 0
-	fi
+	# (a record a build that served since has gone: a unit's ExecStartPost drops it after READY=1, our entrypoint in Docker once
+	# its server holds its port after a boot, B13c review F2 and verify N1; Docker counts a restart loop as running)
 	up_old=$rc_old up_new=$rc_new
 	up_running || up_start
 	up_why=$(inst_verify "$up_check" "$up_udp" "$up_web" "$up_iface" "$up_secret")
@@ -1439,7 +1453,8 @@ action_update() {
 		up_stop
 		install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" || up_rollback "cannot reinstall the binary"
 	else
-		# recorded, stopped, its store copied aside, `current` flipped
+		# recorded, stopped, its store copied aside, `current` flipped (the record names its boot: in Docker the entrypoint drops
+		# only an earlier boot's, never this run's own: B13c verify N1)
 		up_with=store
 		printf 'old=%s\nnew=%s\nboot=%s\n' "$up_old" "$up_new" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" >"$UP_PENDING.new" &&
 			mv -f "$UP_PENDING.new" "$UP_PENDING" ||

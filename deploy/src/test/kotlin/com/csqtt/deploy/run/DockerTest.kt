@@ -264,10 +264,15 @@ class DockerTest {
         assertTrue(back, back.indexOf("up_start >/dev/null 2>&1") in 0 until back.indexOf("rm -f \"\$UP_PENDING\""))
         val restart = body("action_restart")
         assertTrue(restart, "!= \"\$rt_img\" ]; then" in restart && "run_cmd dk_run \"\$rt_ctr\" \"\$rt_img\"" in restart)
-        // F2: the record names its boot; a Docker record from an earlier boot whose new build's container came back goes, the
-        // store kept; a verified restart drops it
+        // F2 and verify N1: the record names its boot; our entrypoint drops an earlier boot's once its own server holds its port (a
+        // unit's ExecStartPost, after READY=1), never this boot's; a record a run finds is then a build that never served since,
+        // rolled back as B10's (Docker counts a restart loop as running); a verified restart drops it
         assertTrue("boot=%s\\n" in body("action_update"))
-        assertTrue(body("up_recover").contains("/proc/sys/kernel/random/boot_id"))
+        assertFalse(body("up_recover").contains("boot_id"))
+        val entry = body("dk_entrypoint")
+        assertTrue(entry, "netstat -lnup" in entry && ".*/csqtt-server\"" in entry && "/proc/sys/kernel/random/boot_id" in entry &&
+            "!= \"\$b\" ]" in entry)
+        assertTrue(entry, entry.indexOf("update.pending") in 0 until entry.indexOf("exec \"\$@\""))
         assertTrue(restart, "rm -f \"\$in_state/update.pending\"" in restart)
         // F1: a cut update's image with its directory; every release's image at a removal; the root filesystems swept by layer;
         // the update's stage rewrites no root filesystem line
