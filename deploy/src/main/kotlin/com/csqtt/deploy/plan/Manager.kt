@@ -104,6 +104,9 @@ object Manager {
         val compatibility = compatibility(install, carried)
         val name = install.name
         val clients = "удалить $name"
+        // Docker stopped: what it holds is unseen. A move would race its container back onto the port, a removal would delete
+        // the store of an install that only waits for its daemon (B5 review F1)
+        if (install.dockerUnseen) return Entry(install, compatibility, emptyList(), "Docker остановлен: запустите Docker и проверьте заново")
         return when (install.owner) {
             Owner.SWG_BARE, Owner.SWG_DOCKER -> Entry(install, compatibility, emptyList(), "Управляется swg-panel")
             Owner.MRTT, Owner.MRTT_BETA -> Entry(install, compatibility, emptyList(), "Другой протокол (MRTT)")

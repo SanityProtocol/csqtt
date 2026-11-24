@@ -22,33 +22,33 @@ class ClassifierTest {
 
     private data class Want(
         val owner: Owner, val version: String, val line: ProtocolLine, val sanity: Boolean, val udp: Int?, val web: Int?,
-        val iface: String?, val subnet: String?, val dir: String, val tag: String?, val tproxy: Int?, val name: String,
+        val iface: String?, val subnet: String?, val dir: String, val name: String,
     )
 
     private val seeds = mapOf(
         "v200-systemd-noble" to Want(Owner.APP_STANDARD, "2.0.0", ProtocolLine.V20, false, 46000, 46002, "csqtt1", "10.66.67.0/24",
-            "/etc/csqtt", "CSQTT_MANAGED", 30001, "csqtt.service"),
+            "/etc/csqtt", "csqtt.service"),
         "v219-systemd-noble" to Want(Owner.APP_STANDARD, "2.1.9", ProtocolLine.V21, false, 46000, 46002, "csqtt1", "10.66.67.0/24",
-            "/etc/csqtt", "CSQTT_MANAGED", 30001, "csqtt.service"),
+            "/etc/csqtt", "csqtt.service"),
         "v250-systemd-noble" to Want(Owner.APP_STANDARD, "2.5.0", ProtocolLine.V25, false, 46000, 46002, "csqtt1", "10.66.67.0/24",
-            "/etc/csqtt", "CSQTT_MANAGED", 30001, "csqtt.service"),
+            "/etc/csqtt", "csqtt.service"),
         // ours 2.5.2: no caption, but its startup string says whose build it is
         "v252-systemd-noble" to Want(Owner.APP_STANDARD, "2.5.2", ProtocolLine.V25, true, 46000, 46002, "csqtt1", "10.66.67.0/24",
-            "/etc/csqtt", "CSQTT_MANAGED", 30001, "csqtt.service"),
+            "/etc/csqtt", "csqtt.service"),
         "v253main-systemd-noble" to Want(Owner.APP_STANDARD, "2.5.3", ProtocolLine.V25, true, 46000, 46002, "csqtt1", "10.66.67.0/24",
-            "/etc/csqtt", "CSQTT_MANAGED", 30001, "csqtt.service"),
+            "/etc/csqtt", "csqtt.service"),
         "v253side-systemd-noble" to Want(Owner.APP_SIDE, "2.5.3", ProtocolLine.V25, true, 46100, 46102, "csqtt25", "10.66.68.0/24",
-            "/etc/csqtt25", "CSQTT25_MANAGED", 30002, "csqtt25.service"),
+            "/etc/csqtt25", "csqtt25.service"),
         // slim runs our 2.5.3 core under the stock names
         "slim-systemd-noble" to Want(Owner.APP_STANDARD, "2.5.3", ProtocolLine.V25, true, 46000, 46002, "csqtt1", "10.66.67.0/24",
-            "/etc/csqtt", "CSQTT_MANAGED", 30001, "csqtt.service"),
+            "/etc/csqtt", "csqtt.service"),
         "sidetool-systemd-noble" to Want(Owner.SIDE_TOOL, "2.5.3", ProtocolLine.V25, true, 46100, 46102, "csqtt25", "10.66.68.0/24",
-            "/etc/csqtt25", "CSQTT25_MANAGED", 30002, "csqtt25.service"),
+            "/etc/csqtt25", "csqtt25.service"),
         "handmade-systemd-noble" to Want(Owner.HANDMADE, "2.5.3", ProtocolLine.V25, true, 46000, 46002, "csqtt1", null,
-            "/srv/my-csqtt", null, 30001, "my-csqtt.service"),
+            "/srv/my-csqtt", "my-csqtt.service"),
         // MRTT carries no label; its wire revision says what it is
         "mrtt-systemd-noble" to Want(Owner.MRTT, "", ProtocolLine.MRTT, false, 46000, 46002, "mrtt1", "10.66.67.0/24",
-            "/etc/mrtt", "MRTT_MANAGED", null, "mrtt.service"),
+            "/etc/mrtt", "mrtt.service"),
     )
 
     @Test
@@ -70,8 +70,6 @@ class ClassifierTest {
             assertEquals("$seed iface", want.iface, claims.iface)
             assertEquals("$seed subnet", want.subnet, claims.subnet)
             assertEquals("$seed dir", want.dir, claims.configDir)
-            assertEquals("$seed tag", want.tag, claims.ruleTag)
-            assertEquals("$seed tproxy", want.tproxy, claims.tproxyTable)
             // a running, freshly installed server shows no broken state, and the box no problem
             assertEquals("$seed broken", emptySet<String>(), install.broken)
             assertEquals("$seed problems", emptyList<BoxProblem>(), result.problems)

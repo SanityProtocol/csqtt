@@ -28,8 +28,6 @@ data class Claims(
     val subnet: String?,
     val configDir: String?,
     val names: Set<String>,
-    val ruleTag: String?,
-    val tproxyTable: Int?,
 )
 
 data class Installation(
@@ -47,6 +45,9 @@ data class Installation(
     val procs: List<Proc>,
     val stores: List<Store>,
 ) {
+    /** Nothing runs it that the inspection could see, and Docker, which may, was stopped (B5 review F1): B4, never a leftover. */
+    val dockerUnseen: Boolean get() = "B4" in broken && containers.isEmpty() && units.isEmpty() && procs.isEmpty()
+
     /** What the list calls it: its unit or container, else its config dir. */
     val name: String
         get() = units.firstOrNull()?.id ?: containers.firstOrNull()?.name ?: stores.firstOrNull()?.dir ?: procs.firstOrNull()?.exe ?: "?"
@@ -55,18 +56,25 @@ data class Installation(
 /** A problem of the box rather than of one installation (B9 two servers on one port, B14 a prereq without its helper…). */
 data class BoxProblem(val code: String, val detail: String)
 
-class Classification(val installations: List<Installation>, val problems: List<BoxProblem>)
+class Classification(val installations: List<Installation>, val problems: List<BoxProblem>) {
+    /** Docker is installed and was not asked (stopped): an installation it may hold looks like a leftover, and is not one. */
+    val dockerUnseen: Boolean get() = installations.any { it.dockerUnseen }
+}
 
 object Classifier {
     private val FAMILY = Regex("csqtt|mrtt")
-    private val HELPER_UNIT = Regex("-docker-prereq\\.service$|-letsencrypt\\.(service|timer)$|\\.timer$|-panel-restart-")
+    private val HELPER_UNIT = Regex("-docker-prereq\\.service$|-letsencrypt\\.(service|timer)$|\\.timer$|-panel-restart-|^mrtt-exit-|-cascade\\.service$")
+
+    /** MRTT's cascade exit client (cascade.sh): a TUN holder of the family's name, never a server (B5 review F9). */
+    private fun isServerExe(exe: String): Boolean = exe.substringAfterLast('/').let { FAMILY.containsMatchIn(it) && !it.startsWith("mrtt-exit") }
 
     fun classify(inv: Inventory): Classification {
         val groups = Groups()
         val serverUnits = inv.units.filter { isServerUnit(it) }
+        val serverProcs = inv.procs.filter { isServerExe(it.exe) }
+        // a server's container; a foreign TUN holder's (Amnezia's OpenVPN, amneziawg-go, Tailscale) is no installation (F7)
         val containers = inv.containers.filter { FAMILY.containsMatchIn(it.name + " " + it.image) || it.name.startsWith("sanity-csqtt-") ||
-            it.name == "swg-node" || inv.procs.any { p -> p.container.isNotEmpty() && it.id.startsWith(p.container) } }
-        val serverProcs = inv.procs.filter { FAMILY.containsMatchIn(it.exe.substringAfterLast('/')) }
+            it.name == "swg-node" || serverProcs.any { p -> p.container.isNotEmpty() && it.id.startsWith(p.container) } }
         val stores = inv.stores
 
         stores.forEach { groups.add("store:${it.dir}") }
@@ -123,24 +131,26 @@ object Classifier {
     private fun build(inv: Inventory, units: List<UnitView>, containers: List<Ctr>, procs: List<Proc>, stores: List<Store>): Installation {
         val dirs = stores.map { it.dir }.toSet()
         val flags = procs.firstOrNull()?.flags ?: units.firstOrNull()?.flags ?: containers.firstOrNull()?.flags ?: ServerFlags(emptyMap())
-        val exes = procs.mapNotNull { inv.exes[it.sha] } + units.mapNotNull { unit -> inv.exes.values.find { it.path == unit.exec } }
+        val exes = procs.mapNotNull { inv.exes[it.sha] } + units.mapNotNull { unit -> inv.exeAt(unit.exec) }
         val exe = exes.firstOrNull()
-        val instance = flags["--instance"]
         val side = units.any { it.id == "csqtt25.service" } || containers.any { it.name == "csqtt25" } || "/etc/csqtt25" in dirs ||
-            instance == "csqtt25"
+            flags["--instance"] == "csqtt25"
         val stockMain = units.any { it.id == "csqtt.service" } || containers.any { it.name == "csqtt" } || "/etc/csqtt" in dirs
         val mrtt = units.any { it.id == "mrtt.service" } || containers.any { it.name == "mrtt" } || dirs.any { it.startsWith("/etc/mrtt") } ||
             exes.any { it.mrtt } || procs.any { it.exe.substringAfterLast('/').startsWith("mrtt") }
         val schema = stores.flatMap { it.schema }.toSet()
-        val mrttBeta = stockMain && exe != null && exe.label.isEmpty() && !exe.mrtt && ("devices_json" in schema ||
-            inv.files.any { it.path == "/var/log/csqtt-install.log" && "v1.0-beta" in it.facts["last_run"] })
+        // MRTT's beta under the stock names: its store is decisive alone (its binary may be gone, its container unseen); its
+        // install log only with a label-less binary beside it (B5 review F14)
+        val mrttBeta = stockMain && ("devices_json" in schema || (exe != null && exe.label.isEmpty() && !exe.mrtt &&
+            inv.files.any { it.path == "/var/log/csqtt-install.log" && "v1.0-beta" in it.facts["last_run"] }))
         val owner = when {
             units.any { it.id.startsWith("swg-csqtt-") } || dirs.any { it.startsWith("/opt/swg-csqtt/") } ||
                 (flags.has("--desired") && containers.isEmpty()) -> Owner.SWG_BARE
             containers.any { it.name == "swg-node" } ||
                 dirs.any { it.startsWith("/var/lib/swg-noded/csqtt/") || it.startsWith("/opt/swg-panel-docker/data/node/csqtt/") } -> Owner.SWG_DOCKER
             units.any { it.id.startsWith("sanity-csqtt-") } || containers.any { it.name.startsWith("sanity-csqtt-") } ||
-                dirs.any { it.startsWith("/var/lib/sanityprotocol/csqtt/") } || exes.any { it.path.startsWith("/opt/sanityprotocol/") } -> Owner.OURS
+                dirs.any { it.startsWith("/var/lib/sanityprotocol/csqtt/") } ||
+                (procs.map { it.exe } + units.map { it.exec }).any { it.startsWith("/opt/sanityprotocol/") } -> Owner.OURS
             side -> if (flags.has("--no-nat")) Owner.SIDE_TOOL else Owner.APP_SIDE
             mrttBeta -> Owner.MRTT_BETA
             stockMain -> Owner.APP_STANDARD
@@ -148,21 +158,30 @@ object Classifier {
             exe != null && (exe.label.isNotEmpty() || exe.startup.isNotEmpty() || exe.swgFlags) -> Owner.HANDMADE
             else -> Owner.UNKNOWN
         }
-        val build = buildOf(exe, containers, schema, mrtt && owner == Owner.MRTT)
+        val build = buildOf(exe, containers, schema, owner == Owner.MRTT || owner == Owner.MRTT_BETA)
         val runtime = when {
             units.isNotEmpty() -> Runtime.SYSTEMD
             containers.isNotEmpty() -> Runtime.DOCKER
             procs.isNotEmpty() -> Runtime.PROCESS
             else -> Runtime.NONE
         }
-        val (state, detail) = stateOf(runtime, units.firstOrNull(), containers.firstOrNull())
-        val broken = brokenOf(inv, owner, build, state, units, containers, stores)
-        return Installation(owner, build, runtime, state, detail, broken, claimsOf(owner, flags, procs, units, containers, stores, instance),
+        val (unitState, unitDetail) = stateOf(runtime, units.firstOrNull(), containers.firstOrNull())
+        // what serves wins over what its unit says: a running container beside a dead unit (B16), a server started by hand
+        // (B5 review F13); a crash loop's process between two restarts does not
+        val serving = containers.any { it.state == "running" } || (procs.isNotEmpty() && runtime != Runtime.DOCKER)
+        val (state0, detail0) = if (serving && unitState !in setOf(InstallState.RUNNING, InstallState.CRASH_LOOPING))
+            InstallState.RUNNING to "serving outside its unit" else unitState to unitDetail
+        // Docker installed and stopped: a store nothing visible runs may be a Docker install waiting for its daemon (F1)
+        val unseen = runtime == Runtime.NONE && inv.dockerStopped && stores.isNotEmpty()
+        val (state, detail) = if (unseen) InstallState.STOPPED to "Docker остановлен" else state0 to detail0
+        val broken = brokenOf(inv, owner, build, state, units, containers, stores, unseen)
+        return Installation(owner, build, runtime, state, detail, broken, claimsOf(owner, flags, procs, units, containers, stores),
             units, containers, procs, stores)
     }
 
     private fun buildOf(exe: Exe?, containers: List<Ctr>, schema: Set<String>, mrtt: Boolean): Build? {
-        if (mrtt) return Build(exe?.label?.removePrefix("v") ?: "", ProtocolLine.MRTT, false, false, "MRTT")
+        if (mrtt) return Build(exe?.label?.removePrefix("v")?.ifEmpty { null } ?: exe?.startup?.substringBefore(' ').orEmpty(),
+            ProtocolLine.MRTT, false, false, "MRTT")
         if (exe != null) {
             val sanity = exe.caption || "SanityProtocol build" in exe.startup
             val startup = exe.startup.substringBefore(" (").trim()
@@ -176,10 +195,12 @@ object Classifier {
             val version = tag.substringBefore('-')
             return Build(version, lineOf(version), false, false, "image tag")
         }
-        // the store's schema: devices and passwords.device_id are the 2.1 line's, client_groups a 2.5 server's
+        // the store's schema: client_groups is a 2.5 server's (a 2.1 store the app updated keeps 2.1's devices and device_id
+        // beside it, B5 review F3), devices or device_id alone the 2.1 line's. A line, and no version: one made up here would
+        // compare as older than ours and invite a «Починить» that downgrades (F4)
         return when {
-            "table:devices" in schema || "device_id" in schema -> Build("2.1", ProtocolLine.V21, false, false, "store")
-            "table:client_groups" in schema -> Build("2.5", ProtocolLine.V25, false, false, "store")
+            "table:client_groups" in schema -> Build("", ProtocolLine.V25, false, false, "store")
+            "table:devices" in schema || "device_id" in schema -> Build("", ProtocolLine.V21, false, false, "store")
             else -> null
         }
     }
@@ -224,7 +245,7 @@ object Classifier {
     }
 
     private fun brokenOf(inv: Inventory, owner: Owner, build: Build?, state: InstallState, units: List<UnitView>,
-        containers: List<Ctr>, stores: List<Store>): Set<String> {
+        containers: List<Ctr>, stores: List<Store>, dockerUnseen: Boolean): Set<String> {
         val codes = linkedSetOf<String>()
         val unit = units.firstOrNull()
         if (unit != null && (unit.execPresent == false || unit.mainStatus == 203)) codes += "B1"
@@ -234,17 +255,22 @@ object Classifier {
         if ("B1" !in codes && units.isNotEmpty() && (state == InstallState.CRASH_LOOPING || (state == InstallState.FAILED && restarted))) {
             codes += "B3"
         }
-        // B2: the family's binary on disk with no unit or container to run it (an install cut off between the two)
-        if (units.isEmpty() && containers.isEmpty() && inv.files.any { it.path == binaryOf(owner, stores) && it.type == "f" }) codes += "B2"
-        if (containers.any { it.state != "running" }) codes += "B4"
+        // B2: the family's binary on disk with no unit or container to run it (an install cut off between the two); not while
+        // Docker, which may run it, is stopped (a Docker install keeps its binary on the host too)
+        if (!dockerUnseen && units.isEmpty() && containers.isEmpty() && inv.files.any { it.path == binaryOf(owner, stores) && it.type == "f" }) {
+            codes += "B2"
+        }
+        if (dockerUnseen || containers.any { it.state != "running" }) codes += "B4"
         val stock = owner in setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL)
         stores.forEach { store ->
             if (stock && "csqtt.db" in store.files && store.envKeys.none { it.endsWith("WEB_PASS") }) codes += "B5"
             if ("deploy-overrides.json" in store.files) codes += "B6"
             // B7: a 2.1 binary that will not run on a store a 2.5 server made or ran (client_groups is 2.5's). Its first start
             // adds 2.1's devices and device_id before it fails (the zoo, 2026-11-24), so the schema alone cannot tell, and a
-            // 2.1-made store that went through 2.5 still runs under 2.1: hence "not running"
-            if (build?.line == ProtocolLine.V21 && "table:client_groups" in store.schema && state != InstallState.RUNNING) codes += "B7"
+            // 2.1-made store that went through 2.5 still runs under 2.1: hence a failure, never a clean stop (B5 review F3), and
+            // a 2.1 binary, never a line read off the store itself
+            if (build?.line == ProtocolLine.V21 && build.source != "store" && "table:client_groups" in store.schema &&
+                state in setOf(InstallState.FAILED, InstallState.CRASH_LOOPING)) codes += "B7"
             if ("csqtt.db-wal" in store.files && "csqtt.db" !in store.files) codes += "B8"
         }
         if (units.any { it.id == "csqtt.service" } && containers.any { it.name == "csqtt" }) codes += "B16"
@@ -263,7 +289,7 @@ object Classifier {
     }
 
     private fun claimsOf(owner: Owner, flags: ServerFlags, procs: List<Proc>, units: List<UnitView>, containers: List<Ctr>,
-        stores: List<Store>, instance: String?): Claims {
+        stores: List<Store>): Claims {
         val side = owner == Owner.APP_SIDE || owner == Owner.SIDE_TOOL
         val defaultPort = if (side) 46100 else 46000
         val iface = flags["--iface"] ?: procs.flatMap { it.tuns }.firstOrNull() ?: when {
@@ -280,13 +306,6 @@ object Classifier {
             owner in setOf(Owner.APP_STANDARD, Owner.MRTT, Owner.MRTT_BETA) -> "10.66.67.0/24"
             else -> null
         }
-        val tag = when {
-            owner == Owner.MRTT -> "MRTT_MANAGED"
-            instance != null -> "${instance.uppercase()}_MANAGED"
-            side -> "CSQTT25_MANAGED"
-            owner in setOf(Owner.APP_STANDARD, Owner.MRTT_BETA) -> "CSQTT_MANAGED"
-            else -> null
-        }
         return Claims(
             udpPort = flags.udpPort ?: if (owner in setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL, Owner.MRTT, Owner.MRTT_BETA)) defaultPort else null,
             webPort = flags.webPort ?: if (owner in setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL, Owner.MRTT_BETA)) defaultPort + 2 else null,
@@ -294,27 +313,35 @@ object Classifier {
             subnet = subnet,
             configDir = stores.firstOrNull()?.dir,
             names = (units.map { it.id } + containers.map { it.name } + containers.map { it.image }).toSet(),
-            ruleTag = tag,
-            tproxyTable = if (owner == Owner.MRTT || owner == Owner.SWG_BARE || owner == Owner.SWG_DOCKER) null
-            else if (instance == null) 30001 else 30002,
         )
     }
 
     private fun boxProblems(inv: Inventory, installs: List<Installation>): List<BoxProblem> {
         val problems = mutableListOf<BoxProblem>()
-        // B9: two servers on one UDP port (SO_REUSEADDR lets the second bind; one of them gets no clients)
-        inv.listens.filter { it.proto == "udp" && it.pid != null }.groupBy { it.port }.forEach { (port, holders) ->
-            if (holders.map { it.pid }.distinct().size > 1) problems += BoxProblem("B9", "UDP $port: ${holders.joinToString { "${it.comm}(${it.pid})" }}")
+        // B9: two servers on one UDP port (SO_REUSEADDR lets the second bind; one of them gets no clients). The family's ports
+        // only (a claim, or a family server's listener): Docker's proxy per address family and dnsmasq beside resolved are no
+        // conflict of ours; each holder once, and only where their addresses overlap (B5 review F8)
+        val serverPids = installs.flatMap { it.procs }.map { it.pid }.toSet()
+        // claims of what can start (a unit or a container), and what runs (F12: a leftover store runs nothing)
+        val live = installs.filter { it.units.isNotEmpty() || it.containers.isNotEmpty() || it.procs.isNotEmpty() }
+        val familyPorts = live.mapNotNull { it.claims.udpPort }.toSet() +
+            inv.listens.filter { it.proto == "udp" && it.pid in serverPids }.mapNotNull { it.port }
+        inv.listens.filter { it.proto == "udp" && it.pid != null && it.port in familyPorts }.groupBy { it.port }.forEach { (port, all) ->
+            val holders = all.distinctBy { it.pid }
+            val clash = holders.indices.any { i -> (i + 1 until holders.size).any { j -> overlap(holders[i].addr, holders[j].addr) } }
+            if (holders.size > 1 && clash) problems += BoxProblem("B9", "UDP $port: ${holders.joinToString { "${it.comm}(${it.pid})" }}")
         }
         // B10: a claimed UDP port held by a program that is not one of these servers, or by no visible pid
-        val serverPids = installs.flatMap { it.procs }.map { it.pid }.toSet()
-        installs.mapNotNull { it.claims.udpPort }.distinct().forEach { port ->
+        live.mapNotNull { it.claims.udpPort }.distinct().forEach { port ->
             inv.listens.filter { it.proto == "udp" && it.port == port && it.pid !in serverPids }.forEach { foreign ->
                 problems += BoxProblem("B10", "UDP $port held by ${foreign.comm.ifEmpty { "a process in another namespace" }}")
             }
         }
-        // B11: an install log whose last run neither finished nor removed
-        inv.files.filter { it.path.endsWith("-install.log") && it.facts["finished"] == "0" && it.facts["runs"] != "0" }.forEach {
+        // B11: an install log whose last run neither finished nor removed, and was an install: a status run writes a header and
+        // no step (the side tool's own instructions run one after installing; B5 review F11). A report from before the
+        // steps fact goes by the header alone
+        inv.files.filter { it.path.endsWith("-install.log") && it.facts["finished"] == "0" && it.facts["runs"] != "0" &&
+            (it.facts["steps"].isEmpty() || it.facts["steps"] != "0") }.forEach {
             problems += BoxProblem("B11", "${it.path}: ${it.facts["last_run"]} did not finish (${it.facts["failed_steps"]} steps failed)")
         }
         // B14/B24: a unit docker.service requires whose helper is gone takes Docker down at the next boot
@@ -331,7 +358,8 @@ object Classifier {
         }
         // B17: csqtt1 held by a program that is not the stock server, on a box with a stock install, whose every start deletes
         // csqtt1 (a box with no stock install has nobody to take it away)
-        val stock = installs.filter { it.owner in setOf(Owner.APP_STANDARD, Owner.MRTT_BETA) }
+        // (F12: a stock install that can start: a store left by the uninstall deletes nothing)
+        val stock = installs.filter { it.owner in setOf(Owner.APP_STANDARD, Owner.MRTT_BETA) && (it.units.isNotEmpty() || it.containers.isNotEmpty()) }
         if (stock.isNotEmpty()) {
             inv.procs.filter { "csqtt1" in it.tuns && stock.none { install -> it in install.procs } }.forEach { holder ->
                 problems += BoxProblem("B17", "csqtt1 held by ${holder.comm} (${holder.exe}); the stock server deletes it at its next start")
@@ -352,6 +380,12 @@ object Classifier {
             problems += BoxProblem("B23", "the stock server still runs beside MRTT on the same subnet")
         }
         return problems
+    }
+
+    /** Two listeners' addresses overlap: the same one, or either is a wildcard. */
+    private fun overlap(a: String, b: String): Boolean {
+        val any = setOf("0.0.0.0", "*", "::", "[::]", "")
+        return a == b || a in any || b in any
     }
 
     /** Union-find over the views' keys. */
