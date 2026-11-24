@@ -1023,7 +1023,11 @@ inst_paths() {  # inst_paths <id>: sets in_root in_state in_unit
 # the server's rules made stay, empty and inert, until the next boot: telling them from an admin's (a DROP policy and nothing
 # else) is not safe (B11a review F2)
 host_dropin_drop() {
-	for hd_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$hd_u" ] && return 0; done
+	# (a stock unit counts installed, running or not: slim and the side tool write no sysctl file of their own and refuse to
+	# start with forwarding off, B18; its removal drops this file after it, B11c review F3)
+	for hd_u in /etc/systemd/system/sanity-csqtt-*.service /etc/systemd/system/csqtt.service /etc/systemd/system/csqtt25.service; do
+		[ -f "$hd_u" ] && return 0
+	done
 	[ -f "$HOST_DROPIN" ] || return 0
 	! pgrep -x 'csqtt(25|-server|-swg)?' >/dev/null 2>&1 || return 0
 	sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1 \2/p' "$HOST_DROPIN" | while read -r hd_k hd_was; do
@@ -1035,12 +1039,45 @@ host_dropin_drop() {
 	rm -f "$HOST_DROPIN"
 }
 
+# inst_found_host <id> (after inst_paths): the host changes of an instance of ours found by their own names, for one whose
+# manifest was lost (§1.3; B11c): ufw's rules commented sqc-<id>, firewalld's zone sqc<id> and policy sqc<id>-fwd (and its
+# reload), the INPUT openings of its open.sh as its create recorded them. A port it opened in firewalld's default zone cannot
+# be told from one that was open before, so it is not found: a removal leaves it open, never closes another's
+inst_found_host() {
+	if command -v ufw >/dev/null 2>&1; then
+		ufw status 2>/dev/null | awk -v c="# sqc-$1" '$2 != "(v6)" && $0 ~ (c "[[:space:]]*$") {print "ufw rule=" $1}' | sort -u
+	fi
+	if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd -q --state 2>/dev/null; then
+		if_fw=0
+		if firewall-cmd --permanent --get-zones 2>/dev/null | tr ' ' '\n' | grep -qx "sqc$1"; then
+			echo "firewalld-zone zone=sqc$1"
+			if_fw=1
+		fi
+		if firewall-cmd --permanent --get-policies 2>/dev/null | tr ' ' '\n' | grep -qx "sqc$1-fwd"; then
+			echo "firewalld-policy policy=sqc$1-fwd"
+			if_fw=1
+		fi
+		[ $if_fw = 0 ] || echo firewalld-reload
+	fi
+	if [ -f "$in_state/open.sh" ]; then
+		# the ports create opened: the UDP one, and the panel's unless it listens on 127.0.0.1 alone (B11c review F5)
+		if_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "/etc/systemd/system/$in_unit" 2>/dev/null | head -n 1)
+		if_ports="$(printf '%s\n' "$if_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')/udp"
+		printf '%s\n' "$if_flags" | grep -qE -- '--web-bind 127\.0\.0\.1( |$)' ||
+			if_ports="$if_ports,$(printf '%s\n' "$if_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')/tcp"
+		echo "iptables-input ports=$if_ports"
+	fi
+	return 0
+}
+
 # inst_take_down <id> (after inst_paths): an instance of ours stopped and taken off the box by its id alone: its unit, its
 # tagged rules, its openings (ufw's and firewalld's through their tool; the iptables ones go with its unit's stop), the drop-in
 # with the last instance, its release. The state dir stays as it is
 inst_take_down() {
 	MF=$in_state/manifest.json MF_ID=$1
-	MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ')
+	# (a manifest lost by hand: its openings found by their names, so a later «Восстановить» opens them again, B11c review F2)
+	if [ -f "$MF" ]; then MF_HOST=$(mf_host_of "$MF" 2>/dev/null | grep -v '^sysctl ')
+	else MF_HOST=$(inst_found_host "$1"); fi
 	if [ -f "/etc/systemd/system/$in_unit" ]; then
 		run_cmd systemctl disable --now "$in_unit"
 		rm -f "/etc/systemd/system/$in_unit"
@@ -1355,12 +1392,16 @@ action_repair_box() {
 		rm -f "/etc/systemd/system/$rb_unit"
 		systemctl daemon-reload
 		systemctl reset-failed "$rb_unit" >/dev/null 2>&1
-		# Docker, enabled and down because of it, starts again (its containers by their own restart policies)
-		if systemctl is-enabled --quiet docker.service 2>/dev/null && ! systemctl is-active --quiet docker.service; then
+		# Docker, down when the box was inspected, starts again (its containers by their own restart policies) only when the
+		# plan says so, as its «Будет» did: it may have been stopped on purpose (B11c review F4)
+		rb_docker=''
+		if [ "$(plan start_docker)" = 1 ] && systemctl is-enabled --quiet docker.service 2>/dev/null &&
+			! systemctl is-active --quiet docker.service; then
 			run_cmd systemctl start docker.service || run_result failed-not-rolled-back "docker.service did not start" "read its journal"
+			rb_docker='; Docker runs again'
 		fi
 		run_phase "done" 100
-		run_result ok "" "docker.service no longer requires $rb_unit"
+		run_result ok "" "docker.service no longer requires $rb_unit$rb_docker"
 		;;
 	"B15 csqtt-letsencrypt.timer")
 		# swg-panel holds the stock install's port, and the stock certificate timer still runs for a server that will not
@@ -1379,7 +1420,7 @@ action_repair_box() {
 		run_phase repair 50
 		: >"$RUN_DIR/switching"
 		host_dropin_drop
-		[ ! -f "$HOST_DROPIN" ] || run_result failed-cleaned "an instance of ours or a csqtt server beside still needs our sysctl drop-in" "check again"
+		[ ! -f "$HOST_DROPIN" ] || run_result failed-cleaned "an instance of ours, a stock install or a csqtt server beside still needs our sysctl drop-in" "check again"
 		run_phase "done" 100
 		run_result ok "" "our sysctl drop-in is gone; forwarding stays on until the next boot"
 		;;
@@ -1388,45 +1429,18 @@ action_repair_box() {
 }
 
 # ── rebuild-manifest: «Починить» for an instance of ours whose manifest was lost (§1.3; P2 B11c) ──────────────────────────
-# From what lives, by the id alone: its two roots and its unit; its openings found by their own names (ufw's commented
-# sqc-<id>, firewalld's zone sqc<id> and policy sqc<id>-fwd, its open.sh). A port it opened in firewalld's default zone cannot
-# be told from one that was open before, so it is not recorded: a later removal leaves it open, never closes another's
+# From what lives, by the id alone: its two roots and its unit; its openings found by their own names (inst_found_host)
 action_rebuild_manifest() {
 	rbm_id=$(plan id)
 	inst_paths "$rbm_id"
 	[ -f "/etc/systemd/system/$in_unit" ] && [ -d "$in_state" ] || run_result failed-cleaned "sqc-$rbm_id is not installed here" "check again"
 	[ ! -f "$in_state/manifest.json" ] || run_result failed-cleaned "sqc-$rbm_id has its manifest" "check again"
-	rbm_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "/etc/systemd/system/$in_unit" | head -n 1)
-	rbm_udp=$(printf '%s\n' "$rbm_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
-	rbm_web=$(printf '%s\n' "$rbm_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
 	run_phase repair 50
 	MF=$in_state/manifest.json MF_ID=$rbm_id
 	MF_OBJECTS="dir $in_state
 dir $in_root
 unit /etc/systemd/system/$in_unit"
-	MF_HOST=''
-	if command -v ufw >/dev/null 2>&1; then
-		for rbm_r in $(ufw status 2>/dev/null | awk -v c="# sqc-$rbm_id" 'index($0, c) && $2 != "(v6)" {print $1}' | sort -u); do
-			MF_HOST="$MF_HOST
-ufw rule=$rbm_r"
-		done
-	fi
-	if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd -q --state 2>/dev/null; then
-		if firewall-cmd --permanent --get-zones 2>/dev/null | tr ' ' '\n' | grep -qx "sqc$rbm_id"; then
-			MF_HOST="$MF_HOST
-firewalld-zone zone=sqc$rbm_id"
-		fi
-		if firewall-cmd --permanent --get-policies 2>/dev/null | tr ' ' '\n' | grep -qx "sqc$rbm_id-fwd"; then
-			MF_HOST="$MF_HOST
-firewalld-policy policy=sqc$rbm_id-fwd"
-		fi
-		case $MF_HOST in *firewalld-*) MF_HOST="$MF_HOST
-firewalld-reload" ;; esac
-	fi
-	if [ -f "$in_state/open.sh" ]; then
-		MF_HOST="$MF_HOST
-iptables-input ports=$rbm_udp/udp,$rbm_web/tcp"
-	fi
+	MF_HOST=$(inst_found_host "$rbm_id")
 	mf_write || run_result failed-cleaned "cannot write $MF" "check the box's disk"
 	run_phase "done" 100
 	run_result ok "" "the manifest of sqc-$rbm_id is rebuilt: $(printf '%s\n' "$MF_HOST" | awk 'NF {print $1}' | sort | uniq -c | awk '{printf "%s%s x%s", s, $2, $1; s = ", "}')"

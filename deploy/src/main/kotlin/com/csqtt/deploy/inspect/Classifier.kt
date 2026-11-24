@@ -55,7 +55,7 @@ data class Installation(
 
 /**
  * A problem of the box rather than of one installation (B9 two servers on one port, B14 a prereq without its helper…).
- * [subject]: the unit a repair acts on (B14, B24, B15), "" for the rest.
+ * [subject]: the unit a repair acts on (B14, B24, B15) or the file (S1), "" for the rest.
  */
 data class BoxProblem(val code: String, val detail: String, val subject: String = "")
 
@@ -387,7 +387,10 @@ object Classifier {
         // S1, ours: our sysctl drop-in left with no instance of ours and no csqtt server beside to keep it for (B11a verify R1):
         // kept while a stock or swg server ran, that server went its own way, and it turns forwarding on at every boot for nobody
         val dropIn = "/etc/sysctl.d/99-sanity-csqtt.conf"
+        // (a stock install counts with its unit, running or not: slim and the side tool write no sysctl file of their own and
+        // refuse to start with forwarding off, B18; B11c review F3)
         if (inv.files.any { it.path == dropIn } && installs.none { it.owner == Owner.OURS && it.units.isNotEmpty() } &&
+            installs.none { it.owner in setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL) && it.units.isNotEmpty() } &&
             inv.procs.none { it.comm in setOf("csqtt", "csqtt25", "csqtt-server", "csqtt-swg") }) {
             problems += BoxProblem("S1", "our sysctl drop-in is left with no instance of ours: it turns forwarding on at every boot", dropIn)
         }

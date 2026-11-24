@@ -165,10 +165,27 @@ object Maintenance {
  * changes anything.
  */
 object BoxRepair {
-    fun plan(problem: com.csqtt.deploy.inspect.BoxProblem): RunPlan? =
-        if (problem.code in com.csqtt.deploy.plan.Manager.REPAIRABLE && problem.subject.isNotEmpty()) {
-            RunPlan("repair-box", linkedMapOf("code" to problem.code, "unit" to problem.subject))
-        } else null
+    /** The run and what it will do, in the words the app shows before «Исправить» (§1.3: every plan carries its «Будет»). */
+    class Fix(val run: RunPlan, val will: List<String>)
+
+    /**
+     * [dockerStopped]: Docker was down when the box was inspected; a B14/B24 repair then starts it, its «Будет» says so (it
+     * may have been stopped on purpose: B11c review F4).
+     */
+    fun plan(problem: com.csqtt.deploy.inspect.BoxProblem, dockerStopped: Boolean = false): Fix? {
+        if (problem.code !in com.csqtt.deploy.plan.Manager.REPAIRABLE || problem.subject.isEmpty()) return null
+        val docker = dockerStopped && problem.code in setOf("B14", "B24")
+        val will = when (problem.code) {
+            "B14", "B24" -> listOf("${problem.subject} будет удалён: Docker больше не будет его требовать") +
+                if (docker) listOf("Docker сейчас остановлен: он будет запущен, а с ним контейнеры по их политике перезапуска") else emptyList()
+            "B15" -> listOf("Таймер сертификата старой установки (${problem.subject}) будет выключен")
+            "S1" -> listOf("Наш файл ${problem.subject} будет удалён: значения, которые он поднял, вернутся к прежним, если их " +
+                "никто не менял с тех пор; пересылка останется включённой до перезагрузки")
+            else -> emptyList()
+        }
+        return Fix(RunPlan("repair-box", linkedMapOf("code" to problem.code, "unit" to problem.subject) +
+            if (docker) mapOf("start_docker" to "1") else emptyMap()), will)
+    }
 }
 
 /** What the app needs to connect to an instance and to open its panel; [certSha256] pins the panel (null: not readable). */

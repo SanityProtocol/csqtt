@@ -51,6 +51,12 @@ enum class Action {
 
     /** «Починить»: ours, the same release again with the store kept; a broken stock 2.5 install, the same move as UPDATE. */
     REPAIR,
+
+    /**
+     * «Починить» an instance of ours whose manifest was lost (§1.3; B11c review F1): the manifest rebuilt from what lives on the
+     * box by its id; the server and its clients untouched, whatever its build.
+     */
+    REBUILD_MANIFEST,
     JOURNAL,
     /** «Удалить»: the server goes, its store stays (M-110; APP-PLAN §6.10): ours comes back by «Восстановить». */
     REMOVE,
@@ -75,8 +81,8 @@ data class Offer(val action: Action, val recommended: Boolean = false, val folde
 data class Entry(val installation: Installation, val compatibility: Compatibility, val offers: List<Offer>, val note: String?)
 
 /**
- * A box problem with what the app can do about it (§1.3 "Box problems"): B14 and B15 get «Исправить», B9 and B17 a name.
- * [subject]: the unit its repair acts on (BoxRepair's plan carries it).
+ * A box problem with what the app can do about it (§1.3 "Box problems"): those in [Manager.REPAIRABLE] get «Исправить», the
+ * rest (B9, B17…) a name. [subject]: the unit or file its repair acts on (BoxRepair's plan carries it).
  */
 data class BoxIssue(val code: String, val detail: String, val repairable: Boolean, val subject: String = "")
 
@@ -190,7 +196,7 @@ object Manager {
         heldBy(install, classification, inv)?.let { return held(install, compatibility, it) }
         // the manifest lost: «Починить» rebuilds it from the live objects by the id, whatever the build; removal is bounded by
         // our names, as always (§1.3)
-        if (manifestLost(install)) return Entry(install, compatibility, listOf(Offer(Action.REPAIR, recommended = true), Offer(Action.REMOVE)),
+        if (manifestLost(install)) return Entry(install, compatibility, listOf(Offer(Action.REBUILD_MANIFEST, recommended = true), Offer(Action.REMOVE)),
             "Манифест экземпляра потерян: «Починить» соберёт его заново")
         val newer = compatibility == Compatibility.NEWER_THAN_APP
         val installed = Version.parse(install.build?.version.orEmpty())

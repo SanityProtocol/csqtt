@@ -662,10 +662,14 @@ private fun repairBox(session: SshSession, p: Properties, target: File, code: St
     val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
     val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
     val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
-    val problem = Classifier.classify(Inventory.from(report.lines)).problems.firstOrNull { it.code == code }
+    val inventory = Inventory.from(report.lines)
+    val problem = Classifier.classify(inventory).problems.firstOrNull { it.code == code }
         ?: return 2.also { println("no box problem $code on this box") }
-    val plan = com.csqtt.deploy.run.BoxRepair.plan(problem) ?: return 2.also { println("$code has no repair: ${problem.detail}") }
+    val fix = com.csqtt.deploy.run.BoxRepair.plan(problem, inventory.dockerStopped)
+        ?: return 2.also { println("$code has no repair: ${problem.detail}") }
+    val plan = fix.run
     println("will: repair $code (${problem.subject}): ${problem.detail}")
+    fix.will.forEach { println("will: $it") }
     val runner = Runner(remote, root)
     val coordinator = coordinator(target)
     val runId = Runner.newRunId()

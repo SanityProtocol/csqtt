@@ -142,6 +142,10 @@ object Proposer {
         } else null
         val will = foreign?.will ?: when (offer.action) {
             Action.CONNECT -> listOf("Чтение настроек подключения ${install.name} (на сервере ничего не меняется)")
+            Action.REBUILD_MANIFEST -> listOf("${install.name}: его манифест будет собран заново по тому, что есть на сервере; " +
+                "сервер и клиенты не затрагиваются",
+                "Порт, который он открыл в общей зоне firewalld (если такой есть), не отличить от открытого раньше: " +
+                    "при удалении он останется открытым")
             Action.UPDATE, Action.REPAIR -> if (install.owner == Owner.OURS) {
                 if (installed != null && carried > installed) listOf("${install.name}: тот же экземпляр, сборка $carried вместо $installed, клиенты сохранятся")
                 else listOf("${install.name}: тот же экземпляр, та же сборка заново, клиенты сохранятся")
