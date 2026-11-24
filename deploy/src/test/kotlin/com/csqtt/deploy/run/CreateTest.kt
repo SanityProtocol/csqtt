@@ -118,6 +118,30 @@ class CreateTest {
     }
 
     @Test
+    fun removalRestoreAndRestartCarryWhatTheirRunsRead() {
+        fun inv(vararg lines: String) = com.csqtt.deploy.inspect.Inventory.from((com.csqtt.deploy.wire.LineCodec.parse(
+            lines.joinToString("\n") + "\nCSQTT_END|${lines.size}\n") as com.csqtt.deploy.wire.Report.Complete).lines)
+        // a kept store: no unit, no release; its id from its state dir
+        val leftover = com.csqtt.deploy.inspect.Classifier.classify(inv(
+            "CSQTT_INV|store|dir=/var/lib/sanityprotocol/csqtt/0a1b2c|files=csqtt.db,env,manifest.json|lock=none|schema=table:client_groups|env_keys=CSQTT_WEB_PASS|public_ip=|domain=",
+        )).installations.single()
+        assertEquals("0a1b2c", Maintenance.idOf(leftover))
+        val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        fun reads(action: String) = Regex("\\$\\(plan ([a-z_]+)\\)").findAll(script.substringAfter("$action() {").substringBefore("\n}\n"))
+            .map { it.groupValues[1] }.toSet()
+        for ((action, plan) in listOf(
+            "action_remove" to Maintenance.remove(leftover, purge = true),
+            "action_restore" to Maintenance.restore(leftover, Core(ByteArray(2), "2.6.0")),
+            "action_restart" to Maintenance.restart(leftover),
+        )) {
+            val text = plan.planText()
+            for (key in reads(action)) assertTrue("$action reads $key", "\n$key=" in "\n$text")
+        }
+        assertTrue("\npurge=1\n" in "\n" + Maintenance.remove(leftover, purge = true).planText())
+        assertTrue("\npurge=0\n" in "\n" + Maintenance.remove(leftover, purge = false).planText())
+    }
+
+    @Test
     fun theReadBackIsParsedAndItsFailuresNamed() {
         val text = """
             motd noise

@@ -127,6 +127,33 @@ object UpdateRun {
     }
 }
 
+/**
+ * Removal, restore and restart of an instance of ours (P2-PLAN §3 B11; APP-PLAN §6.10). Removal keeps the store unless
+ * [purge] (typed in the app, M-110, M-134); «Восстановить» brings a kept store back under the same id with its clients.
+ */
+object Maintenance {
+    fun remove(install: com.csqtt.deploy.inspect.Installation, purge: Boolean): RunPlan =
+        RunPlan("remove", linkedMapOf("id" to idOf(install), "purge" to if (purge) "1" else "0"))
+
+    fun restore(install: com.csqtt.deploy.inspect.Installation, core: Core): RunPlan =
+        RunPlan("restore", linkedMapOf("id" to idOf(install), "version" to core.version, "core_sha" to core.sha256), core = core.bytes)
+
+    /** «Перезапустить», and «Запустить» for a stopped one: the unit (re)started, verified. */
+    fun restart(install: com.csqtt.deploy.inspect.Installation): RunPlan = RunPlan("restart", linkedMapOf("id" to idOf(install)))
+
+    /** «Журнал»: the unit's last [lines], read as root (nothing changes on the box). */
+    fun journal(root: RootRunner, id: String, lines: Int = 200): List<String> {
+        val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("run.sh"), listOf("journal", id, lines.toString()), 60_000)
+        val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return emptyList()
+        return report.lines.filter { it.kind == "JOURNAL" }.map { it.fields.firstOrNull().orEmpty() }
+    }
+
+    /** The id of an instance of ours: its unit's name, or, for a kept store (a leftover), its state dir. */
+    fun idOf(install: com.csqtt.deploy.inspect.Installation): String = UpdateRun.idOf(install)
+        ?: install.stores.firstNotNullOfOrNull { Regex("^/var/lib/sanityprotocol/csqtt/([0-9a-f]{6})$").find(it.dir)?.groupValues?.get(1) }
+        ?: throw IllegalArgumentException("${install.name} is not an instance of ours")
+}
+
 /** What the app needs to connect to an instance and to open its panel; [certSha256] pins the panel (null: not readable). */
 class Connection(val host: String, val udpPort: Int, val webPort: Int, val webBind: String?, val mainPassword: String,
     val webUser: String, val webPass: String, val secretPath: String, val certSha256: String?) {

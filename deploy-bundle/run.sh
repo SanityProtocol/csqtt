@@ -558,19 +558,7 @@ mf_objects_of() {
 # (SQC-<ID>_…, every table, v4 and v6) and its forward chain stay; and the host-wide values it sets at every start are put
 # back as they were before the switch, unless another csqtt server still runs and needs them
 cr_server_undo() {
-	cr_tagbase=SQC-$(printf '%s' "$cr_id" | tr 'a-f' 'A-F')_
-	for cs_ipt in iptables ip6tables; do
-		command -v $cs_ipt >/dev/null 2>&1 || continue
-		for cs_t in filter nat mangle raw; do
-			$cs_ipt -w 5 -t $cs_t -S 2>/dev/null | grep '^-A ' | grep -F -- "$cr_tagbase" | sed 's/^-A /-D /' | while read -r cs_rule; do
-				eval "$cs_ipt -w 5 -t $cs_t $cs_rule" 2>/dev/null
-			done
-			$cs_ipt -w 5 -t $cs_t -S 2>/dev/null | awk -v t="$cr_tagbase" '$1 == "-N" && index($2, t) == 1 {print $2}' | while read -r cs_c; do
-				$cs_ipt -w 5 -t $cs_t -F "$cs_c" 2>/dev/null
-				$cs_ipt -w 5 -t $cs_t -X "$cs_c" 2>/dev/null
-			done
-		done
-	done
+	inst_sweep "$cr_id"
 	# iptables-nft leaves the tables the server's rules made, empty: a table new since the switch and holding no rule goes
 	if [ -f "$RUN_DIR/nft-before" ] && command -v nft >/dev/null 2>&1; then
 		nft list tables 2>/dev/null | while read -r cs_w cs_fam cs_name; do
@@ -589,6 +577,71 @@ cr_server_undo() {
 		grep -qx tcp_bbr "$RUN_DIR/modules-before" 2>/dev/null || modprobe -r tcp_bbr 2>/dev/null
 	fi
 	return 0
+}
+
+# An instance's own iptables objects, by its tag (SQC-<ID>_…, every table, v4 and v6): what its server leaves when it dies
+# rather than stops; bounded by the id, never by a manifest (B8 review F4, B11)
+inst_sweep() {  # inst_sweep <id>
+	is_tag=SQC-$(printf '%s' "$1" | tr 'a-f' 'A-F')_
+	for is_ipt in iptables ip6tables; do
+		command -v $is_ipt >/dev/null 2>&1 || continue
+		for is_t in filter nat mangle raw; do
+			$is_ipt -w 5 -t $is_t -S 2>/dev/null | grep '^-A ' | grep -F -- "$is_tag" | sed 's/^-A /-D /' | while read -r is_rule; do
+				eval "$is_ipt -w 5 -t $is_t $is_rule" 2>/dev/null
+			done
+			$is_ipt -w 5 -t $is_t -S 2>/dev/null | awk -v t="$is_tag" '$1 == "-N" && index($2, t) == 1 {print $2}' | while read -r is_c; do
+				$is_ipt -w 5 -t $is_t -F "$is_c" 2>/dev/null
+				$is_ipt -w 5 -t $is_t -X "$is_c" 2>/dev/null
+			done
+		done
+	done
+	return 0
+}
+
+# On a plain iptables box whose INPUT drops, an instance's openings are its unit's own: made at each start (a reboot, a
+# restore of the saved rules), taken at each stop, tagged SQC-<ID>_OPEN (§1.5). Writes <state>/open.sh and prints the unit
+# lines that run it.
+inst_open_sh() {  # inst_open_sh <id> <state dir> <openings: port/proto…>
+	io_tag=SQC-$(printf '%s' "$1" | tr 'a-f' 'A-F')_OPEN
+	{
+		printf '#!/bin/sh\n# SanityProtocol csqtt: sqc-%s'"'"'s openings in INPUT, run by its unit (P2 B9)\n' "$1"
+		printf 'for r in'
+		for io_r in $3; do printf ' "-p %s --dport %s"' "${io_r#*/}" "${io_r%/*}"; done
+		printf '; do\n'
+		# shellcheck disable=SC2016 # the generated script's own variables
+		printf '\tif [ "${1:-add}" = add ]; then\n\t\tiptables -w 5 -C INPUT $r -m comment --comment %s -j ACCEPT 2>/dev/null ||\n' "$io_tag"
+		# shellcheck disable=SC2016
+		printf '\t\t\tiptables -w 5 -I INPUT $r -m comment --comment %s -j ACCEPT\n\telse\n' "$io_tag"
+		# shellcheck disable=SC2016
+		printf '\t\tiptables -w 5 -D INPUT $r -m comment --comment %s -j ACCEPT 2>/dev/null\n\tfi\ndone\nexit 0\n' "$io_tag"
+	} >"$2/open.sh" && chmod 700 "$2/open.sh" || return 1
+	printf 'ExecStartPre=-/bin/sh %s/open.sh add\nExecStopPost=-/bin/sh %s/open.sh del\n' "$2" "$2"
+}
+
+# an instance's unit
+inst_unit_text() {  # inst_unit_text <id> <root> <state> <flags> <open lines>
+	cat <<EOF
+[Unit]
+Description=csqtt server sqc-$1 (SanityProtocol)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# no CSQTT_SERVICE_MANAGER: the panel's «Перезапустить» then ends the server, and Restart=always starts it again (the
+# systemd route would restart a unit named after the instance, sqc-$1.service, which is not this one)
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+EnvironmentFile=$3/env
+ExecStart=$2/current/csqtt-server $4
+$5
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 # the host-wide values the server sets at every start (rust-server tokio_io.rs KERNEL_PARAMETERS), saved before the switch
@@ -709,49 +762,12 @@ action_create() {
 	} >"$cr_state/env" && chmod 600 "$cr_state/env" || cr_fail "cannot write $cr_state/env"
 	( umask 077 && printf '{"main_password":"%s"}\n' "$(sed -n 's/^main_password=//p' "$RUN_DIR/secrets" | sed 's/[\\"]/\\&/g')" \
 		>"$cr_state/deploy-overrides.json" ) || cr_fail "cannot write the main password"
-	# on a plain iptables box whose INPUT drops, the openings are the unit's own: made at each start (a reboot, a restore of
-	# the saved rules), taken at each stop, tagged SQC-<ID>_OPEN (§1.5)
 	cr_open_unit=''
 	if [ "$cr_fw" = iptables ]; then
-		cr_tag=SQC-$(printf '%s' "$cr_id" | tr 'a-f' 'A-F')_OPEN
-		{
-			printf '#!/bin/sh\n# SanityProtocol csqtt: sqc-%s'"'"'s openings in INPUT, run by its unit (P2 B9)\n' "$cr_id"
-			printf 'for r in'
-			for cr_r in $cr_open; do printf ' "-p %s --dport %s"' "${cr_r#*/}" "${cr_r%/*}"; done
-			printf '; do\n'
-			# shellcheck disable=SC2016 # the generated script's own variables
-			printf '\tif [ "${1:-add}" = add ]; then\n\t\tiptables -w 5 -C INPUT $r -m comment --comment %s -j ACCEPT 2>/dev/null ||\n' "$cr_tag"
-			# shellcheck disable=SC2016
-			printf '\t\t\tiptables -w 5 -I INPUT $r -m comment --comment %s -j ACCEPT\n\telse\n' "$cr_tag"
-			# shellcheck disable=SC2016
-			printf '\t\tiptables -w 5 -D INPUT $r -m comment --comment %s -j ACCEPT 2>/dev/null\n\tfi\ndone\nexit 0\n' "$cr_tag"
-		} >"$cr_state/open.sh" && chmod 700 "$cr_state/open.sh" || cr_fail "cannot write $cr_state/open.sh"
-		cr_open_unit="ExecStartPre=-/bin/sh $cr_state/open.sh add
-ExecStopPost=-/bin/sh $cr_state/open.sh del"
+		cr_open_unit=$(inst_open_sh "$cr_id" "$cr_state" "$cr_open") || cr_fail "cannot write $cr_state/open.sh"
 	fi
 	mf_add unit "/etc/systemd/system/$cr_unit"
-	cat >"/etc/systemd/system/$cr_unit" <<EOF || cr_fail "cannot write $cr_unit"
-[Unit]
-Description=csqtt server sqc-$cr_id (SanityProtocol)
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-# no CSQTT_SERVICE_MANAGER: the panel's «Перезапустить» then ends the server, and Restart=always starts it again (the
-# systemd route would restart a unit named after the instance, sqc-$cr_id.service, which is not this one)
-Type=notify
-NotifyAccess=main
-WatchdogSec=30
-EnvironmentFile=$cr_state/env
-ExecStart=$cr_root/current/csqtt-server $cr_flags
-$cr_open_unit
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
+	inst_unit_text "$cr_id" "$cr_root" "$cr_state" "$cr_flags" "$cr_open_unit" >"/etc/systemd/system/$cr_unit" || cr_fail "cannot write $cr_unit"
 	systemctl daemon-reload
 	run_safe_point
 
@@ -856,6 +872,190 @@ action_update() {
 	run_result ok "" "read the connection back"
 }
 
+# ── remove, restore, restart: an instance of ours (P2-PLAN §3 B11; APP-PLAN §6.10) ────────────────────────────────────
+# Bounded by construction: what goes is named by the id alone (its two roots, its unit, its SQC-<ID>_ objects, its
+# openings in the manifest's host list, our drop-in when no instance of ours remains), never by a manifest's paths.
+inst_paths() {  # inst_paths <id>: sets in_root in_state in_unit
+	case $1 in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) run_result failed-cleaned "bad instance id $1" "update the app" ;; esac
+	in_root=/opt/sanityprotocol/csqtt/$1 in_state=/var/lib/sanityprotocol/csqtt/$1 in_unit=sanity-csqtt-$1.service
+}
+
+# our drop-in goes with the last instance of ours that runs: each key put back to what its comment says it was
+host_floors_revert() {
+	[ -f "$HOST_DROPIN" ] || return 0
+	sed -n 's/^# \([a-z0-9_.]*\) was \(.*\)$/\1=\2/p' "$HOST_DROPIN" | while IFS='=' read -r hf_k hf_v; do
+		sysctl -q -w "$hf_k=$hf_v" 2>/dev/null
+	done
+	rm -f "$HOST_DROPIN"
+}
+
+action_remove() {
+	rm_id=$(plan id) rm_purge=$(plan purge)
+	inst_paths "$rm_id"
+	[ -e "$in_state" ] || [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rm_id is not here" "check again"
+	MF=$in_state/manifest.json MF_ID=$rm_id
+	MF_HOST=$(mf_host_of "$MF" 2>/dev/null)
+	run_phase stop 20
+	: >"$RUN_DIR/switching"
+	if [ -f "/etc/systemd/system/$in_unit" ]; then
+		# its flags kept for «Восстановить» when the store stays
+		[ "$rm_purge" = 1 ] || [ ! -d "$in_state" ] || cp -p "/etc/systemd/system/$in_unit" "$in_state/unit.saved"
+		run_cmd systemctl disable --now "$in_unit"
+		rm -f "/etc/systemd/system/$in_unit"
+		systemctl daemon-reload
+		systemctl reset-failed "$in_unit" >/dev/null 2>&1
+	fi
+	inst_sweep "$rm_id"
+	run_phase remove 50
+	# its openings (ufw, firewalld) go through their tool; the iptables ones went with its unit's stop
+	MF_HOST=$(printf '%s\n' "$MF_HOST" | grep -v '^sysctl ')
+	host_undo
+	# the floors go with the last instance of ours that runs (a kept store runs nothing)
+	rm_others=0
+	for rm_u in /etc/systemd/system/sanity-csqtt-*.service; do [ -f "$rm_u" ] && rm_others=1; done
+	if [ $rm_others = 0 ]; then
+		host_floors_revert
+		# the last csqtt server gone: the iptables-nft tables its rules made, left empty, go too (a table holding any rule,
+		# Docker's, ufw's, stays; firewalld's inet table is never one of these)
+		if ! pgrep -x csqtt-server >/dev/null 2>&1 && ! pgrep -x csqtt >/dev/null 2>&1 && ! pgrep -x csqtt25 >/dev/null 2>&1 &&
+			command -v nft >/dev/null 2>&1; then
+			nft list tables 2>/dev/null | while read -r rm_w rm_fam rm_name; do
+				[ "$rm_w" = table ] || continue
+				case "$rm_fam $rm_name" in "ip filter" | "ip nat" | "ip mangle" | "ip raw" | "ip6 filter" | "ip6 nat" | "ip6 mangle" | "ip6 raw") ;; *) continue ;; esac
+				nft list table "$rm_fam" "$rm_name" 2>/dev/null | awk '!/^[ \t]*((table|chain) .*\{|type .*;|\}|)$/ {n++} END {exit n > 0}' &&
+					nft delete table "$rm_fam" "$rm_name" 2>/dev/null
+			done
+		fi
+	fi
+	rm -rf "$in_root"
+	if [ "$rm_purge" = 1 ]; then
+		rm -rf "$in_state"
+		rmdir /var/lib/sanityprotocol/csqtt 2>/dev/null
+	elif [ -d "$in_state" ]; then
+		# what stays: the store, env, certificate, the unit's flags; the manifest names the state dir alone now
+		rm -f "$in_state/open.sh"
+		MF_OBJECTS="dir $in_state" MF_HOST=''
+		mf_write
+	fi
+	rmdir /opt/sanityprotocol/csqtt /opt/sanityprotocol 2>/dev/null
+	run_phase "done" 100
+	if [ "$rm_purge" = 1 ]; then run_result ok "" "sqc-$rm_id is gone, its clients with it"; fi
+	run_result ok "" "sqc-$rm_id is gone; its store stays: «Восстановить» brings its clients back"
+}
+
+# «Восстановить»: the kept store under the same id, its unit made again from the flags it ran with, the host prepared as a
+# create prepares it; the store is never touched, so its clients and passwords come back
+action_restore() {
+	rs_id=$(plan id) rs_version=$(plan version) rs_sha=$(plan core_sha)
+	inst_paths "$rs_id"
+	[ -f "$in_state/unit.saved" ] || run_result failed-cleaned "sqc-$rs_id has no kept store to restore" "check again"
+	[ ! -e "$in_root" ] && [ ! -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
+	rs_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$in_state/unit.saved" | head -n 1)
+	rs_udp=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
+	rs_web=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
+	rs_iface=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')
+	rs_slot=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--instance-slot \([0-9]*\).*/\1/p')
+	rs_bind=$(printf '%s\n' "$rs_flags" | sed -n 's/.*--web-bind \([^ ]*\).*/\1/p')
+	rs_secret=$(sed -n 's/^CSQTT_WEB_SECRET_PATH=//p' "$in_state/env" | head -n 1)
+	# its own ports, interface and slot must be free again: its clients come back on them
+	for rs_p in $rs_udp $rs_web; do
+		[ -z "$(ss -H -ltun "( sport = :$rs_p )" 2>/dev/null)" ] || run_result failed-cleaned "port $rs_p is held now" "free it, or remove the kept store"
+	done
+	! ip link show "$rs_iface" >/dev/null 2>&1 || run_result failed-cleaned "interface $rs_iface exists now" "check again"
+	for rs_u in /etc/systemd/system/sanity-csqtt-*.service; do
+		[ -f "$rs_u" ] && sed -n 's/^ExecStart=//p' "$rs_u" | grep -qE -- "--instance-slot $rs_slot( |\$)" &&
+			run_result failed-cleaned "slot $rs_slot is ${rs_u##*/}'s now" "remove the kept store, or that instance"
+	done
+	cr_id=$rs_id cr_state=$in_state cr_unit=$in_unit cr_iface=$rs_iface
+	cr_open="$rs_udp/udp"
+	[ "$rs_bind" = 127.0.0.1 ] || cr_open="$cr_open $rs_web/tcp"
+	MF=$in_state/manifest.json MF_ID=$rs_id MF_OBJECTS='' MF_HOST=''
+	# what this run makes (never the state dir: it holds the clients) goes if it fails
+	action_cleanup() {
+		mf_undo
+		[ ! -e "$RUN_DIR/switching" ] || cr_server_undo
+		host_undo
+		rmdir /opt/sanityprotocol/csqtt /opt/sanityprotocol 2>/dev/null
+		return 0
+	}
+	cr_fail() { action_cleanup; run_result failed-cleaned "$1" "${2:-check again}"; }
+
+	run_phase stage 10
+	[ "$(sha256sum "$RUN_DIR/core" 2>/dev/null | cut -d' ' -f1)" = "$rs_sha" ] || cr_fail "the uploaded core is damaged" "try again"
+	# shellcheck disable=SC2086 # the flags it ran with
+	rs_said=$("$RUN_DIR/core" $rs_flags --version 2>&1 | head -n 1)
+	[ "$rs_said" = "csqtt $rs_version CSQTT-WIRE-3" ] || cr_fail "the core does not run here with this instance's flags: $rs_said" "check the box's architecture"
+	host_iptables
+	cr_fw=$(host_fw_mode)
+	run_safe_point
+	rs_release=$in_root/releases/$rs_version-$(printf '%.8s' "$rs_sha")
+	mf_add dir "$in_root"
+	mkdir -p "$rs_release" && chmod 755 /opt/sanityprotocol /opt/sanityprotocol/csqtt "$in_root" "$in_root/releases" "$rs_release" &&
+		install -m 755 "$RUN_DIR/core" "$rs_release/csqtt-server" && ln -sfn "$rs_release" "$in_root/current" || cr_fail "cannot install the core"
+	rs_open_unit=''
+	[ "$cr_fw" != iptables ] || rs_open_unit=$(inst_open_sh "$rs_id" "$in_state" "$cr_open") || cr_fail "cannot write $in_state/open.sh"
+	mf_add unit "/etc/systemd/system/$in_unit"
+	inst_unit_text "$rs_id" "$in_root" "$in_state" "$rs_flags" "$rs_open_unit" >"/etc/systemd/system/$in_unit" || cr_fail "cannot write $in_unit"
+	systemctl daemon-reload
+	run_safe_point
+	run_phase host 45
+	host_sysctl
+	host_firewall
+	[ "$cr_fw" != iptables ] || host_add iptables-input "ports=$(printf '%s' "$cr_open" | tr ' ' ,)"
+	run_safe_point
+	run_phase switch 60
+	for cr_k in $CR_SERVER_SYSCTLS; do printf '%s=%s\n' "$cr_k" "$(sysctl -n "$cr_k" 2>/dev/null)"; done >"$RUN_DIR/sysctl-before"
+	! command -v nft >/dev/null 2>&1 || nft list tables >"$RUN_DIR/nft-before" 2>/dev/null
+	awk '{print $1}' /proc/modules >"$RUN_DIR/modules-before" 2>/dev/null
+	: >"$RUN_DIR/switching"
+	run_cmd systemctl enable --now "$in_unit" ||
+		cr_fail "$in_unit did not start: $(journalctl _SYSTEMD_UNIT="$in_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')"
+	run_phase verify 80
+	rs_why=$(inst_verify "$in_unit" "$rs_udp" "$rs_web" "$rs_iface" "$rs_secret")
+	[ -z "$rs_why" ] || cr_fail "$rs_why"
+	# the manifest names the state dir again, first, as a create's does
+	MF_OBJECTS="dir $in_state$(printf '\n%s' "$MF_OBJECTS")"
+	mf_write
+	rm -f "$in_state/unit.saved"
+	run_phase "done" 100
+	run_result ok "" "read the connection back"
+}
+
+# «Перезапустить» and «Запустить»: the unit (re)started and verified
+action_restart() {
+	rt_id=$(plan id)
+	inst_paths "$rt_id"
+	[ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rt_id is not installed here" "check again"
+	rt_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "/etc/systemd/system/$in_unit" | head -n 1)
+	run_phase switch 50
+	: >"$RUN_DIR/switching"
+	run_cmd systemctl enable "$in_unit"
+	run_cmd systemctl restart "$in_unit" ||
+		run_result failed-not-rolled-back "$in_unit did not start: $(journalctl _SYSTEMD_UNIT="$in_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')" "read its journal («Журнал»)"
+	run_phase verify 80
+	rt_why=$(inst_verify "$in_unit" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')" \
+		"$(printf '%s\n' "$rt_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')" \
+		"$(sed -n 's/^CSQTT_WEB_SECRET_PATH=//p' "/var/lib/sanityprotocol/csqtt/$rt_id/env" | head -n 1)")
+	[ -z "$rt_why" ] || run_result failed-not-rolled-back "$rt_why" "read its journal («Журнал»)"
+	run_phase "done" 100
+	run_result ok "" ""
+}
+
+# journal <instance id> [lines]: «Журнал», the unit's last lines, for the engine alone (root, stdout), each redacted against
+# nothing secret it could print (ours print no password: it never generates one)
+cmd_journal() {
+	case $1 in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) csqtt_emit JOURNAL "bad instance id"; csqtt_end; exit 2 ;; esac
+	jn_n=${2:-200}
+	case $jn_n in '' | *[!0-9]*) jn_n=200 ;; esac
+	jn_out=$(journalctl -u "sanity-csqtt-$1.service" -n "$jn_n" -o short-iso --no-pager 2>/dev/null)
+	while IFS= read -r jn_l; do
+		[ -z "$jn_l" ] || csqtt_emit JOURNAL "$jn_l"
+	done <<EOF
+$jn_out
+EOF
+	csqtt_end
+}
+
 # readback <instance id>: the connection to an instance of ours, for the engine alone (stdout; never a log): the ports and
 # the panel's bind from its unit, the panel's login from its env, the main password from a copy of its store read by its
 # own binary (the panel may have changed it), and the sha256 of the panel's certificate (DER) for the app's pin.
@@ -909,6 +1109,9 @@ cmd_exec() {
 	selftest) action_selftest ;;
 	create) action_create ;;
 	update) action_update ;;
+	remove) action_remove ;;
+	restore) action_restore ;;
+	restart) action_restart ;;
 	*) run_result failed-cleaned "unknown action $(plan action)" "update the app" ;;
 	esac
 }
@@ -920,5 +1123,6 @@ cancel) cmd_cancel "${2:?run id}" ;;
 status) cmd_status ;;
 exec) cmd_exec "${2:?run id}" ;;
 readback) cmd_readback "${2:?instance id}" ;;
+journal) cmd_journal "${2:?instance id}" "${3:-200}" ;;
 *) csqtt_emit RUN error "unknown verb: ${1:-}"; csqtt_end; exit 2 ;;
 esac

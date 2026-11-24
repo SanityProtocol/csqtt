@@ -72,6 +72,10 @@ private const val USAGE = """usage: deploy-cli <command>
                           panel over HTTPS, its certificate pinned. The core is the target's core=<file>, core_version=…
                           resume=<run id>: «Продолжить» a create a reboot or a kill cut off, from the plan its run kept
   readback <target> <id>  «Подключиться» to an instance of ours: its connection read back, then the same outside check
+  remove <target> <id> [purge]   an instance of ours removed (B11): its store kept for «Восстановить», or with purge, gone
+  restore <target> <id>   «Восстановить» a kept store with the target's core: its clients come back
+  restart <target> <id>   «Перезапустить» (and «Запустить»): its unit (re)started and verified
+  journal <target> <id> [lines]   «Журнал»: its unit's last lines
   update <target> <id>    an instance of ours to the target's core (B10): stage, switch, verify, rolled back on a failure;
                           then its connection read back (the same passwords and pin) and checked from here
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
@@ -103,6 +107,14 @@ private fun dispatch(args: Array<String>): Int {
             withSession(File(args[1])) { session, p -> runSelftest(session, p, File(args[1]), args.drop(3)) }
         args.size >= 2 && args[0] == "create" -> withSession(File(args[1])) { session, p -> create(session, p, File(args[1]), args.drop(2)) }
         args.size == 3 && args[0] == "update" -> withSession(File(args[1])) { session, p -> update(session, p, File(args[1]), args[2]) }
+        args.size in 3..4 && args[0] == "remove" && (args.size == 3 || args[3] == "purge") ->
+            withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], if (args.size == 4) "purge" else "remove") }
+        args.size == 3 && args[0] in setOf("restore", "restart") ->
+            withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], args[0]) }
+        args.size in 3..4 && args[0] == "journal" -> withSession(File(args[1])) { session, p ->
+            com.csqtt.deploy.run.Maintenance.journal(rootOf(session, p), args[2], args.getOrNull(3)?.toIntOrNull() ?: 200).forEach { println(it) }
+            0
+        }
         args.size == 3 && args[0] == "readback" ->
             withSession(File(args[1])) { session, p -> readBack(rootOf(session, p), args[2], p.prop("host").orEmpty(), null) }
         args.size == 2 && args[0] in setOf("attach", "cancel", "runs") ->
@@ -580,5 +592,48 @@ private fun update(session: SshSession, p: Properties, target: File, id: String)
     }
     val code = follow(runner, coordinator, runId, before)
     if (code != 0) return code
+    return readBack(root, id, p.prop("host").orEmpty(), null)
+}
+
+/** remove, purge, restore, restart of an instance of ours (P2 B11): inspected first, so the run re-checks what it saw. */
+private fun maintain(session: SshSession, p: Properties, target: File, id: String, verb: String): Int {
+    val remote = session.asRemote()
+    val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    val install = Classifier.classify(Inventory.from(report.lines)).installations.firstOrNull {
+        runCatching { com.csqtt.deploy.run.Maintenance.idOf(it) }.getOrNull() == id
+    } ?: return 2.also { println("no instance of ours sqc-$id on this box") }
+    val plan = when (verb) {
+        "remove" -> com.csqtt.deploy.run.Maintenance.remove(install, purge = false)
+        "purge" -> com.csqtt.deploy.run.Maintenance.remove(install, purge = true)
+        "restart" -> com.csqtt.deploy.run.Maintenance.restart(install)
+        else -> {
+            val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
+            com.csqtt.deploy.run.Maintenance.restore(install,
+                Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") }))
+        }
+    }
+    println("will: ${plan.action} ${install.name}")
+    val runner = Runner(remote, root)
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    when (val outcome = runner.start(runId, plan)) {
+        is StartOutcome.Started -> {}
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            return 8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            return 7
+        }
+    }
+    val code = follow(runner, coordinator, runId, before)
+    if (code != 0 || verb == "remove" || verb == "purge") return code
     return readBack(root, id, p.prop("host").orEmpty(), null)
 }
