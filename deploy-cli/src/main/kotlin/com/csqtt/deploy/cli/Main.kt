@@ -3,6 +3,8 @@
 package com.csqtt.deploy.cli
 
 import com.csqtt.deploy.bundle.Bundle
+import com.csqtt.deploy.inspect.Preflight
+import com.csqtt.deploy.inspect.PreflightRules
 import com.csqtt.deploy.ssh.HostKeyChanged
 import com.csqtt.deploy.ssh.HostKeyPins
 import com.csqtt.deploy.ssh.HostKeys
@@ -34,14 +36,17 @@ private const val USAGE = """usage: deploy-cli <command>
                           root prints its uid
   login-key <target> add|remove   «Вход без пароля»: add makes a key, SAVES it to <target>.loginkey (0600) and only then
                           installs it for the login user; remove takes exactly that key's line away
+  inspect <target> [host…] the environment as root (P2 B3): every check's facts, then each finding with its level; the hosts
+                          are the ones the planned run must reach (github.com, the ACME server), none for a plain look
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
-      · 5 no root (its kind printed)"""
+      · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed)"""
 
 fun main(args: Array<String>) {
     val code = when {
         args.toList() == listOf("bundle-check") -> bundleCheck()
         args.size == 2 && args[0] == "ssh-check" -> sshCheck(File(args[1]))
         args.size == 2 && args[0] == "root-check" -> withSession(File(args[1])) { session, p -> rootCheck(session, p) }
+        args.size >= 2 && args[0] == "inspect" -> withSession(File(args[1])) { session, p -> inspect(session, p, args.drop(2)) }
         args.size == 3 && args[0] == "login-key" && args[2] in setOf("add", "remove") ->
             withSession(File(args[1])) { session, _ -> loginKey(session, File(args[1] + ".loginkey"), args[2]) }
         else -> {
@@ -201,4 +206,23 @@ private fun save(file: File, text: String) {
     tmp.writeText(text)
     tmp.setReadable(false, false); tmp.setReadable(true, true); tmp.setWritable(false, false); tmp.setWritable(true, true)
     if (!tmp.renameTo(file)) error("could not save ${file.path}")
+}
+
+private fun inspect(session: SshSession, p: Properties, hosts: List<String>): Int {
+    val remote = session.asRemote()
+    val privilege = Privilege.detect(remote, p.getProperty("sudo_password"))
+    val script = Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh")
+    val started = System.nanoTime()
+    val result = RootRunner(remote, privilege).runScript(script, hosts, deadlineMs = 60_000)
+    val took = (System.nanoTime() - started) / 1_000_000
+    val report = LineCodec.parse(result.stdoutText)
+    if (report !is Report.Complete) {
+        println("report broken: ${(report as Report.Broken).reason}")
+        return 4
+    }
+    report.lines.forEach { line -> println("${line.kind} ${line.fields.joinToString(" ")}") }
+    val verdicts = PreflightRules.verdicts(Preflight.from(report.lines), System.currentTimeMillis() / 1000)
+    verdicts.forEach { println("${it.level} ${it.finding}" + if (it.detail.isEmpty()) "" else " ${it.detail}") }
+    println("inspect took $took ms")
+    return if (PreflightRules.stops(verdicts).isEmpty()) 0 else 6
 }
