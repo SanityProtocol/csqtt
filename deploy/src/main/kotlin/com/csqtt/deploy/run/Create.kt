@@ -105,6 +105,28 @@ fun proposalOfKeptPlan(text: String): Proposal? {
         v["web"]?.toIntOrNull() ?: return null, v["slot"]?.toIntOrNull() ?: return null, v["web_bind"]?.takeIf { it.isNotEmpty() })
 }
 
+/** An instance of ours to another build, or the same one again («Починить»): P2-PLAN §3 B10. */
+object UpdateRun {
+    private val OURS = Regex("^sanity-csqtt-([0-9a-f]{6})\\.service$")
+
+    /** The instance's id, by its unit's name; null when the installation is not one of ours. */
+    fun idOf(install: com.csqtt.deploy.inspect.Installation): String? =
+        install.units.firstNotNullOfOrNull { OURS.find(it.id)?.groupValues?.get(1) }
+
+    /**
+     * The run: the instance and the build it goes to; what it re-checks first is the unit and the binary the inspection saw
+     * (§1.4), so a box that changed since fails cleaned and is inspected again. No secret: the instance keeps all of its own.
+     */
+    fun plan(install: com.csqtt.deploy.inspect.Installation, inv: com.csqtt.deploy.inspect.Inventory, core: Core): RunPlan {
+        val id = idOf(install) ?: throw IllegalArgumentException("${install.name} is not an instance of ours")
+        val unit = install.units.first()
+        val sha = inv.exeAt(unit.exec)?.sha
+        return RunPlan("update", linkedMapOf(
+            "id" to id, "version" to core.version, "core_sha" to core.sha256, "expect_unit" to unit.id,
+        ) + (if (sha != null) mapOf("expect_bin" to unit.exec, "expect_sha" to sha) else emptyMap()), core = core.bytes)
+    }
+}
+
 /** What the app needs to connect to an instance and to open its panel; [certSha256] pins the panel (null: not readable). */
 class Connection(val host: String, val udpPort: Int, val webPort: Int, val webBind: String?, val mainPassword: String,
     val webUser: String, val webPass: String, val secretPath: String, val certSha256: String?) {

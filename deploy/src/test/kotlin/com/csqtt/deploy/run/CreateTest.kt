@@ -96,6 +96,28 @@ class CreateTest {
     }
 
     @Test
+    fun anUpdateReChecksTheUnitAndTheBinaryItWasPlannedOn() {
+        val sha = "ab".repeat(32)
+        val text = listOf(
+            "CSQTT_INV|exe|sha=$sha|path=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server|size=1|label=v2.6.0|caption=1|startup=2.6.0|swg=1|mrtt=0",
+            "CSQTT_INV|bin|path=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server|sha=$sha",
+            "CSQTT_INV|unit|id=sanity-csqtt-0a1b2c.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=0|" +
+                "file_state=enabled|fragment=/etc/systemd/system/sanity-csqtt-0a1b2c.service|exec=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server|" +
+                "exec_ok=1|flags=--listen 0.0.0.0:41234 --config-dir /var/lib/sanityprotocol/csqtt/0a1b2c --instance sqc-0a1b2c|pre=|pre_status=|env=",
+        ).joinToString("\n") + "\nCSQTT_END|3\n"
+        val inv = com.csqtt.deploy.inspect.Inventory.from((com.csqtt.deploy.wire.LineCodec.parse(text) as com.csqtt.deploy.wire.Report.Complete).lines)
+        val install = com.csqtt.deploy.inspect.Classifier.classify(inv).installations.single()
+        assertEquals("0a1b2c", UpdateRun.idOf(install))
+        val plan = UpdateRun.plan(install, inv, Core(ByteArray(3), "2.6.1")).planText()
+        for (line in listOf("action=update", "id=0a1b2c", "version=2.6.1", "expect_unit=sanity-csqtt-0a1b2c.service",
+            "expect_bin=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server", "expect_sha=$sha")) assertTrue(line, "\n$line\n" in "\n$plan")
+        // the update action reads only keys its plan carries (resume aside)
+        val script = com.csqtt.deploy.bundle.Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        val update = script.substringAfter("action_update() {").substringBefore("\n}\n")
+        for (key in Regex("\\$\\(plan ([a-z_]+)\\)").findAll(update).map { it.groupValues[1] }.toSet()) assertTrue(key, "\n$key=" in "\n$plan")
+    }
+
+    @Test
     fun theReadBackIsParsedAndItsFailuresNamed() {
         val text = """
             motd noise

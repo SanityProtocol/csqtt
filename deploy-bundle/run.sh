@@ -523,6 +523,31 @@ mf_host_of() {
 		sed -n 's/^{"kind":"\([^"]*\)"\(.*\)}$/\1\2/p' | sed 's/,"\([^"]*\)":"\([^"]*\)"/ \1=\2/g'
 }
 
+# An instance of ours serves (create's and update's verify): its unit active, its UDP and web ports held by its own pid alone
+# (SO_REUSEADDR makes a bind prove nothing), its interface up, its panel answering on 127.0.0.1 where curl is. Prints why
+# not, or nothing.
+inst_verify() {  # inst_verify <unit> <udp> <web> <iface> <secret path>
+	iv_unit=$1 iv_udp=$2 iv_web=$3 iv_iface=$4 iv_secret=$5
+	[ "$(systemctl is-active "$iv_unit")" = active ] || { echo "$iv_unit is not active"; return 0; }
+	iv_pid=$(systemctl show -p MainPID --value "$iv_unit")
+	for iv_check in "u $iv_udp UDP" "t $iv_web TCP"; do
+		iv_p=${iv_check%% *} iv_rest=${iv_check#* }
+		iv_port=${iv_rest%% *} iv_name=${iv_rest#* }
+		iv_holders=$(ss -H -l"$iv_p"np "( sport = :$iv_port )" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
+		[ "$iv_holders" = "$iv_pid " ] || { echo "$iv_name $iv_port is held by pids ${iv_holders:-none} (ours: $iv_pid)"; return 0; }
+	done
+	ip link show "$iv_iface" >/dev/null 2>&1 || { echo "the server made no $iv_iface"; return 0; }
+	command -v curl >/dev/null 2>&1 || return 0
+	# the secret path only on curl's stdin, never in a process's arguments
+	iv_try=0
+	until printf 'url = "https://127.0.0.1:%s/%s/"\n' "$iv_web" "$iv_secret" |
+		curl -sk -K - -o /dev/null -m 3 -w '%{http_code}' 2>/dev/null | grep -qE '^(200|301|302|401)$'; do
+		iv_try=$((iv_try + 1))
+		[ $iv_try -lt 10 ] || { echo "the panel does not answer on 127.0.0.1:$iv_web"; return 0; }
+		sleep 1
+	done
+}
+
 # the objects a manifest names, as `kind path` lines (our own format: one object per {…})
 mf_objects_of() {
 	sed -n 's/.*"objects":\[\(.*\)\],"host".*/\1/p' "$1" | sed 's/},{/}\n{/g' |
@@ -750,24 +775,83 @@ EOF
 
 	# verify: it runs, it alone holds its ports (SO_REUSEADDR makes a bind prove nothing), its TUN is up, the panel answers
 	run_phase verify 80
-	[ "$(systemctl is-active "$cr_unit")" = active ] || cr_fail "$cr_unit is not active"
-	cr_pid=$(systemctl show -p MainPID --value "$cr_unit")
-	for cr_check in "u $cr_udp UDP" "t $cr_web TCP"; do
-		set -- $cr_check
-		cr_holders=$(ss -H -l"$1"np "( sport = :$2 )" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
-		[ "$cr_holders" = "$cr_pid " ] || cr_fail "$3 $2 is held by pids ${cr_holders:-none} (ours: $cr_pid)"
-	done
-	ip link show "$cr_iface" >/dev/null 2>&1 || cr_fail "the server made no $cr_iface"
-	if command -v curl >/dev/null 2>&1; then
-		# the secret path only on curl's stdin, never in a process's arguments
-		cr_try=0
-		until printf 'url = "https://127.0.0.1:%s/%s/"\n' "$cr_web" "$(sed -n 's/^secret_path=//p' "$RUN_DIR/secrets")" |
-			curl -sk -K - -o /dev/null -m 3 -w '%{http_code}' 2>/dev/null | grep -qE '^(200|301|302|401)$'; do
-			cr_try=$((cr_try + 1))
-			[ $cr_try -lt 10 ] || cr_fail "the panel does not answer on 127.0.0.1:$cr_web"
-			sleep 1
-		done
+	cr_why=$(inst_verify "$cr_unit" "$cr_udp" "$cr_web" "$cr_iface" "$(sed -n 's/^secret_path=//p' "$RUN_DIR/secrets")")
+	[ -z "$cr_why" ] || cr_fail "$cr_why"
+	run_phase "done" 100
+	run_result ok "" "read the connection back"
+}
+
+# ── update: an instance of ours to another build, or the same one again («Починить») (P2-PLAN §3 B10) ─────────────────
+# The new release in a directory of its own; at the switch the server is stopped, its store copied aside, `current` flipped
+# in one rename and the server started; a failure from there puts the store copy and the old release back. Nothing of the
+# instance's config is written: ports, env, its certificate, the secret path all stay (M-133, M-148).
+UP_STORE='csqtt.db csqtt.db-wal csqtt.db-shm passwords.json passwords.json.imported'
+
+up_rollback() {  # up_rollback <why the update failed>
+	run_phase "roll back" 90
+	systemctl stop "$up_unit" 2>/dev/null
+	for up_f in $UP_STORE; do rm -f "$up_state/$up_f"; [ ! -f "$up_copy/$up_f" ] || cp -p "$up_copy/$up_f" "$up_state/$up_f"; done
+	ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current"
+	# the failed build's release goes; the same build again («Починить») has none of its own
+	[ "$up_new" = "$up_old" ] || rm -rf "$up_new"
+	systemctl start "$up_unit" 2>/dev/null
+	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
+	if [ -z "$up_why" ]; then
+		run_result failed-rolled-back "$1" "the build it ran before runs again, its store as it was"
 	fi
+	run_result failed-not-rolled-back "$1; the rollback did not serve either: $up_why ($(systemctl is-active "$up_unit"), current -> $(readlink "$up_root/current"))" \
+		"read its journal; the store before the update is in $up_copy"
+}
+
+action_update() {
+	up_id=$(plan id) up_version=$(plan version) up_sha=$(plan core_sha)
+	case $up_id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) run_result failed-cleaned "bad instance id $up_id" "update the app" ;; esac
+	up_root=/opt/sanityprotocol/csqtt/$up_id up_state=/var/lib/sanityprotocol/csqtt/$up_id up_unit=sanity-csqtt-$up_id.service
+	up_new=$up_root/releases/$up_version-$(printf '%.8s' "$up_sha") up_copy=$up_state/pre-update
+	[ -f "/etc/systemd/system/$up_unit" ] && [ -L "$up_root/current" ] || run_result failed-cleaned "sqc-$up_id is not installed here" "check again"
+	up_old=$(readlink "$up_root/current")
+	up_flags=$(sed -n "s|^ExecStart=$up_root/current/csqtt-server ||p" "/etc/systemd/system/$up_unit" | head -n 1)
+	up_udp=$(printf '%s\n' "$up_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
+	up_web=$(printf '%s\n' "$up_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
+	up_iface=$(printf '%s\n' "$up_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')
+	up_secret=$(sed -n 's/^CSQTT_WEB_SECRET_PATH=//p' "$up_state/env" | head -n 1)
+	action_cleanup() { [ ! -d "$up_new" ] || [ "$up_new" = "$up_old" ] || rm -rf "$up_new"; }
+
+	run_phase stage 10
+	[ "$(sha256sum "$RUN_DIR/core" 2>/dev/null | cut -d' ' -f1)" = "$up_sha" ] || run_result failed-cleaned "the uploaded core is damaged" "try again"
+	# shellcheck disable=SC2086 # the unit's own flags
+	up_said=$("$RUN_DIR/core" $up_flags --version 2>&1 | head -n 1)
+	[ "$up_said" = "csqtt $up_version CSQTT-WIRE-3" ] || run_result failed-cleaned "the new core does not run here with this instance's flags: $up_said" "check the box's architecture"
+	if [ "$up_new" != "$up_old" ]; then
+		mkdir -p "$up_new" && install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" ||
+			{ action_cleanup; run_result failed-cleaned "cannot install the new release in $up_new" "check the box's disk"; }
+	fi
+	run_safe_point
+
+	# switch (D4: a cancel is refused from here): stopped, its store copied aside, `current` flipped, started
+	run_phase switch 60
+	: >"$RUN_DIR/switching"
+	run_cmd systemctl stop "$up_unit"
+	rm -rf "$up_copy" && mkdir -m 700 "$up_copy" || up_rollback "cannot keep a copy of the store"
+	for up_f in $UP_STORE; do [ ! -f "$up_state/$up_f" ] || cp -p "$up_state/$up_f" "$up_copy/$up_f" || up_rollback "cannot copy $up_f aside"; done
+	if [ "$up_new" = "$up_old" ]; then
+		# «Починить»: the same build again, over a damaged or missing binary
+		install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" || up_rollback "cannot reinstall the binary"
+	else
+		ln -sfn "$up_new" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" || up_rollback "cannot switch to $up_new"
+	fi
+	run_cmd systemctl start "$up_unit" ||
+		up_rollback "$up_unit did not start on the new build: $(journalctl _SYSTEMD_UNIT="$up_unit" -n 3 -o cat --no-pager 2>/dev/null | run_redact | tr '\n' ' ')"
+
+	run_phase verify 80
+	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
+	[ -z "$up_why" ] || up_rollback "the new build does not serve: $up_why"
+
+	# the release before stays for one more update; older ones go
+	for up_r in "$up_root"/releases/*/; do
+		up_r=${up_r%/}
+		[ "$up_r" = "$up_new" ] || [ "$up_r" = "$up_old" ] || rm -rf "$up_r"
+	done
 	run_phase "done" 100
 	run_result ok "" "read the connection back"
 }
@@ -824,6 +908,7 @@ cmd_exec() {
 	case $(plan action) in
 	selftest) action_selftest ;;
 	create) action_create ;;
+	update) action_update ;;
 	*) run_result failed-cleaned "unknown action $(plan action)" "update the app" ;;
 	esac
 }

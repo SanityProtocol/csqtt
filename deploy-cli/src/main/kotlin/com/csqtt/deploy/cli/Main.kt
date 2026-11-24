@@ -72,6 +72,8 @@ private const val USAGE = """usage: deploy-cli <command>
                           panel over HTTPS, its certificate pinned. The core is the target's core=<file>, core_version=…
                           resume=<run id>: «Продолжить» a create a reboot or a kill cut off, from the plan its run kept
   readback <target> <id>  «Подключиться» to an instance of ours: its connection read back, then the same outside check
+  update <target> <id>    an instance of ours to the target's core (B10): stage, switch, verify, rolled back on a failure;
+                          then its connection read back (the same passwords and pin) and checked from here
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
       · 5 no root (its kind printed) · 6 the environment stops a run (each FAIL printed) · 7 a run failed (its result
       printed) · 8 another run holds the box · 9 the run was interrupted · 11 no such run on the box (it never started,
@@ -100,6 +102,7 @@ private fun dispatch(args: Array<String>): Int {
         args.size >= 3 && args[0] == "run" && args[2] == "selftest" ->
             withSession(File(args[1])) { session, p -> runSelftest(session, p, File(args[1]), args.drop(3)) }
         args.size >= 2 && args[0] == "create" -> withSession(File(args[1])) { session, p -> create(session, p, File(args[1]), args.drop(2)) }
+        args.size == 3 && args[0] == "update" -> withSession(File(args[1])) { session, p -> update(session, p, File(args[1]), args[2]) }
         args.size == 3 && args[0] == "readback" ->
             withSession(File(args[1])) { session, p -> readBack(rootOf(session, p), args[2], p.prop("host").orEmpty(), null) }
         args.size == 2 && args[0] in setOf("attach", "cancel", "runs") ->
@@ -518,7 +521,7 @@ private fun readBack(root: RootRunner, id: String, sshHost: String, set: Credent
     // the panel's secret path is a secret: masked here, as the passwords are (B8 review F6)
     val masked = if (connection.secretPath.isEmpty()) connection.panelUrl else connection.panelUrl.replace(connection.panelPath, "/***/")
     println("connection host=${connection.host} udp=${connection.udpPort} web=${connection.webPort} panel=$masked " +
-        "login=${connection.webUser} cert=${connection.certSha256 ?: "-"}")
+        "login=${connection.webUser} cert=${connection.certSha256 ?: "-"} main_password_sha8=${sha8(connection.mainPassword)}")
     if (set != null) {
         println("readback main_password " + if (connection.mainPassword == set.mainPassword) "matches the one set" else "DIFFERS from the one set")
         println("readback panel_password " + if (connection.webPass == set.webPass) "matches the one set" else "DIFFERS from the one set")
@@ -539,4 +542,43 @@ private fun readBack(root: RootRunner, id: String, sshHost: String, set: Credent
         println("outcome ok-unreachable-from-outside: $cause")
         10
     }
+}
+
+/** A fingerprint of a secret for comparing two read-backs, never the secret. */
+private fun sha8(secret: String): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(secret.toByteArray()).take(4).joinToString("") { "%02x".format(it) }
+
+/** An instance of ours to the target's core (P2 B10). */
+private fun update(session: SshSession, p: Properties, target: File, id: String): Int {
+    val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
+    val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
+    val remote = session.asRemote()
+    val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    val inventory = Inventory.from(report.lines)
+    val install = Classifier.classify(inventory).installations.firstOrNull { com.csqtt.deploy.run.UpdateRun.idOf(it) == id }
+        ?: return 2.also { println("no instance of ours sqc-$id on this box") }
+    println("will: ${install.name} goes to ${core.version} (${core.sha256.take(8)}); its ports, env and certificate stay")
+    val runner = Runner(remote, root)
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    when (val outcome = runner.start(runId, com.csqtt.deploy.run.UpdateRun.plan(install, inventory, core))) {
+        is StartOutcome.Started -> {}
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            return 8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            return 7
+        }
+    }
+    val code = follow(runner, coordinator, runId, before)
+    if (code != 0) return code
+    return readBack(root, id, p.prop("host").orEmpty(), null)
 }
