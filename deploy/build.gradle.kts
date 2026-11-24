@@ -30,6 +30,11 @@ tasks.test {
     // BundleTest holds the shipped file list equal to the directory itself, and checks every file's bytes
     systemProperty("csqtt.bundle.dir", bundleDir.asFile.absolutePath)
     inputs.dir(bundleDir)
+    // a failed assertion's message in the log: CI keeps no HTML report
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
 
 dependencies {

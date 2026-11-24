@@ -1,0 +1,73 @@
+CSQTT_PRE|priv|uid=0
+CSQTT_PRE|running|lock=free|unit=
+CSQTT_PRE|os|id=ubuntu|version=24.04|like=debian|name=Ubuntu 24.04.5 LTS|kernel=6.8.0-139-generic
+CSQTT_PRE|init|systemd=1|version=255|pid1=systemd|systemd_run=1
+CSQTT_PRE|declarative|kind=|etc_ro=0
+CSQTT_PRE|arch|machine=x86_64
+CSQTT_PRE|virt|virt=kvm|wsl=0|container=
+CSQTT_PRE|tun|dev=1|probe=ok|error=|ns=1|module=absent
+CSQTT_PRE|nat|probe=ok|error=|ns=1|iptables=1
+CSQTT_PRE|forwarding|ipv4=1|writable=1
+CSQTT_PRE|ipv4|dev=ens3|via=10.0.2.2|src=10.0.2.15|addrs=10.0.2.15/24 192.168.77.68/24 10.66.68.1/24 
+CSQTT_PRE|port80|holder=|ss=1
+CSQTT_PRE|firewall|firewalld=inactive|ufw=inactive|backend=nft|docker_forward=0|nft_drop=|mixed=0|nftables_service=
+CSQTT_PRE|pkg|manager=apt|lock=|audit_lines=0|missing=
+CSQTT_PRE|disk|root_kb=13164068|varlib_kb=13164068|opt_kb=13164068|docker_kb=
+CSQTT_PRE|ram|total_kb=1499116|available_kb=1206100|swap_kb=0
+CSQTT_PRE|clock|epoch=1795501722|ntp=no
+CSQTT_PRE|rundir|noexec=
+CSQTT_PRE|docker|bin=|version=|flavour=|enabled=|rootless=0
+CSQTT_INV|exe|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|path=/usr/local/lib/csqtt25/csqtt25|size=11275784|label=v2.5.3|caption=1|startup=2.5.3 (SanityProtocol build of amurcanov 2.5.0) Tunnel|swg=1|mrtt=0
+CSQTT_INV|proc|pid=777|exe=/usr/local/lib/csqtt25/csqtt25|deleted=0|comm=csqtt25|unit=csqtt25.service|ctr=|tun=csqtt25|sha=187224d969df4af93555ab5838945eedf3c8bef907d285782348f11c5bc00c4c|flags=--listen 0.0.0.0:46100 --web-port 46102 --config-dir /etc/csqtt25 --instance csqtt25 --iface csqtt25 --tun-addr 10.66.68.1/24
+CSQTT_INV|unit|id=csqtt25.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=777|file_state=enabled|fragment=/etc/systemd/system/csqtt25.service|exec=/usr/local/lib/csqtt25/csqtt25|exec_ok=1|flags=--listen 0.0.0.0:46100 --web-port 46102 --config-dir /etc/csqtt25 --instance csqtt25 --iface csqtt25 --tun-addr 10.66.68.1/24|pre=/usr/local/lib/csqtt25/network-up.sh,/usr/local/lib/csqtt25/tun-recover.sh|pre_status=|env=/etc/csqtt25/csqtt.env
+CSQTT_INV|dockerdeps|requires=|wants=
+CSQTT_INV|store|dir=/etc/csqtt25|files=csqtt.db,csqtt.env,.server.lock,web_cert.pem|lock=held|schema=table:client_groups,table:counters,table:local_proxy_profiles,table:local_proxy_state,table:meta,table:passwords,table:routing_rules|env_keys=CSQTT_PUBLIC_IP,CSQTT_WEB_PASS,CSQTT_WEB_USER|public_ip=192.168.77.68|domain=
+CSQTT_INV|tun|name=csqtt25|state=UNKNOWN|persist=off
+CSQTT_INV|addr|dev=lo|cidr=127.0.0.1/8
+CSQTT_INV|addr|dev=ens3|cidr=10.0.2.15/24
+CSQTT_INV|addr|dev=ens4|cidr=192.168.77.68/24
+CSQTT_INV|addr|dev=csqtt25|cidr=10.66.68.1/24
+CSQTT_INV|route|dst=10.0.2.0/24|dev=ens3|table=main
+CSQTT_INV|route|dst=10.0.2.2|dev=ens3|table=main
+CSQTT_INV|route|dst=10.0.2.3|dev=ens3|table=main
+CSQTT_INV|route|dst=10.66.68.0/24|dev=csqtt25|table=main
+CSQTT_INV|route|dst=192.168.77.0/24|dev=ens4|table=main
+CSQTT_INV|listen|proto=tcp|addr=0.0.0.0|port=22|comm=sshd|pid=1403
+CSQTT_INV|listen|proto=tcp|addr=0.0.0.0|port=46102|comm=csqtt25|pid=777
+CSQTT_INV|listen|proto=tcp|addr=127.0.0.1|port=46004|comm=csqtt25|pid=777
+CSQTT_INV|listen|proto=tcp|addr=127.0.0.53%25lo|port=53|comm=systemd-resolve|pid=472
+CSQTT_INV|listen|proto=tcp|addr=127.0.0.54|port=53|comm=systemd-resolve|pid=472
+CSQTT_INV|listen|proto=tcp|addr=::|port=22|comm=sshd|pid=1403
+CSQTT_INV|listen|proto=udp|addr=0.0.0.0|port=46100|comm=csqtt25|pid=777
+CSQTT_INV|listen|proto=udp|addr=10.0.2.15%25ens3|port=68|comm=systemd-network|pid=602
+CSQTT_INV|listen|proto=udp|addr=127.0.0.53%25lo|port=53|comm=systemd-resolve|pid=472
+CSQTT_INV|listen|proto=udp|addr=127.0.0.54|port=53|comm=systemd-resolve|pid=472
+CSQTT_INV|fw|v=4|table=mangle|kind=rule|text=-A FORWARD -d 10.66.68.0/24 -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment CSQTT25_MANAGED -j TCPMSS --clamp-mss-to-pmtu
+CSQTT_INV|fw|v=4|table=mangle|kind=rule|text=-A FORWARD -s 10.66.68.0/24 -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment CSQTT25_MANAGED -j TCPMSS --clamp-mss-to-pmtu
+CSQTT_INV|fw|v=4|table=filter|kind=rule|text=-A INPUT -s 10.66.68.0/24 -i csqtt25 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=4|table=filter|kind=rule|text=-A INPUT -p tcp -m tcp --dport 80 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=4|table=filter|kind=rule|text=-A INPUT -p tcp -m tcp --dport 46102 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=4|table=filter|kind=rule|text=-A INPUT -p udp -m udp --dport 46100 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=4|table=filter|kind=rule|text=-A FORWARD -o csqtt25 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=4|table=filter|kind=rule|text=-A FORWARD -i csqtt25 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=4|table=nat|kind=rule|text=-A POSTROUTING -s 10.66.68.0/24 -o ens3 -m comment --comment CSQTT25_MANAGED -j SNAT --to-source 10.0.2.15
+CSQTT_INV|fw|v=4|table=nat|kind=rule|text=-A POSTROUTING -s 10.66.68.0/24 -o ens3 -m comment --comment CSQTT25_MANAGED -j MASQUERADE
+CSQTT_INV|fw|v=4|table=nat|kind=rule|text=-A POSTROUTING -s 10.66.68.0/24 ! -o csqtt25 -m comment --comment CSQTT25_MANAGED -j MASQUERADE
+CSQTT_INV|fw|v=6|table=mangle|kind=rule|text=-A FORWARD -d fd66:68::/64 -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment CSQTT25_MANAGED -j TCPMSS --clamp-mss-to-pmtu
+CSQTT_INV|fw|v=6|table=mangle|kind=rule|text=-A FORWARD -s fd66:68::/64 -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment CSQTT25_MANAGED -j TCPMSS --clamp-mss-to-pmtu
+CSQTT_INV|fw|v=6|table=filter|kind=rule|text=-A FORWARD -o csqtt25 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=6|table=filter|kind=rule|text=-A FORWARD -i csqtt25 -m comment --comment CSQTT25_MANAGED -j ACCEPT
+CSQTT_INV|fw|v=6|table=nat|kind=rule|text=-A POSTROUTING -s fd66:68::/64 ! -o csqtt25 -m comment --comment CSQTT25_MANAGED -j MASQUERADE
+CSQTT_INV|nft|tables=inet qual_egress,ip filter,ip nat,ip mangle,ip6 filter,ip6 nat,ip6 mangle
+CSQTT_INV|file|path=/etc/sysctl.d/99-csqtt25-udp-buffers.conf|type=f
+CSQTT_INV|file|path=/etc/sysctl.d/99-csqtt25.conf|type=f
+CSQTT_INV|file|path=/etc/modules-load.d/bbr.conf|type=f
+CSQTT_INV|file|path=/usr/local/lib/csqtt25|type=d
+CSQTT_INV|file|path=/usr/local/lib/csqtt25/csqtt25|type=f
+CSQTT_INV|file|path=/usr/local/lib/csqtt25/network-up.sh|type=f|sha=150ae533b045f39e2f859e5866549b58a02df80ee84fd5c68de0724718425b16|role=0|exit21=1|notsent=1|version=
+CSQTT_INV|file|path=/usr/local/lib/csqtt25/tun-recover.sh|type=f|sha=3abd81bc09511f1f265d465eef53fea0590ddaab72f29d418f0566c0d730348e|role=1|exit21=0|notsent=0|version=
+CSQTT_INV|file|path=/opt/csqtt25-certbot|type=d
+CSQTT_INV|file|path=/var/log/csqtt25-install.log|type=f|runs=1|last_run==== CSQTT Installer v2.5.3 — Tue Nov 24 06:14:25 UTC 2026 ===|last_line=[✓] Общее время deploy.sh: 38с|finished=1|failed_steps=0
+CSQTT_INV|file|path=/etc/systemd/system/csqtt25.service|type=f
+CSQTT_INV|file|path=/run/csqtt25|type=d
+CSQTT_END|72
