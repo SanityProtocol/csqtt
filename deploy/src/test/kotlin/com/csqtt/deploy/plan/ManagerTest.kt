@@ -34,7 +34,8 @@ class ManagerTest {
     }
 
     private fun offers(name: String, version: Version = carried): Pair<Entry, List<Action>> {
-        val entry = Manager.entries(fixture(name).first, version).single()
+        val (c, inv) = fixture(name)
+        val entry = Manager.entries(c, version, inv).single()
         return entry to entry.offers.map { it.action }
     }
 
@@ -156,7 +157,7 @@ class ManagerTest {
         val create = Proposer.createPlan(Proposer.propose(c, inv, Random(3)), c)
         assertEquals(Action.CREATE, create.action)
         assertEquals(listOf("csqtt.service — без изменений"), create.unchanged)
-        val entry = Manager.entries(c, carried).single()
+        val entry = Manager.entries(c, carried, inv).single()
         val move = Proposer.offerPlan(entry, entry.offers.first(), c, inv, carried)
         assertTrue(move.will.single(), "переедет в наш формат" in move.will.single())
         // the move becomes an instance of ours that keeps the stock install's ports, held by nothing but that install
@@ -195,13 +196,13 @@ class ManagerTest {
     @Test
     fun aServerSwgPanelTookOverIsNeverStartedAgain() {
         // swg-panel adopted the stock install: csqtt.service disabled and stopped, swg's server on 46000 and csqtt1
-        val (c, _) = box(*stockMain(active = "inactive", fileState = "disabled"),
+        val (c, swgInv) = box(*stockMain(active = "inactive", fileState = "disabled"),
             "CSQTT_INV|proc|pid=70|exe=/usr/local/bin/csqtt-swg|deleted=0|comm=csqtt-swg|unit=swg-csqtt-csqtt1.service|ctr=|tun=csqtt1|sha=|" +
                 "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1",
             "CSQTT_INV|unit|id=swg-csqtt-csqtt1.service|load=loaded|active=active|sub=running|result=success|status=0|restarts=0|pid=70|" +
                 "file_state=enabled|fragment=/etc/systemd/system/swg-csqtt-csqtt1.service|exec=/usr/local/bin/csqtt-swg|exec_ok=1|" +
                 "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1|pre=|pre_status=|env=")
-        val stock = Manager.entries(c, carried).single { it.installation.name == "csqtt.service" }
+        val stock = Manager.entries(c, carried, swgInv).single { it.installation.name == "csqtt.service" }
         assertEquals(listOf(Action.REMOVE), stock.offers.map { it.action })
         assertTrue(stock.offers.single().folded && stock.offers.single().confirm != null)
         assertEquals("UDP 46000 занят: swg-csqtt-csqtt1.service", stock.note)
@@ -222,13 +223,13 @@ class ManagerTest {
     fun noBuildNewerThanOursIsEverRebuiltFromOurs() {
         // any line: a 2.7 or a 2.10 stock build is newer, never moved (F3)
         for (label in listOf("v2.7.0", "v2.10.0", "v3.0.0")) {
-            val entry = Manager.entries(box(*stockMain(label = label)).first, carried).single()
+            val entry = box(*stockMain(label = label)).let { (c, i) -> Manager.entries(c, carried, i) }.single()
             assertEquals(label, Compatibility.NEWER_THAN_APP, entry.compatibility)
             assertEquals(label, listOf(Action.CONNECT, Action.REMOVE), entry.offers.map { it.action })
         }
         // ours from another phone's newer app: run, read, removed; never repaired or reinstalled from our older core (F4)
         for ((state, sub) in listOf("activating" to "auto-restart", "active" to "running", "failed" to "failed")) {
-            val entry = Manager.entries(box(*ours("0a1b2c", 2, state, version = "2.6.1", sub = sub)).first, carried).single()
+            val entry = box(*ours("0a1b2c", 2, state, version = "2.6.1", sub = sub)).let { (c, i) -> Manager.entries(c, carried, i) }.single()
             val actions = entry.offers.map { it.action }
             assertFalse(state, actions.any { it in setOf(Action.REPAIR, Action.UPDATE, Action.REINSTALL_CLEAN, Action.RESTORE) })
             assertEquals("Обновить нельзя: установлена более новая версия", entry.note)
@@ -239,7 +240,7 @@ class ManagerTest {
     @Test
     fun removalKeepsTheStoreAndPurgingIsTyped() {
         val (c, inv) = box(*ours("0a1b2c", 2, "active"))
-        val entry = Manager.entries(c, carried).single()
+        val entry = Manager.entries(c, carried, inv).single()
         val remove = entry.offers.single { it.action == Action.REMOVE }
         assertEquals(null, remove.confirm)
         assertTrue(Proposer.offerPlan(entry, remove, c, inv, carried).will.single().contains("«Восстановить» вернёт клиентов"))
@@ -267,7 +268,7 @@ class ManagerTest {
         // a 2.1 binary failing on a 2.5 store (B7): «Обновить до 2.6» is its cure (B6 verify N1)
         assertEquals(Action.UPDATE_FROM_21, offers("v250-systemd-noble+B7").second.first())
         // a running server clashing with another on its port (B9) keeps its own offers (N4)
-        assertEquals(Action.UPDATE, Manager.entries(fixture("v253main-systemd-noble+B9").first, carried)
+        assertEquals(Action.UPDATE, fixture("v253main-systemd-noble+B9").let { (c, i) -> Manager.entries(c, carried, i) }
             .single { it.installation.name == "csqtt.service" }.offers.first().action)
         val swg = arrayOf(
             "CSQTT_INV|proc|pid=70|exe=/usr/local/bin/csqtt-swg|deleted=0|comm=csqtt-swg|unit=swg-csqtt-csqtt1.service|ctr=|tun=csqtt1|sha=|" +
@@ -277,9 +278,9 @@ class ManagerTest {
                 "flags=--listen 0.0.0.0:46000 --desired /x --config-dir /opt/swg-csqtt/csqtt1|pre=|pre_status=|env=")
         // a store alone, left beside a live server on its port: still «Удалить остатки», never a removal that keeps it (N2)
         // (the stock uninstall keeps csqtt.env: a store without its WEB_PASS would be B5, which «Починить» gives new credentials)
-        val (leftover, _) = box("CSQTT_INV|store|dir=/etc/csqtt|files=csqtt.db,csqtt.env|lock=none|schema=table:client_groups|" +
+        val (leftover, leftoverInv) = box("CSQTT_INV|store|dir=/etc/csqtt|files=csqtt.db,csqtt.env|lock=none|schema=table:client_groups|" +
             "env_keys=CSQTT_WEB_PASS,CSQTT_WEB_USER|public_ip=|domain=", *swg)
-        assertEquals(listOf(Action.REMOVE_LEFTOVERS), Manager.entries(leftover, carried).single { it.installation.name == "/etc/csqtt" }.offers.map { it.action })
+        assertEquals(listOf(Action.REMOVE_LEFTOVERS), Manager.entries(leftover, carried, leftoverInv).single { it.installation.name == "/etc/csqtt" }.offers.map { it.action })
         // a swg node's second server, unseen by the claims, holds the stopped stock install's port: found through the listeners (N5)
         val node = arrayOf(
             "CSQTT_INV|ctr|id=0123456789ab|name=swg-node|image=swg-node:1.8|state=running|pid=80|restarts=0|exit=0|policy=always|net=host|labels=|flags=|mounts=|runtime=docker",
@@ -296,5 +297,19 @@ class ManagerTest {
         val entry = Manager.entries(routed, carried, routedInv).single()
         assertFalse(Action.UPDATE in entry.offers.map { it.action })
         assertTrue(entry.note.orEmpty(), entry.note.orEmpty().startsWith("Переезд невозможен:"))
+    }
+
+    @Test
+    fun roundThreeOnlyPortsBlockAMove() {
+        // +B17: python3 holds csqtt1, UDP 46000 is free: the move, which ends the stock unit that would delete it, stays (R1)
+        assertEquals(Action.REPAIR, offers("v253main-systemd-noble+B17").second.first())
+        // the install's own respawn, bound before the process view saw it, holds nothing
+        val (c, inv) = box(*stockMain(active = "activating"),
+            "CSQTT_INV|listen|proto=udp|addr=0.0.0.0|port=46000|comm=csqtt|pid=4242")
+        assertEquals(null, Manager.heldBy(c.installations.single(), c, inv))
+        // a foreign process on the web port does hold it
+        val (w, winv) = box(*stockMain(active = "inactive"), "CSQTT_INV|listen|proto=tcp|addr=0.0.0.0|port=46002|comm=nginx|pid=99",
+            "CSQTT_INV|proc|pid=99|exe=/usr/sbin/nginx|deleted=0|comm=nginx|unit=nginx.service|ctr=|tun=|sha=|flags=")
+        assertEquals(Manager.Held("TCP 46002", "nginx"), Manager.heldBy(w.installations.single { it.name == "csqtt.service" }, w, winv))
     }
 }

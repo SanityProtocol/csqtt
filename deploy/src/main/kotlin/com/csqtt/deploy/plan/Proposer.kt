@@ -123,8 +123,7 @@ object Proposer {
      * container as they were; a move (a stock install into our layout) carries the new instance it becomes: a fresh id,
      * interface, /24 and slot, its client-facing ports kept, held only by the server it replaces (§1.7; B6 review F7). That
      * instance is drawn here, so a caller shows and then runs this one plan (or passes a seeded [random]); it throws
-     * [ProposalRefused] when the instance cannot be made, which the manager names instead of offering the move when it is
-     * given the inventory.
+     * [ProposalRefused] when the instance cannot be made, which the manager names instead of offering the move.
      */
     fun offerPlan(entry: Entry, offer: Offer, classification: Classification, inv: Inventory, carried: Version,
         random: Random = Random.Default): Plan {

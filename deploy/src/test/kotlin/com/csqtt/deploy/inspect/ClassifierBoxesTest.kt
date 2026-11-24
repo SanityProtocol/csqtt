@@ -15,10 +15,14 @@ import org.junit.Test
 class ClassifierBoxesTest {
     private val sha = "187224d9" + "0".repeat(56)
 
-    private fun classify(vararg lines: String): Classification {
+    private fun inventory(vararg lines: String): Inventory {
         val text = lines.joinToString("\n") { "CSQTT_INV|$it" } + "\nCSQTT_END|${lines.size}\n"
-        return Classifier.classify(Inventory.from((LineCodec.parse(text) as Report.Complete).lines))
+        return Inventory.from((LineCodec.parse(text) as Report.Complete).lines)
     }
+
+    private fun classify(vararg lines: String): Classification = Classifier.classify(inventory(*lines))
+
+    private fun entries(vararg lines: String) = inventory(*lines).let { Manager.entries(Classifier.classify(it), Version(2, 6, 0), it) }
 
     private fun exe(path: String, label: String = "v2.5.3") =
         "exe|sha=$sha|path=$path|size=1|label=$label|caption=0|startup=2.5.3 (SanityProtocol build of amurcanov 2.5.0)|swg=1|mrtt=0"
@@ -40,7 +44,8 @@ class ClassifierBoxesTest {
         // is the leftover it looks like, removal offered (B5 verify N1)
         val plain = classify(store("/etc/csqtt"), "docker|daemon=inactive")
         assertEquals(InstallState.LEFTOVER, plain.installations.single().state)
-        assertEquals(listOf(com.csqtt.deploy.plan.Action.REMOVE_LEFTOVERS), Manager.entries(plain, Version(2, 6, 0)).single().offers.map { it.action })
+        assertEquals(listOf(com.csqtt.deploy.plan.Action.REMOVE_LEFTOVERS),
+            entries(store("/etc/csqtt"), "docker|daemon=inactive").single().offers.map { it.action })
         // a 2.0.0 Docker install's own docker dir is such a sign
         assertTrue(classify(store("/etc/csqtt", files = "csqtt.db,docker"), "docker|daemon=inactive").installations.single().dockerUnseen)
     }
@@ -67,7 +72,7 @@ class ClassifierBoxesTest {
         assertEquals(InstallState.STOPPED, unseen.state)
         assertEquals(setOf("B4"), unseen.broken)
         assertTrue(unseen.dockerUnseen)
-        Manager.entries(classify(*lines, "docker|daemon=inactive"), Version(2, 6, 0)).single { it.installation.name == "/etc/csqtt" }.let {
+        entries(*lines, "docker|daemon=inactive").single { it.installation.name == "/etc/csqtt" }.let {
             assertTrue(it.offers.isEmpty())
             assertEquals("Docker остановлен: запустите Docker и проверьте заново", it.note)
         }
@@ -224,6 +229,7 @@ class ClassifierBoxesTest {
         val beta = c.installations.single()
         assertEquals(Owner.MRTT_BETA, beta.owner)
         assertEquals(ProtocolLine.MRTT, beta.build?.line)
-        assertTrue(Manager.entries(c, Version(2, 6, 0)).single().offers.isEmpty())
+        assertTrue(entries(unit("csqtt.service", "/usr/local/bin/csqtt", active = "failed", sub = "failed", result = "exit-code", execOk = "0"),
+            store("/etc/csqtt", schema = "devices_json,table:passwords")).single().offers.isEmpty())
     }
 }
