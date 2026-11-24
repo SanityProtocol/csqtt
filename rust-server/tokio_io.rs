@@ -1252,11 +1252,23 @@ fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
     let subnet = crate::swgpanel::subnet_cidr();
     let mss = TUNNEL_TCP_MSS.to_string();
     vec![
+        // P2 Bsrv (DE-F5): the accept for packets from the tunnel sat ahead of Docker's own chains, so a VPN client reached
+        // every container port, published or not. Now a flow's first packet enters ForwardScope's chain, which hands what
+        // is bound for Docker's bridges back to FORWARD and Docker's rules; the rest of the flow is accepted here as
+        // ESTABLISHED. Each rule is inserted at position 1, so the order becomes -o, established, new: downlink packets
+        // meet one rule and established uplink ones two, as before, and only a flow's first packet walks the chain.
         FirewallRule::new(
             "iptables",
             None,
             "FORWARD",
             &["-i", tun_iface],
+            &["-j", crate::swgpanel::forward_chain()],
+        ),
+        FirewallRule::new(
+            "iptables",
+            None,
+            "FORWARD",
+            &["-i", tun_iface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"],
             &["-j", "ACCEPT"],
         ),
         FirewallRule::new(
@@ -1307,8 +1319,65 @@ fn managed_firewall_rules(tun_iface: &str) -> Vec<FirewallRule> {
     ]
 }
 
+/// P2 Bsrv: the chain a flow from the tunnel enters with its first packet (managed_firewall_rules jumps here). Packets bound
+/// for Docker's bridges (`docker0`, `docker_gwbridge`, a user network's `br-…`) RETURN to FORWARD, where Docker's own rules
+/// decide them as for any other source: a published port is accepted, an unpublished one dropped. Everything else is
+/// accepted, as the old blanket rule did. The chain is flushed and refilled at every start, so it always holds exactly these
+/// rules in this order, each tagged so a sweep by the instance's tag finds it.
+struct ForwardScope {
+    chain: &'static str,
+}
+
+impl ForwardScope {
+    const RULES: [&'static [&'static str]; 3] =
+        [&["-o", "docker+", "-j", "RETURN"], &["-o", "br-+", "-j", "RETURN"], &["-j", "ACCEPT"]];
+
+    fn iptables(args: &[&str]) -> io::Result<std::process::Output> {
+        std::process::Command::new("iptables").args(["-w", "2"]).args(args).output()
+    }
+
+    fn rule(&self, rule: &[&'static str]) -> Vec<&str> {
+        let (target, matches) = rule.split_at(rule.len() - 2);
+        let mut args = vec!["-A", self.chain];
+        args.extend_from_slice(matches);
+        args.extend_from_slice(&["-m", "comment", "--comment", crate::swgpanel::managed_tag()]);
+        args.extend_from_slice(target);
+        args
+    }
+
+    fn install(&self) -> Result<()> {
+        let exists = Self::iptables(&["-S", self.chain]).is_ok_and(|output| output.status.success());
+        let mut steps = vec![vec![if exists { "-F" } else { "-N" }, self.chain]];
+        steps.extend(Self::RULES.iter().map(|rule| self.rule(rule)));
+        for step in steps {
+            let output = Self::iptables(&step).context("run iptables")?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "iptables {} failed: {}",
+                    step.join(" "),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// After the jump into it is gone: a chain still referenced stays, empty (the next start refills it).
+    fn remove(&self) {
+        let _ = Self::iptables(&["-F", self.chain]);
+        let _ = Self::iptables(&["-X", self.chain]);
+    }
+}
+
+/// The blanket accept every earlier server installed, which a killed one (no Drop) leaves behind. Left in place it would
+/// accept, a few rules down, what ForwardScope hands back to Docker.
+fn purge_unscoped_forward_accept(tun_iface: &str) {
+    FirewallRule::new("iptables", None, "FORWARD", &["-i", tun_iface], &["-j", "ACCEPT"]).remove();
+}
+
 struct KernelNetworking {
     rules: Vec<FirewallRule>,
+    scope: Option<ForwardScope>,
 }
 
 /// S5: the sysctls the server writes at start, and whether it loads tcp_bbr. A pure function, so the plan is tested
@@ -1344,16 +1413,22 @@ impl KernelNetworking {
         // swg-panel: under --no-nat the node owns forwarding, NAT and the firewall (2.5 adds FORWARD ACCEPT +
         // MASQUERADE and deletes TCPMSS rules on the subnet). The firewall is --no-nat's; --host-tuning=off keeps it.
         if crate::swgpanel::no_nat() {
-            return Self { rules: Vec::new() };
+            return Self { rules: Vec::new(), scope: None };
         }
         purge_legacy_mss_clamp();
+        purge_unscoped_forward_accept(tun_iface);
+        // the chain first: a jump to a chain that does not exist is refused
+        let scope = ForwardScope { chain: crate::swgpanel::forward_chain() };
+        if let Err(error) = scope.install() {
+            eprintln!("[NET] {error:#}");
+        }
         let rules = managed_firewall_rules(tun_iface);
         for rule in &rules {
             if let Err(error) = rule.install() {
                 eprintln!("[NET] {error:#}");
             }
         }
-        Self { rules }
+        Self { rules, scope: Some(scope) }
     }
 }
 
@@ -1361,6 +1436,9 @@ impl Drop for KernelNetworking {
     fn drop(&mut self) {
         for rule in &self.rules {
             rule.remove();
+        }
+        if let Some(scope) = &self.scope {
+            scope.remove();
         }
     }
 }
@@ -1559,6 +1637,42 @@ mod tests {
             assert!(rule.spec.windows(4).any(|w| w == ["-j", "TCPMSS", "--set-mss", "1240"]));
         }
         assert_eq!(TUNNEL_TCP_MSS, 1240);
+    }
+
+    #[test]
+    fn the_tunnels_forward_accept_leaves_dockers_bridges_to_docker() {
+        // P2 Bsrv: each FORWARD rule is inserted at position 1 in this order, so the chain reads -o, established, new
+        let rules = managed_firewall_rules("sqc0");
+        let forward: Vec<&FirewallRule> = rules
+            .iter()
+            .filter(|rule| rule.program == "iptables" && rule.table.is_none() && rule.chain == "FORWARD")
+            .collect();
+        let tag = crate::swgpanel::managed_tag();
+        let chain = crate::swgpanel::forward_chain();
+        assert_eq!(forward.len(), 3);
+        assert_eq!(forward[0].spec, ["-i", "sqc0", "-m", "comment", "--comment", tag, "-j", chain]);
+        assert_eq!(
+            forward[1].spec,
+            ["-i", "sqc0", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", tag, "-j", "ACCEPT"]
+        );
+        assert_eq!(forward[2].spec, ["-o", "sqc0", "-m", "comment", "--comment", tag, "-j", "ACCEPT"]);
+        // the old blanket accept is gone from the plan (purge_unscoped_forward_accept removes a leftover one)
+        let blanket = ["-i", "sqc0", "-m", "comment", "--comment", tag, "-j", "ACCEPT"];
+        assert!(!forward.iter().any(|rule| rule.spec == blanket));
+        // a new flow: Docker's bridges go back to Docker's rules, the rest is accepted
+        let scope = ForwardScope { chain };
+        let planned: Vec<Vec<&str>> = ForwardScope::RULES.iter().map(|rule| scope.rule(rule)).collect();
+        assert_eq!(planned[0], ["-A", chain, "-o", "docker+", "-m", "comment", "--comment", tag, "-j", "RETURN"]);
+        assert_eq!(planned[1], ["-A", chain, "-o", "br-+", "-m", "comment", "--comment", tag, "-j", "RETURN"]);
+        assert_eq!(planned[2], ["-A", chain, "-m", "comment", "--comment", tag, "-j", "ACCEPT"]);
+    }
+
+    #[test]
+    fn every_instances_forward_chain_name_fits_iptables() {
+        // `--instance` takes at most 15 characters (swgpanel::build); iptables takes a chain name of at most 28
+        let longest = format!("{}_MANAGED_FWD", "a".repeat(15).to_ascii_uppercase());
+        assert!(longest.len() <= 28, "{longest}");
+        assert_eq!(crate::swgpanel::forward_chain(), format!("{}_FWD", crate::swgpanel::managed_tag()));
     }
 
     #[test]

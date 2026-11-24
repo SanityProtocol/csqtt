@@ -216,6 +216,20 @@ struct Args {
         help = "S5: auto = forwarding, rp_filter, fq/bbr and the TCP knobs host-wide (2.5.3's set without IPv6 forwarding); off = only this server's own TUN. --no-nat implies off"
     )]
     host_tuning: swgpanel::HostTuning,
+
+    // P2 (deploy v3's read-back): print the main password of the store in this directory as one marker line, then exit. The
+    // deploy points it only at a private copy it took of a store, so loading may migrate or repair the copy, never a server's
+    // own; it reads a 2.5 store, a 2.1 one and 2.0.0's passwords.json alike, with no sqlite3 or python3 on the box.
+    #[arg(long = "read-store", hide = true)]
+    read_store: Option<std::path::PathBuf>,
+}
+
+/// `--read-store`'s report in deploy v3's line protocol (deploy-bundle/lib/marker.sh): the main password, escaped like every
+/// marker field, then the end line.
+fn read_store_report(dir: &std::path::Path) -> Result<String> {
+    let db = load_database(dir)?;
+    let password = db.main_password.replace('%', "%25").replace('|', "%7C").replace('\r', "%0D").replace('\n', "%0A");
+    Ok(format!("CSQTT_RB|main_password|{password}\nCSQTT_END|1\n"))
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1063,6 +1077,12 @@ async fn async_main() -> Result<()> {
 
     if args.protocol_revision {
         println!("{}", WIRE_PROTOCOL_REVISION);
+        return Ok(());
+    }
+
+    // before any instance config, lock, socket or TUN: the read-back touches nothing but the copy it is given
+    if let Some(dir) = &args.read_store {
+        print!("{}", read_store_report(dir)?);
         return Ok(());
     }
 
@@ -2309,5 +2329,39 @@ mod version_tests {
         let source = include_str!("web_panel.rs");
         assert_eq!(source.matches(&label).count(), 1, "{label}");
         assert_eq!(source.matches("by amurcanov\"").count(), 1);
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let directory = std::env::temp_dir().join(format!("csqtt-read-store-{name}-{unique}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn read_store_prints_the_main_password_as_one_marker_line() {
+        // P2: every character the line protocol escapes, so the deploy's parser gets the password back exactly
+        let directory = scratch("sqlite");
+        let db = model::Database { main_password: "p|a%ss\r\nwörd".into(), ..Default::default() };
+        save_database(&directory, &db).unwrap();
+        assert_eq!(read_store_report(&directory).unwrap(), "CSQTT_RB|main_password|p%7Ca%25ss%0D%0Awörd\nCSQTT_END|1\n");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn read_store_reads_a_200_passwords_json_too() {
+        // a 2.0.0 server never had csqtt.db: its store is passwords.json, which loading imports (into the copy)
+        let directory = scratch("json");
+        let legacy = model::Database { main_password: "old-main".into(), ..Default::default() };
+        std::fs::write(directory.join("passwords.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(read_store_report(&directory).unwrap(), "CSQTT_RB|main_password|old-main\nCSQTT_END|1\n");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn read_store_is_hidden_and_takes_a_directory() {
+        let args = Args::try_parse_from(["csqtt", "--read-store", "/var/lib/sanityprotocol/csqtt-deploy/r1/store"]).unwrap();
+        assert_eq!(args.read_store.as_deref(), Some(std::path::Path::new("/var/lib/sanityprotocol/csqtt-deploy/r1/store")));
+        assert!(!Args::command().render_help().to_string().contains("read-store"));
     }
 }
