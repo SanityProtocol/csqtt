@@ -98,6 +98,19 @@ class DockerTest {
         for (key in listOf("mode", "rootfs_sha256", "rootfs_url")) assertTrue(key, "\$(plan $key)" in create)
     }
 
+    @Test
+    fun ourImagesGoOnlyWhenNothingNeedsThem() {
+        // the zoo on docker.io 24.0.7: removing the root filesystem's tag while an image of ours is built from it untags it all
+        // the same; it goes only once no image of ours is left (a container's image Docker keeps by itself)
+        val script = Bundle.bytes("run.sh").toString(Charsets.UTF_8)
+        val rm = script.substringAfter("dk_image_rm() {").substringBefore("\n}\n")
+        assertTrue(rm, "sanity-csqtt-rootfs:*) [ -n \"\$(docker images -q sanity-csqtt 2>/dev/null)\" ] ||" in rm)
+        for (f in listOf("mf_undo", "inst_take_down")) {
+            val body = script.substringAfter("$f() {").substringBefore("\n}\n")
+            assertTrue(f, "dk_image_rm " in body && "docker image rm" !in body)
+        }
+    }
+
     private fun oursInDocker(id: String) = arrayOf(
         "CSQTT_INV|ctr|id=c0ffee|name=sanity-csqtt-$id|image=sanity-csqtt:2.6.0-0123abcd|state=running|pid=4242|restarts=0|exit=0|" +
             "policy=unless-stopped|net=host|labels=org.sanityprotocol.csqtt=sanity-csqtt-$id|flags=--listen 0.0.0.0:41234 --web-port 41236 " +

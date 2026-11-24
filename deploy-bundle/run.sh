@@ -530,7 +530,7 @@ mf_undo() {
 		dir) rm -rf "$mu_path" ;;
 		# Docker mode's (P2 B13a): the container, and an image Docker removes only while no container of anyone's uses it
 		container) docker rm -f "$mu_path" >/dev/null 2>&1 ;;
-		image) docker image rm "$mu_path" >/dev/null 2>&1 ;;
+		image) dk_image_rm "$mu_path" ;;
 		# a single file this run wrote (the move's drop-in on the stock unit)
 		file)
 			rm -f "$mu_path"
@@ -811,6 +811,17 @@ EOF
 
 # the host's own iptables backend, as its iptables names itself (the one Docker's own rules went to)
 dk_backend() { case $(iptables -V 2>/dev/null) in *legacy*) echo legacy ;; *) echo nft ;; esac; }
+
+# dk_image_rm <tag>: one of our images, gone when nothing needs it: an instance's image while no container uses it (Docker
+# refuses then: its own count), the root filesystem's while no image of ours is built from it (Docker would untag a parent
+# all the same: the zoo, docker.io 24.0.7)
+dk_image_rm() {
+	case $1 in
+	sanity-csqtt-rootfs:*) [ -n "$(docker images -q sanity-csqtt 2>/dev/null)" ] || docker image rm "$1" >/dev/null 2>&1 ;;
+	sanity-csqtt:*) docker image rm "$1" >/dev/null 2>&1 ;;
+	esac
+	return 0
+}
 
 # the last lines a container wrote, for a result's cause
 dk_lines() { docker logs --tail 5 "$1" 2>&1 | tr '\n' ' ' | cut -c1-300; }
@@ -1413,7 +1424,7 @@ inst_take_down() {
 			run_cmd docker rm -f "$in_ctr"
 		fi
 		for in_i in "$(sed -n 's/^# image //p' "$in_state/docker")" "$(sed -n 's/^# rootfs //p' "$in_state/docker")"; do
-			case $in_i in sanity-csqtt:* | sanity-csqtt-rootfs:*) docker image rm "$in_i" >/dev/null 2>&1 ;; esac
+			dk_image_rm "$in_i"
 		done
 	fi
 	inst_sweep "$1"
