@@ -2099,14 +2099,15 @@ fw() {
 }
 case ${1:-} in
 open)
-	[ ! -f "$LE_DIR/port80" ] || exit 0
+	# (the rule itself is asked, never the note alone: a reboot drops a runtime rule and keeps the note, B14 review F5)
 	case $(fw) in
 	ufw) ufw status 2>/dev/null | grep -qE '^80/tcp[[:space:]]+ALLOW' ||
 		{ ufw allow 80/tcp comment sanity-csqtt-le >/dev/null && echo ufw >"$LE_DIR/port80"; } ;;
 	firewalld) z=$(firewall-cmd --get-default-zone 2>/dev/null)
 		firewall-cmd -q --zone="$z" --query-port=80/tcp 2>/dev/null ||
 			{ firewall-cmd -q --zone="$z" --add-port=80/tcp && echo "firewalld $z" >"$LE_DIR/port80"; } ;;
-	iptables) iptables -w 5 -I INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT && echo iptables >"$LE_DIR/port80" ;;
+	iptables) iptables -w 5 -C INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT 2>/dev/null ||
+		{ iptables -w 5 -I INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT && echo iptables >"$LE_DIR/port80"; } ;;
 	esac
 	exit 0 ;;
 close)
@@ -2130,42 +2131,60 @@ deploy)
 			mv -f "$d/web_key.pem.new" "$d/web_key.pem" && mv -f "$d/web_cert.pem.new" "$d/web_cert.pem"; } ||
 			{ logger -t sanity-csqtt-le "cannot install $n into $d"; continue; }
 		i=${d##*/}
-		if [ -f "$d/docker" ]; then docker kill -s USR1 "sanity-csqtt-$i" >/dev/null 2>&1
-		else systemctl kill -s USR1 --kill-whom=main "sanity-csqtt-$i.service" >/dev/null 2>&1; fi
+		if [ -f "$d/docker" ]; then
+			# (a stopped Docker is not started through its socket for this: its container is down with it, B13c review F4)
+			systemctl is-active --quiet docker.service || continue
+			docker kill -s USR1 "sanity-csqtt-$i" >/dev/null 2>&1 || logger -t sanity-csqtt-le "cannot signal sanity-csqtt-$i"
+		else
+			# (its main process by its pid: systemctl kill's --kill-whom= came in systemd 252, B14 review F1; a stopped server
+			# reads the files at its next start)
+			p=$(systemctl show -p MainPID --value "sanity-csqtt-$i.service" 2>/dev/null)
+			[ "${p:-0}" -gt 0 ] 2>/dev/null || continue
+			kill -USR1 "$p" || logger -t sanity-csqtt-le "cannot signal sanity-csqtt-$i.service"
+		fi
 	done
 	exit 0 ;;
+certbot)
+	# our certbot alone (M-135): no host config and no directory hooks; configargparse opens /etc/letsencrypt/cli.ini and
+	# $XDG_CONFIG_HOME's whatever --config says, so the first is hidden in a mount namespace of its own (the host's certbot still
+	# reads it) and the second is ours (B14 review F2)
+	shift
+	export XDG_CONFIG_HOME="$LE_DIR"
+	set -- /opt/sanityprotocol/certbot/bin/certbot --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
+		--work-dir "$LE_DIR/work" --logs-dir "$LE_DIR/logs" "$@"
+	[ -e /etc/letsencrypt/cli.ini ] || exec "$@"
+	exec unshare -m sh -c 'mount --bind /dev/null /etc/letsencrypt/cli.ini && exec "$@"' sh "$@" ;;
 renew)
-	exec /opt/sanityprotocol/certbot/bin/certbot --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
-		--work-dir "$LE_DIR/work" --logs-dir "$LE_DIR/logs" renew --non-interactive \
-		--pre-hook "$0 open" --post-hook "$0 close" --deploy-hook "$0 deploy" ;;
+	exec "$0" certbot renew --non-interactive --pre-hook "$0 open" --post-hook "$0 close" --deploy-hook "$0 deploy" ;;
 esac
 exit 2
 EOF
 }
 
 # le_venv: our certbot in its venv (one per box), pinned when it is made; one there that works with --ip-address stays (the venv
-# holds the renewal's hook too: made again only when it does not work, never under the other instances' renewals); its cause
-# on stdout when it cannot be had
+# holds the renewal's hook too: made again only when it does not work, never under the other instances' renewals). Its cause in
+# le_why when it cannot be had (called as it is, never in a subshell: a cancel in its lock wait ends the run, B14 review F3)
 le_venv() {
+	le_why=''
 	[ ! -x "$LE_VENV/bin/certbot" ] || ! "$LE_VENV/bin/certbot" certonly --help all 2>&1 | grep -q -- --ip-address || return 0
-	command -v python3 >/dev/null 2>&1 || { echo "python3 is not installed"; return 1; }
+	command -v python3 >/dev/null 2>&1 || { le_why="python3 is not installed"; return 1; }
 	python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null ||
-		{ echo "$(python3 -V 2>&1) is older than 3.10, which certbot $LE_CERTBOT needs"; return 1; }
+		{ le_why="$(python3 -V 2>&1) is older than 3.10, which certbot $LE_CERTBOT needs"; return 1; }
 	if ! python3 -c 'import ensurepip, venv' 2>/dev/null; then
 		# python3-venv by the package manager, kept as B9's iptables is (a package installed stays)
 		if command -v apt-get >/dev/null 2>&1; then
-			host_lock_wait || { echo "the package lock stays held ($(apt_lock_holder))"; return 1; }
+			host_lock_wait || { le_why="the package lock stays held ($(apt_lock_holder))"; return 1; }
 			run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3-venv </dev/null ||
 				{ run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q </dev/null &&
 					run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3-venv </dev/null; }
 		elif command -v dnf >/dev/null 2>&1; then
 			run_cmd dnf install -y -q python3 </dev/null
 		fi
-		python3 -c 'import ensurepip, venv' 2>/dev/null || { echo "python3-venv could not be installed"; return 1; }
+		python3 -c 'import ensurepip, venv' 2>/dev/null || { le_why="python3-venv could not be installed"; return 1; }
 	fi
 	# (a venv is not relocatable: made in its place, removed whole when it fails)
 	rm -rf "$LE_VENV"
-	python3 -m venv "$LE_VENV" >"$RUN_DIR/pip.log" 2>&1 || { rm -rf "$LE_VENV"; echo "python3 could not make a venv"; return 1; }
+	python3 -m venv "$LE_VENV" >"$RUN_DIR/pip.log" 2>&1 || { rm -rf "$LE_VENV"; le_why="python3 could not make a venv"; return 1; }
 	# (a source the plan names: the zoo's wheelhouse; pip ignores a plain-HTTP one unless its host is named trusted)
 	le_src='' le_links=$(plan pip_find_links)
 	if [ -n "$le_links" ]; then
@@ -2175,12 +2194,12 @@ le_venv() {
 	# shellcheck disable=SC2086 # the source's words
 	if ! timeout 600 "$LE_VENV/bin/pip" install --disable-pip-version-check --no-cache-dir --timeout 60 $le_src \
 		"certbot==$LE_CERTBOT" >>"$RUN_DIR/pip.log" 2>&1; then
-		echo "certbot $LE_CERTBOT could not be installed: $(tail -n 2 "$RUN_DIR/pip.log" | tr '\n' ' ' | cut -c1-240)"
+		le_why="certbot $LE_CERTBOT could not be installed: $(tail -n 2 "$RUN_DIR/pip.log" | tr '\n' ' ' | cut -c1-240)"
 		rm -rf "$LE_VENV"
 		return 1
 	fi
 	"$LE_VENV/bin/certbot" certonly --help all 2>&1 | grep -q -- --ip-address ||
-		{ rm -rf "$LE_VENV"; echo "certbot $LE_CERTBOT has no --ip-address"; return 1; }
+		{ rm -rf "$LE_VENV"; le_why="certbot $LE_CERTBOT has no --ip-address"; return 1; }
 }
 
 # le_drop <state dir>: the instance's lineage reference gone; with the last live one our timer, its units, the venv and the
@@ -2200,6 +2219,37 @@ le_drop() {
 	return 0
 }
 
+# le_keep <cause> <next>: the run ends ok with the panel on a certificate of its own. A short-lived one nothing here renews (a
+# moved store's Let's Encrypt one, a restored one's) gives way to a self-signed one made as the server makes its own, so the panel
+# never serves one that expires in days; a certificate of the user's, long-lived, stays (B14 review F4)
+le_keep() {
+	if [ ! -f "$in_state/le" ] && command -v openssl >/dev/null 2>&1; then
+		lk_from=$(openssl x509 -noout -startdate -in "$in_state/web_cert.pem" 2>/dev/null | sed 's/^notBefore=//')
+		lk_to=$(openssl x509 -noout -enddate -in "$in_state/web_cert.pem" 2>/dev/null | sed 's/^notAfter=//')
+		lk_days=$(( ($(date -d "$lk_to" +%s 2>/dev/null || echo 0) - $(date -d "$lk_from" +%s 2>/dev/null || echo 0)) / 86400 ))
+		if [ -n "$lk_from" ] && [ "$lk_days" -lt 10 ]; then
+			lk_san="subjectAltName=DNS:localhost,IP:127.0.0.1"
+			case $le_ip in *[!0-9.]* | '') ;; *) lk_san="$lk_san,IP:$le_ip" ;; esac
+			(umask 077 && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 -subj "/CN=rcgen self signed cert" \
+				-addext "$lk_san" -keyout "$in_state/web_key.pem.new" -out "$in_state/web_cert.pem.new" >/dev/null 2>&1) &&
+				chmod 644 "$in_state/web_cert.pem.new" && mv -f "$in_state/web_key.pem.new" "$in_state/web_key.pem" &&
+				mv -f "$in_state/web_cert.pem.new" "$in_state/web_cert.pem" && le_signal
+		fi
+	fi
+	run_result ok "the panel keeps its own certificate: $1" "$2"
+}
+
+# le_signal: the instance's server told to read its certificate again (SIGUSR1: no client is cut)
+le_signal() {
+	if [ -f "$in_state/docker" ]; then
+		docker kill -s USR1 "sanity-csqtt-$le_id" >/dev/null 2>&1
+	else
+		ls_p=$(systemctl show -p MainPID --value "$in_unit" 2>/dev/null)
+		[ "${ls_p:-0}" -le 0 ] 2>/dev/null || kill -USR1 "$ls_p" 2>/dev/null
+	fi
+	return 0
+}
+
 action_le() {
 	le_id=$(plan id) le_ip=$(plan public_ip) le_url=$(plan acme_url)
 	inst_paths "$le_id"
@@ -2207,19 +2257,18 @@ action_le() {
 	[ -f "$le_def" ] || le_def=$in_state/docker
 	[ -f "$le_def" ] && [ -f "$in_state/env" ] && [ ! -f "$in_state/unit.saved" ] ||
 		run_result failed-cleaned "sqc-$le_id is not installed here" "check again"
-	le_keep="the panel keeps its own certificate"
 	# a panel bound to loopback is reached through the tunnel alone: no certificate to get for it
-	! grep -q -- '--web-bind 127\.0\.0\.1' "$le_def" || run_result ok "$le_keep: the panel listens on 127.0.0.1 only" ""
+	! grep -q -- '--web-bind 127\.0\.0\.1' "$le_def" || run_result ok "the panel keeps its own certificate: the panel listens on 127.0.0.1 only" ""
 	case $le_ip in
-	'' | *[!0-9.]* | *..* | .* | *.) run_result ok "$le_keep: no public IPv4 address to certify" "" ;;
+	'' | *[!0-9.]* | *..* | .* | *.) le_keep "no public IPv4 address to certify" "" ;;
 	10.* | 127.* | 169.254.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].* | 100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].*)
 		# (a private one only against a directory the plan names: the zoo's Pebble)
-		[ -n "$le_url" ] || run_result ok "$le_keep: $le_ip is no public address (Let's Encrypt certifies public ones)" "" ;;
+		[ -n "$le_url" ] || le_keep "$le_ip is no public address (Let's Encrypt certifies public ones)" "" ;;
 	esac
 	run_phase prepare 10
 	[ -z "$(ss -Hltn 'sport = :80' 2>/dev/null)" ] ||
-		run_result ok "$le_keep: TCP 80 is taken (Let's Encrypt checks the address there)" "free TCP 80, then get the certificate again"
-	le_why=$(le_venv) || run_result ok "$le_keep: $le_why" "get the certificate again later"
+		le_keep "TCP 80 is taken (Let's Encrypt checks the address there)" "free TCP 80, then get the certificate again"
+	le_venv || le_keep "$le_why" "get the certificate again later"
 	mkdir -p "$LE_DIR" && chmod 700 "$LE_DIR" && le_hook_text >"$LE_HOOK.new" && chmod 755 "$LE_HOOK.new" && mv -f "$LE_HOOK.new" "$LE_HOOK" ||
 		run_result failed-cleaned "cannot write $LE_HOOK" "check the box's disk"
 	if [ -n "$(plan acme_ca)" ]; then plan acme_ca | base64 -d >"$LE_DIR/acme-ca.pem" || run_result failed-cleaned "the plan's ACME CA is damaged" "update the app"
@@ -2227,19 +2276,16 @@ action_le() {
 	run_phase issue 40
 	le_name=ip-$(printf '%s' "$le_ip" | tr . -)
 	"$LE_HOOK" open
-	# (the directory the plan names, trusted through its CA, else Let's Encrypt's own; short-lived: the only profile it issues IP
-	# certificates on)
-	le_env=''
-	[ ! -f "$LE_DIR/acme-ca.pem" ] || le_env=REQUESTS_CA_BUNDLE=$LE_DIR/acme-ca.pem
-	# shellcheck disable=SC2086 # an empty word or one assignment; the server's two words when named
-	timeout 180 env $le_env "$LE_VENV/bin/certbot" --config /dev/null --no-directory-hooks --config-dir "$LE_DIR" \
-		--work-dir "$LE_DIR/work" --logs-dir "$LE_DIR/logs" certonly --standalone --non-interactive --agree-tos \
-		--register-unsafely-without-email --preferred-profile shortlived --ip-address "$le_ip" --cert-name "$le_name" \
-		--keep-until-expiring ${le_url:+--server "$le_url"} >"$RUN_DIR/certbot.log" 2>&1
+	# (through the hook, as the renewal: our certbot alone, the directory the plan names trusted through its CA, else Let's
+	# Encrypt's own; short-lived: the only profile it issues IP certificates on)
+	# shellcheck disable=SC2086 # the server's two words when named
+	timeout 180 "$LE_HOOK" certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email \
+		--preferred-profile shortlived --ip-address "$le_ip" --cert-name "$le_name" --keep-until-expiring \
+		${le_url:+--server "$le_url"} >"$RUN_DIR/certbot.log" 2>&1
 	le_rc=$?
 	"$LE_HOOK" close
 	[ $le_rc = 0 ] && [ -s "$LE_DIR/live/$le_name/fullchain.pem" ] ||
-		run_result ok "$le_keep: Let's Encrypt gave none: $(grep -v '^ *$' "$RUN_DIR/certbot.log" | tail -n 3 | tr '\n' ' ' | cut -c1-300)" \
+		le_keep "Let's Encrypt gave none: $(grep -v '^ *$' "$RUN_DIR/certbot.log" | tail -n 3 | tr '\n' ' ' | cut -c1-300)" \
 			"get the certificate again later"
 	# renewed below 3 days left (a short-lived certificate lives about 6: two days of retries on a 12-hour timer)
 	grep -q '^renew_before_expiry' "$LE_DIR/renewal/$le_name.conf" 2>/dev/null ||

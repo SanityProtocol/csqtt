@@ -101,12 +101,20 @@ class LeTest {
             val docker = instance("bbbbbb", "ip-203-0-113-7", "docker")
             val other = instance("cccccc", "ip-198-51-100-1")
             val kept = instance("dddddd", "ip-203-0-113-7", "unit.saved")
-            // (the hook sends what they print away: they write what they were asked into a file of their own)
+            // (the hook sends what they print away: they write what they were asked into a file of their own). The unit's server
+            // is a process of ours that notes its SIGUSR1: its main pid signalled, as systemd 249 has no --kill-whom= (review F1)
             val calls = File(dir, "calls")
-            hook(dir, "deploy ip-203-0-113-7", mapOf("systemctl" to "echo systemctl \"$@\" >>${calls.path}",
-                "docker" to "echo docker \"$@\" >>${calls.path}", "logger" to "echo logger \"$@\" >>${calls.path}"))
-            assertEquals(setOf("systemctl kill -s USR1 --kill-whom=main sanity-csqtt-aaaaaa.service", "docker kill -s USR1 sanity-csqtt-bbbbbb"),
-                calls.readText().trim().lines().toSet())
+            val server = ProcessBuilder("sh", "-c", "trap 'echo usr1 >>${calls.path}; exit 0' USR1; while :; do sleep 0.05; done").start()
+            try {
+                Thread.sleep(300)
+                hook(dir, "deploy ip-203-0-113-7", mapOf(
+                    "systemctl" to "case \"$*\" in *MainPID*sanity-csqtt-aaaaaa*) echo ${server.pid()} ;; *is-active*) exit 0 ;; esac",
+                    "docker" to "echo docker \"$@\" >>${calls.path}", "logger" to "echo logger \"$@\" >>${calls.path}"))
+                assertTrue(server.waitFor(10, TimeUnit.SECONDS))
+            } finally {
+                server.destroyForcibly()
+            }
+            assertEquals(setOf("usr1", "docker kill -s USR1 sanity-csqtt-bbbbbb"), calls.readText().trim().lines().toSet())
             for (d in listOf(unit, docker)) {
                 assertEquals("CHAIN\n", File(d, "web_cert.pem").readText())
                 assertEquals("KEY\n", File(d, "web_key.pem").readText())
@@ -125,19 +133,25 @@ class LeTest {
         val dir = kotlin.io.path.createTempDirectory("csqtt-le").toFile()
         try {
             File(dir, "le").mkdirs()
-            // INPUT drops; no ufw, no firewalld: an iptables rule of ours, noted, then deleted (until none is left)
+            // INPUT drops; no ufw, no firewalld: an iptables rule of ours, noted, then deleted (until none is left). The stub keeps
+            // whether the rule stands in a file: the hook asks the rule itself, never its note alone (review F5)
+            val rule = File(dir, "rule")
             val stubs = mapOf("systemctl" to "echo inactive", "iptables" to """
                 case "$*" in
                 *"-S INPUT"*) echo '-P INPUT DROP' ;;
-                *" -I INPUT "*) echo "iptables $*" ;;
-                *" -D INPUT "*) [ -e "${dir.path}/deleted" ] && exit 1; : >"${dir.path}/deleted"; echo "iptables $*" ;;
+                *" -C INPUT "*) [ -e "${rule.path}" ] ;;
+                *" -I INPUT "*) : >"${rule.path}"; echo "iptables $*" ;;
+                *" -D INPUT "*) [ -e "${rule.path}" ] || exit 1; rm -f "${rule.path}"; echo "iptables $*" ;;
                 esac""".trimIndent())
             assertEquals("iptables -w 5 -I INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT", hook(dir, "open", stubs).trim())
             assertEquals("iptables\n", File(dir, "le/port80").readText())
-            // a second open while one stands adds nothing
+            // a second open while it stands adds nothing
             assertEquals("", hook(dir, "open", stubs).trim())
+            // a reboot dropped the rule and kept the note: the next open puts it back
+            rule.delete()
+            assertEquals("iptables -w 5 -I INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT", hook(dir, "open", stubs).trim())
             assertEquals("iptables -w 5 -D INPUT -p tcp --dport 80 -m comment --comment SANITY_CSQTT_LE -j ACCEPT", hook(dir, "close", stubs).trim())
-            assertFalse(File(dir, "le/port80").exists())
+            assertFalse(File(dir, "le/port80").exists() || rule.exists())
             // INPUT open: nothing to open, nothing to close
             val open = stubs + ("iptables" to "case \"$*\" in *\"-S INPUT\"*) echo '-P INPUT ACCEPT' ;; *) echo \"iptables $*\" ;; esac")
             assertEquals("", hook(dir, "open", open).trim() + hook(dir, "close", open).trim())
@@ -149,18 +163,30 @@ class LeTest {
     @Test
     fun ourCertbotIsIsolatedShortLivedAndTornDownWithTheLastInstance() {
         val le = body("action_le")
-        // M-135: the host's cli.ini and renewal hooks never run; our own state dirs (the distro's certbot.timer renews
-        // /etc/letsencrypt); the short-lived profile, never a retry without it
-        assertTrue(le, "--config /dev/null --no-directory-hooks --config-dir \"\$LE_DIR\"" in le)
+        val hook = hookText()
+        // M-135: the host's cli.ini and renewal hooks never run (configargparse reads /etc/letsencrypt/cli.ini whatever --config
+        // says: hidden in a mount namespace, and $XDG_CONFIG_HOME's ours, review F2); our own state dirs (the distro's
+        // certbot.timer renews /etc/letsencrypt); the issuance and the renewal both through the hook's certbot
+        val certbot = hook.substringAfter("\ncertbot)").substringBefore(";;\n")
+        assertTrue(certbot, "--config /dev/null --no-directory-hooks --config-dir \"\$LE_DIR\"" in certbot &&
+            "export XDG_CONFIG_HOME=\"\$LE_DIR\"" in certbot && "mount --bind /dev/null /etc/letsencrypt/cli.ini" in certbot)
+        assertTrue(le, "\"\$LE_HOOK\" certbot certonly" in le && "\"\$0\" certbot renew" in hook)
+        assertFalse(le, "\$LE_VENV/bin/certbot\" --config" in le)
+        // the short-lived profile, never a retry without it
         assertTrue(le, "--preferred-profile shortlived --ip-address \"\$le_ip\"" in le)
+        // review F3: its venv made outside a subshell, so a cancel in the package lock's wait ends the run
+        assertTrue(le, "le_venv || le_keep" in le)
+        assertFalse(runSh.contains("\$(le_venv)"))
+        // review F4: where none is got, a short-lived certificate nothing here renews gives way to a self-signed one
+        val keep = body("le_keep")
+        assertTrue(keep, "[ \"\$lk_days\" -lt 10 ]" in keep && "CN=rcgen self signed cert" in keep && "le_signal" in keep)
         assertEquals(1, Regex("certonly").findAll(le).count())
         assertTrue(le, "renew_before_expiry = 3 days" in le)
         // the challenge's port opened and closed around it; the lineage written before it is deployed; the timer after
         assertTrue(le, le.indexOf("\"\$LE_HOOK\" open") in 0 until le.indexOf("certonly") && le.indexOf("certonly") < le.indexOf("\"\$LE_HOOK\" close"))
         assertTrue(le, le.indexOf(">\"\$in_state/le.new\"") in 0 until le.indexOf("\"\$LE_HOOK\" deploy"))
-        // the renewal is the hook's, isolated the same way, its own hooks around it
-        val hook = hookText()
-        assertTrue(hook, "--config /dev/null --no-directory-hooks --config-dir \"\$LE_DIR\"" in hook && "--deploy-hook \"\$0 deploy\"" in hook)
+        // the renewal's own hooks around it
+        assertTrue(hook, "--deploy-hook \"\$0 deploy\"" in hook)
         // the last instance's removal takes the timer, the venv and the ACME state; every removal drops its reference
         assertTrue(body("inst_take_down").contains("le_drop \"\$in_state\""))
         assertTrue(body("le_drop").contains("rm -rf \"\$LE_VENV\" \"\$LE_DIR\""))
