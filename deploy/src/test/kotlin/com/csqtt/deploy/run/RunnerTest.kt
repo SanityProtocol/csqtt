@@ -70,6 +70,20 @@ class RunnerTest {
     }
 
     @Test
+    fun anotherLoginsRunIsReadThroughRoot() {
+        // the login's tail cannot read a log another login owns: the runner asks through root, and follows it there
+        val asLogin = mutableListOf<List<String>>()
+        val asRoot = mutableListOf<List<String>>()
+        val log = "CSQTT_RUN|r9|selftest\nCSQTT_RESULT|ok|done||\nCSQTT_END|2\n"
+        val login = Box { words, _ -> asLogin += words; ok("CSQTT_TAIL|unreadable|0\n") }
+        val root = Box { words, _ -> asRoot += words; ok("CSQTT_TAIL|ended|${log.length}\n" + log.substring(words.last().toInt())) }
+        val runner = Runner(login, RootRunner(root, Privilege.Root))
+        assertEquals(Attached.Done(RunResult("ok", "done", "", "")), runner.attach("r9", pollMs = 1))
+        assertEquals(1, asLogin.size)
+        assertTrue(asRoot.isNotEmpty())
+    }
+
+    @Test
     fun aCancelSaysWhatItDid() {
         for ((answer, outcome) in listOf(
             "CSQTT_CANCEL|requested|r1\nCSQTT_END|1\n" to CancelOutcome.Requested,

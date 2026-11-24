@@ -116,8 +116,9 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
     }
 
     /** The log's complete lines since [offset], as the login user; a line still being written waits for the next tail. */
-    fun tail(runId: String, offset: Long): Tail {
-        val result = remote.exec(RemoteCommand.of("/bin/sh", "$RUNS/$runId/run.sh", "tail", runId, offset.toString()), null, 30_000)
+    fun tail(runId: String, offset: Long, asRoot: Boolean = false): Tail {
+        val command = RemoteCommand.of("/bin/sh", "$RUNS/$runId/run.sh", "tail", runId, offset.toString())
+        val result = if (asRoot) root.run(command, 30_000) else remote.exec(command, null, 30_000)
         return parseTail(result.stdout, offset)
     }
 
@@ -153,8 +154,14 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
      */
     fun attach(runId: String, offset: Long = 0, pollMs: Long = 2_000, onEvent: (RunEvent, Long) -> Unit = { _, _ -> }): Attached {
         var at = offset
+        // another login's run: its log is that login's own, read through root from then on (B7 verify N2)
+        var asRoot = false
         while (true) {
-            val tail = tail(runId, at)
+            var tail = tail(runId, at, asRoot)
+            if (tail.state == "unreadable" && !asRoot) {
+                asRoot = true
+                tail = tail(runId, at, true)
+            }
             // no log, or no run.sh to ask: cmd_start makes both before the unit, so this run never started here
             if (tail.state == "missing") return Attached.NotFound
             at = tail.nextOffset
@@ -162,7 +169,7 @@ class Runner(private val remote: Remote, private val root: RootRunner) {
             tail.events.filterIsInstance<RunEvent.Result>().lastOrNull()?.let { return Attached.Done(it.result) }
             if (!tail.active) {
                 // the unit is gone: one more read for lines written just before it ended, then it is interrupted
-                val last = tail(runId, at)
+                val last = tail(runId, at, asRoot)
                 last.events.forEach { onEvent(it, last.nextOffset) }
                 return last.events.filterIsInstance<RunEvent.Result>().lastOrNull()?.let { Attached.Done(it.result) } ?: Attached.Interrupted
             }

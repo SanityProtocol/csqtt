@@ -301,7 +301,7 @@ private fun coordinator(target: File) = Coordinator(FileStateStore(File(target.p
 }
 
 /** Follows a run to its result, keeping the coordinator's Running state current (the pendingRunId is in it from the start). */
-private fun follow(runner: Runner, coordinator: Coordinator, runId: String): Int {
+private fun follow(runner: Runner, coordinator: Coordinator, runId: String, before: DeployState = DeployState.Idle): Int {
     var running = DeployState.Running(runId)
     val attached = runner.attach(runId) { event, _ ->
         when (event) {
@@ -331,8 +331,9 @@ private fun follow(runner: Runner, coordinator: Coordinator, runId: String): Int
             9
         }
         Attached.NotFound -> {
-            // its id was kept before the start, and the start never reached the box: back to before it (B7b review F1)
-            coordinator.move(DeployState.Idle)
+            // its id was kept before the start, and the start never reached the box: back to the state before it (B7b review
+            // F1; verify residue: Idle lost a choice that came first)
+            coordinator.move(before)
             println("no such run on the box: $runId never started there, or was pruned")
             11
         }
@@ -349,7 +350,7 @@ private fun runSelftest(session: SshSession, p: Properties, target: File, args: 
     val before = coordinator.state
     coordinator.move(DeployState.Running(runId))
     return when (val outcome = runner.start(runId, plan)) {
-        is StartOutcome.Started -> follow(runner, coordinator, runId)
+        is StartOutcome.Started -> follow(runner, coordinator, runId, before)
         is StartOutcome.Busy -> {
             // the box's own run is the one to watch; with no id, what was kept before stays (B7b review F2)
             coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
