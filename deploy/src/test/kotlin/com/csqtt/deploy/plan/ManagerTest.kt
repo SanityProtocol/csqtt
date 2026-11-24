@@ -171,7 +171,9 @@ class ManagerTest {
         assertEquals(64, move.expect.binarySha?.length)
         val remove = Proposer.offerPlan(entry, entry.offers.last(), c, inv, carried)
         assertEquals("удалить csqtt.service", remove.confirm)
-        assertTrue(remove.will.single(), "база /etc/csqtt останется" in remove.will.single())
+        // a stock install's removal lists every object it has before the typed confirmation (B11b)
+        assertTrue(remove.will.joinToString(), remove.will.first().startsWith("Будет удалено: csqtt.service, /usr/local/bin/csqtt"))
+        assertTrue(remove.will.joinToString(), "База /etc/csqtt останется" in remove.will)
     }
 
     private fun ours(id: String, slot: Int, state: String, version: String = "2.6.0", sub: String = if (state == "active") "running" else "dead") = arrayOf(

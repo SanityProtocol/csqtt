@@ -76,6 +76,8 @@ private const val USAGE = """usage: deploy-cli <command>
   restore <target> <id>   «Восстановить» a kept store with the target's core: its clients come back
   restart <target> <id>   «Перезапустить» (and «Запустить»): its unit (re)started and verified
   journal <target> <id> [lines]   «Журнал»: its unit's last lines
+  remove-foreign <target> <name> [purge]   a stock systemd install removed (B11b; <name> as inspect prints it, its unit):
+                          every object it has listed first, then removed; its store kept, or with purge, gone
   update <target> <id>    an instance of ours to the target's core (B10): stage, switch, verify, rolled back on a failure;
                           then its connection read back (the same passwords and pin) and checked from here
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
@@ -111,6 +113,8 @@ private fun dispatch(args: Array<String>): Int {
             withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], if (args.size == 4) "purge" else "remove") }
         args.size == 3 && args[0] in setOf("restore", "restart") ->
             withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], args[0]) }
+        args.size in 3..4 && args[0] == "remove-foreign" && (args.size == 3 || args[3] == "purge") ->
+            withSession(File(args[1])) { session, p -> removeForeign(session, p, File(args[1]), args[2], args.size == 4) }
         args.size in 3..4 && args[0] == "journal" -> withSession(File(args[1])) { session, p ->
             com.csqtt.deploy.run.Maintenance.journal(rootOf(session, p), args[2], args.getOrNull(3)?.toIntOrNull() ?: 200).forEach { println(it) }
             0
@@ -645,4 +649,37 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
     val code = follow(runner, coordinator, runId, before)
     if (code != 0 || verb == "remove" || verb == "purge") return code
     return readBack(root, id, p.prop("host").orEmpty(), null)
+}
+
+/** A stock systemd install removed (P2 B11b): inspected, its every object listed as the app lists them, then the run. */
+private fun removeForeign(session: SshSession, p: Properties, target: File, name: String, purge: Boolean): Int {
+    val remote = session.asRemote()
+    val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    val inventory = Inventory.from(report.lines)
+    val classification = Classifier.classify(inventory)
+    val install = classification.installations.firstOrNull { it.name == name } ?: return 2.also { println("no installation $name on this box") }
+    val listing = com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inventory, purge)
+        ?: return 2.also { println("$name is not a stock systemd install") }
+    listing.will.forEach { println("will: $it") }
+    val runner = Runner(remote, root)
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    when (val outcome = runner.start(runId, com.csqtt.deploy.run.ForeignRemoval.plan(install, inventory, listing))) {
+        is StartOutcome.Started -> {}
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            return 8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            return 7
+        }
+    }
+    return follow(runner, coordinator, runId, before)
 }

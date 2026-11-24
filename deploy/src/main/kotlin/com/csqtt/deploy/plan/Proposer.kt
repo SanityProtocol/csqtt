@@ -136,7 +136,11 @@ object Proposer {
         val stockPorts = setOfNotNull(install.claims.udpPort, install.claims.webPort)
         val installed = Version.parse(install.build?.version.orEmpty())
         val db = install.stores.firstOrNull()?.dir
-        val will = when (offer.action) {
+        // a stock install's removal lists every object it has, what stays and why, before the typed confirmation (B11b)
+        val foreign = if (install.owner != Owner.OURS && offer.action in setOf(Action.REMOVE, Action.REMOVE_LEFTOVERS)) {
+            com.csqtt.deploy.run.ForeignRemoval.listing(install, classification, inv, purge = offer.action == Action.REMOVE_LEFTOVERS)
+        } else null
+        val will = foreign?.will ?: when (offer.action) {
             Action.CONNECT -> listOf("Чтение настроек подключения ${install.name} (на сервере ничего не меняется)")
             Action.UPDATE, Action.REPAIR -> if (install.owner == Owner.OURS) {
                 if (installed != null && carried > installed) listOf("${install.name}: тот же экземпляр, сборка $carried вместо $installed, клиенты сохранятся")

@@ -1195,6 +1195,107 @@ action_restart() {
 	run_result ok "" ""
 }
 
+# ── remove-foreign: a stock systemd install (P2-PLAN §3 B11b; APP-PLAN §6.10; M-116, M-120, M-126, M-131) ────────────────
+# Every object the plan names is checked against its stock role's own namespace before anything changes (server-footprints.md
+# §1.6, §1.7), so a plan cannot widen it; a path is never followed through a link: a symlinked config dir loses its link,
+# never its target. Rules go by their tag, each line as iptables prints it; the untagged FORWARD RELATED,ESTABLISHED rule and
+# the LE lineage only when the plan says this is the last stock install.
+fr_ok() {  # fr_ok <role> <kind> <name>
+	case "$1 $2 $3" in
+	"main unit csqtt.service" | "main unit csqtt-docker-prereq.service" | "main unit csqtt-letsencrypt.service" | \
+		"main unit csqtt-letsencrypt.timer") ;;
+	"side unit csqtt25.service" | "side unit csqtt25-docker-prereq.service" | "side unit csqtt25-letsencrypt.service" | \
+		"side unit csqtt25-letsencrypt.timer") ;;
+	"main path /usr/local/bin/csqtt" | "main path /usr/local/lib/csqtt" | "main path /usr/local/lib/csqtt-letsencrypt-renew.sh" | \
+		"main path /opt/csqtt-certbot" | "main path /run/csqtt" | "main path /etc/sysctl.d/99-csqtt.conf" | \
+		"main path /etc/sysctl.d/99-csqtt-udp-buffers.conf" | "main path /var/log/csqtt-install.log") ;;
+	"side path /usr/local/lib/csqtt25" | "side path /opt/csqtt25-certbot" | "side path /run/csqtt25" | \
+		"side path /etc/sysctl.d/99-csqtt25.conf" | "side path /etc/sysctl.d/99-csqtt25-udp-buffers.conf" | \
+		"side path /var/log/csqtt25-install.log") ;;
+	"main store /etc/csqtt" | "side store /etc/csqtt25") ;;
+	"main tag CSQTT_MANAGED" | "main tag CSQTT_TPROXY" | "side tag CSQTT25_MANAGED" | "side tag CSQTT25_TPROXY") ;;
+	"main table 30001" | "main table 1066" | "side table 30002") ;;
+	"main lineage "* | "side lineage "*)
+		case $3 in csqtt-ip-*[!0-9-]* | csqtt-ip-) return 1 ;; csqtt-ip-*) ;; *) return 1 ;; esac ;;
+	*) return 1 ;;
+	esac
+}
+
+fr_rm() {  # fr_rm <path>: a link is unlinked; a directory goes with what is in it (rm never follows a link inside it)
+	if [ -L "$1" ]; then rm -f "$1"
+	elif [ -d "$1" ]; then rm -rf "$1"
+	elif [ -e "$1" ]; then rm -f "$1"
+	fi
+}
+
+# fr_sweep_tag <tag>: its rules, v4 and v6, every table, as iptables prints them; never an INPUT rule that opens a port sshd
+# listens on (2.0.0's deploy tagged its SSH opening: on a box whose INPUT drops, taking it would end every new SSH login)
+fr_sweep_tag() {
+	fs_ssh=$(ss -Hltnp 2>/dev/null | awk '/"sshd"/ {n = split($4, a, ":"); print a[n]}' | sort -u | tr '\n' '|')
+	for fs_ipt in iptables ip6tables; do
+		command -v $fs_ipt >/dev/null 2>&1 || continue
+		for fs_t in filter nat mangle raw; do
+			$fs_ipt -w 5 -t $fs_t -S 2>/dev/null | grep '^-A ' | grep -E -- "--comment \"?$1([:\" ]|\$)" |
+				{ if [ -n "$fs_ssh" ]; then grep -vE -- "^-A INPUT .*--dport (${fs_ssh%|})( |\$)"; else cat; fi; } | sed 's/^-A /-D /' |
+				while read -r fs_rule; do eval "$fs_ipt -w 5 -t $fs_t $fs_rule" 2>/dev/null; done
+		done
+	done
+	return 0
+}
+
+action_remove_foreign() {
+	fr_role=$(plan role) fr_purge=$(plan purge) fr_store=$(plan store)
+	case $fr_role in main | side) ;; *) run_result failed-cleaned "bad role $fr_role" "update the app" ;; esac
+	for fr_kind in unit path tag table; do
+		for fr_v in $(plan "${fr_kind}s" | tr , ' '); do
+			fr_ok "$fr_role" "$fr_kind" "$fr_v" || run_result failed-cleaned "$fr_v is not the stock $fr_role install's" "update the app"
+		done
+	done
+	for fr_v in $(plan lineage | tr , ' '); do
+		fr_ok "$fr_role" lineage "$fr_v" || run_result failed-cleaned "$fr_v is not a stock certificate" "update the app"
+	done
+	[ -z "$fr_store" ] || fr_ok "$fr_role" store "$fr_store" || run_result failed-cleaned "$fr_store is not the stock $fr_role store" "update the app"
+
+	run_phase stop 20
+	: >"$RUN_DIR/switching"
+	for fr_u in $(plan units | tr , ' '); do run_cmd systemctl disable --now "$fr_u"; done
+	# M-120: a server that outlived its unit keeps its port and TUN; nothing of it is deleted under it
+	case $fr_role in main) fr_bin=/usr/local/bin/csqtt ;; *) fr_bin=/usr/local/lib/csqtt25/csqtt25 ;; esac
+	fr_live=''
+	for fr_pid in $(pgrep -x "${fr_bin##*/}" 2>/dev/null); do
+		[ "$(readlink "/proc/$fr_pid/exe" 2>/dev/null)" != "$fr_bin" ] || fr_live="$fr_live $fr_pid"
+	done
+	[ -z "$fr_live" ] || run_result failed-not-rolled-back "$fr_bin still runs outside its unit (pid$fr_live)" \
+		"stop it, then remove again: its units are disabled, nothing else changed"
+	# only the stock deploy's own unit files; a unit packaged elsewhere is not its to delete
+	for fr_u in $(plan units | tr , ' '); do rm -f "/etc/systemd/system/$fr_u"; done
+	systemctl daemon-reload
+	for fr_u in $(plan units | tr , ' '); do systemctl reset-failed "$fr_u" >/dev/null 2>&1; done
+
+	run_phase remove 50
+	for fr_v in $(plan tags | tr , ' '); do fr_sweep_tag "$fr_v"; done
+	for fr_v in $(plan tables | tr , ' '); do
+		while ip rule del table "$fr_v" 2>/dev/null; do :; done
+		ip route flush table "$fr_v" 2>/dev/null
+	done
+	for fr_v in $(plan paths | tr , ' '); do fr_rm "$fr_v"; done
+	if [ "$(plan untagged)" = 1 ]; then
+		iptables -w 5 -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+		ip6tables -w 5 -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+	fi
+	for fr_v in $(plan lineage | tr , ' '); do
+		fr_rm "/etc/letsencrypt/live/$fr_v"
+		fr_rm "/etc/letsencrypt/archive/$fr_v"
+		fr_rm "/etc/letsencrypt/renewal/$fr_v.conf"
+	done
+	[ "$fr_purge" != 1 ] || [ -z "$fr_store" ] || fr_rm "$fr_store"
+	# our drop-in, kept for a csqtt server that ran beside our last instance (B11a verify N1), goes once none runs
+	host_dropin_drop
+	run_phase "done" 100
+	if [ "$fr_purge" = 1 ]; then run_result ok "" "the stock $fr_role install is gone, its clients with it"; fi
+	run_result ok "" "the stock $fr_role install is gone; its store stays in ${fr_store:-its place}"
+}
+
 # journal <instance id> [lines]: «Журнал», the unit's last lines, for the engine alone (root, stdout), each redacted against
 # nothing secret it could print (ours print no password: it never generates one)
 cmd_journal() {
@@ -1267,6 +1368,7 @@ cmd_exec() {
 	remove) action_remove ;;
 	restore) action_restore ;;
 	restart) action_restart ;;
+	remove-foreign) action_remove_foreign ;;
 	*) run_result failed-cleaned "unknown action $(plan action)" "update the app" ;;
 	esac
 }

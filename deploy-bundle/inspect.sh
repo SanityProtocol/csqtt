@@ -686,7 +686,11 @@ EOF
 		in_fw=$($in_save 2>/dev/null | awk -v us="$inv_us" -v v="$in_v" '
 			/^\*/ {t = substr($0, 2); next}
 			/^:/ && /^:(SQC-|CSQTT|MRTT|SANITY)/ {c = substr($1, 2); print v us t us "chain" us c; next}
-			/^-A / && ((/--comment/ && /CSQTT|MRTT|_MANAGED|_TPROXY|_OPEN|SQC-|swg/) || /10\.66\.6[78]\.0\/24|10\.77\./ || / -[io] (csqtt|mrtt|sqc)/) {print v us t us "rule" us $0}')
+			/^-A / && ((/--comment/ && /CSQTT|MRTT|_MANAGED|_TPROXY|_OPEN|SQC-|swg/) || /10\.66\.6[78]\.0\/24|10\.77\./ || / -[io] (csqtt|mrtt|sqc)/) {print v us t us "rule" us $0; next}
+			# the untagged rule every stock network-up puts at the top of FORWARD (#10, M-126): a foreign removal takes it with the last one
+			t == "filter" && $0 == "-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT" {print v us t us "rule" us $0; next}
+			# the subnet-less clamp of 2.0.0, which other software adds as well: a foreign removal names it and leaves it
+			t == "mangle" && $0 == "-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu" {print v us t us "rule" us $0}')
 		while IFS=$inv_us read -r in_fv in_ft in_fk in_fr; do
 			[ -n "$in_fv" ] || continue
 			csqtt_emit INV fw "v=$in_fv" "table=$in_ft" "kind=$in_fk" "text=$in_fr"
