@@ -653,6 +653,9 @@ NotifyAccess=main
 WatchdogSec=30
 EnvironmentFile=$3/env
 ExecStart=$2/current/csqtt-server $4
+# an update's record goes the first time a start is ready: the build it went to has served, its store is live from then on,
+# and no later run may put the copy from before it back over that (B10 verify N1)
+ExecStartPost=-/bin/rm -f $3/update.pending
 $5
 Restart=always
 RestartSec=3
@@ -857,26 +860,31 @@ up_prune() {  # the release before stays for one more update; older ones go
 }
 
 # up_back <why> [store]: back to the build before, setting up_why (empty: it serves). With `store` (the new build has run on it)
-# the store comes back from the copy first; without, the new build never ran and the store stays as it is. The record goes once
-# the box is back on disk; a store that cannot be put back keeps it, the unit stopped, so the next run tries again. Never run
-# inside $(…): its results end the run
+# the store comes back from the copy first; without, the new build never ran and the store stays as it is, and no copy is
+# named (this run made none: one there is an older update's). `current` is flipped back only where it moved. The record goes
+# once the box is back on disk; a store that cannot be put back keeps it, the unit stopped, so the next run tries again. Never
+# run inside $(…): its results end the run
 up_back() {
 	systemctl stop "$up_unit" 2>/dev/null
-	if [ "${2:-}" = store ] && ! up_store_back 2>"$RUN_DIR/restore.err"; then
-		run_result failed-not-rolled-back "$1; the store could not be put back: $(head -c 200 "$RUN_DIR/restore.err" | tr '\n' ' ')" \
-			"free some disk, then «Починить»: the store before the update is whole in $up_copy"
+	if [ "${2:-}" = store ]; then
+		up_where="the store before the update is whole in $up_copy"
+		up_store_back 2>"$RUN_DIR/restore.err" ||
+			run_result failed-not-rolled-back "$1; the store could not be put back: $(head -c 200 "$RUN_DIR/restore.err" | tr '\n' ' ')" \
+				"free some disk, then «Запустить» or «Починить»: $up_where"
+	else
+		up_where="its store is as it was: the new build never ran on it"
 	fi
-	if [ "$up_new" != "$up_old" ]; then
+	if [ "$(readlink "$up_root/current")" != "$up_old" ]; then
 		ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" ||
-			run_result failed-not-rolled-back "$1; cannot switch back to $up_old" "«Починить»: the store before the update is whole in $up_copy"
-		rm -rf "$up_new"
+			run_result failed-not-rolled-back "$1; cannot switch back to $up_old" "«Починить»: $up_where"
 	fi
+	[ "$up_new" = "$up_old" ] || rm -rf "$up_new"
 	rm -f "$UP_PENDING"
 	systemctl start "$up_unit" 2>/dev/null
 	up_why=$(inst_verify "$up_unit" "$up_udp" "$up_web" "$up_iface" "$up_secret")
 	[ -z "$up_why" ] || run_result failed-not-rolled-back \
 		"$1; the rollback did not serve either: $up_why ($(systemctl is-active "$up_unit"), current -> $(readlink "$up_root/current"))" \
-		"read its journal; the store before the update is in $up_copy"
+		"read its journal; $up_where"
 }
 
 up_rollback() {  # up_rollback <why> [store]: up_back, and the run ends there
