@@ -96,8 +96,9 @@ class ManagerTest {
 
     @Test
     fun boxProblemsAreRepairedOrNamed() {
-        assertEquals(listOf(BoxIssue("B14", Manager.boxIssues(fixture("v253main-systemd-noble+B14").first).single().detail, true)),
-            Manager.boxIssues(fixture("v253main-systemd-noble+B14").first))
+        // (subject: the unit its repair acts on, B11c)
+        assertEquals(listOf(BoxIssue("B14", Manager.boxIssues(fixture("v253main-systemd-noble+B14").first).single().detail, true,
+            "csqtt-docker-prereq.service")), Manager.boxIssues(fixture("v253main-systemd-noble+B14").first))
         assertFalse(Manager.boxIssues(fixture("v253main-systemd-noble+B9").first).single().repairable)
         // the rest are named, never dropped (B6 review F10)
         assertEquals(listOf("B11" to false), Manager.boxIssues(fixture("v253main-systemd-noble+B11").first).map { it.code to it.repairable })

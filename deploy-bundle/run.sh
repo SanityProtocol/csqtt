@@ -1339,6 +1339,99 @@ action_remove_foreign() {
 	run_result ok "" "the stock $fr_role install is gone; its store stays in ${fr_store:-its place}"
 }
 
+# ── repair-box: «Исправить» for B14/B24 and B15 (P2-PLAN §1.3 "Box problems"; P2 B11c) ───────────────────────────────────
+# Only the named unit, only while its condition still holds
+action_repair_box() {
+	rb_code=$(plan code) rb_unit=$(plan unit)
+	case "$rb_code $rb_unit" in
+	"B14 csqtt-docker-prereq.service" | "B14 csqtt25-docker-prereq.service" | "B24 mrtt-docker-prereq.service")
+		# docker.service requires it and its helper is gone, so Docker will not start: the unit goes (an install that put its
+		# helper back since is left alone)
+		rb_exec=$(systemctl show -p ExecStart --value "$rb_unit" 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)
+		[ -n "$rb_exec" ] && [ ! -e "$rb_exec" ] || run_result failed-cleaned "$rb_unit has its helper again, or is gone" "check again"
+		run_phase repair 50
+		: >"$RUN_DIR/switching"
+		run_cmd systemctl disable "$rb_unit"
+		rm -f "/etc/systemd/system/$rb_unit"
+		systemctl daemon-reload
+		systemctl reset-failed "$rb_unit" >/dev/null 2>&1
+		# Docker, enabled and down because of it, starts again (its containers by their own restart policies)
+		if systemctl is-enabled --quiet docker.service 2>/dev/null && ! systemctl is-active --quiet docker.service; then
+			run_cmd systemctl start docker.service || run_result failed-not-rolled-back "docker.service did not start" "read its journal"
+		fi
+		run_phase "done" 100
+		run_result ok "" "docker.service no longer requires $rb_unit"
+		;;
+	"B15 csqtt-letsencrypt.timer")
+		# swg-panel holds the stock install's port, and the stock certificate timer still runs for a server that will not
+		systemctl is-active --quiet csqtt-letsencrypt.timer && ! systemctl is-active --quiet csqtt.service ||
+			run_result failed-cleaned "the stock certificate timer no longer runs beside a stopped stock install" "check again"
+		run_phase repair 50
+		: >"$RUN_DIR/switching"
+		run_cmd systemctl disable --now csqtt-letsencrypt.timer
+		run_phase "done" 100
+		run_result ok "" "the stock certificate timer is off"
+		;;
+	"S1 /etc/sysctl.d/99-sanity-csqtt.conf")
+		# ours, kept for a csqtt server that ran beside our last instance and went its own way since (B11a verify R1): taken by
+		# the removal's own rules, which keep it while an instance of ours or a csqtt server is there to need it
+		[ -f "$HOST_DROPIN" ] || run_result failed-cleaned "our sysctl drop-in is gone already" "check again"
+		run_phase repair 50
+		: >"$RUN_DIR/switching"
+		host_dropin_drop
+		[ ! -f "$HOST_DROPIN" ] || run_result failed-cleaned "an instance of ours or a csqtt server beside still needs our sysctl drop-in" "check again"
+		run_phase "done" 100
+		run_result ok "" "our sysctl drop-in is gone; forwarding stays on until the next boot"
+		;;
+	*) run_result failed-cleaned "no repair for $rb_code $rb_unit" "update the app" ;;
+	esac
+}
+
+# ── rebuild-manifest: «Починить» for an instance of ours whose manifest was lost (§1.3; P2 B11c) ──────────────────────────
+# From what lives, by the id alone: its two roots and its unit; its openings found by their own names (ufw's commented
+# sqc-<id>, firewalld's zone sqc<id> and policy sqc<id>-fwd, its open.sh). A port it opened in firewalld's default zone cannot
+# be told from one that was open before, so it is not recorded: a later removal leaves it open, never closes another's
+action_rebuild_manifest() {
+	rbm_id=$(plan id)
+	inst_paths "$rbm_id"
+	[ -f "/etc/systemd/system/$in_unit" ] && [ -d "$in_state" ] || run_result failed-cleaned "sqc-$rbm_id is not installed here" "check again"
+	[ ! -f "$in_state/manifest.json" ] || run_result failed-cleaned "sqc-$rbm_id has its manifest" "check again"
+	rbm_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "/etc/systemd/system/$in_unit" | head -n 1)
+	rbm_udp=$(printf '%s\n' "$rbm_flags" | sed -n 's/.*--listen [^ ]*:\([0-9]*\).*/\1/p')
+	rbm_web=$(printf '%s\n' "$rbm_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')
+	run_phase repair 50
+	MF=$in_state/manifest.json MF_ID=$rbm_id
+	MF_OBJECTS="dir $in_state
+dir $in_root
+unit /etc/systemd/system/$in_unit"
+	MF_HOST=''
+	if command -v ufw >/dev/null 2>&1; then
+		for rbm_r in $(ufw status 2>/dev/null | awk -v c="# sqc-$rbm_id" 'index($0, c) && $2 != "(v6)" {print $1}' | sort -u); do
+			MF_HOST="$MF_HOST
+ufw rule=$rbm_r"
+		done
+	fi
+	if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd -q --state 2>/dev/null; then
+		if firewall-cmd --permanent --get-zones 2>/dev/null | tr ' ' '\n' | grep -qx "sqc$rbm_id"; then
+			MF_HOST="$MF_HOST
+firewalld-zone zone=sqc$rbm_id"
+		fi
+		if firewall-cmd --permanent --get-policies 2>/dev/null | tr ' ' '\n' | grep -qx "sqc$rbm_id-fwd"; then
+			MF_HOST="$MF_HOST
+firewalld-policy policy=sqc$rbm_id-fwd"
+		fi
+		case $MF_HOST in *firewalld-*) MF_HOST="$MF_HOST
+firewalld-reload" ;; esac
+	fi
+	if [ -f "$in_state/open.sh" ]; then
+		MF_HOST="$MF_HOST
+iptables-input ports=$rbm_udp/udp,$rbm_web/tcp"
+	fi
+	mf_write || run_result failed-cleaned "cannot write $MF" "check the box's disk"
+	run_phase "done" 100
+	run_result ok "" "the manifest of sqc-$rbm_id is rebuilt: $(printf '%s\n' "$MF_HOST" | awk 'NF {print $1}' | sort | uniq -c | awk '{printf "%s%s x%s", s, $2, $1; s = ", "}')"
+}
+
 # journal <instance id> [lines]: «Журнал», the unit's last lines, for the engine alone (root, stdout), each redacted against
 # nothing secret it could print (ours print no password: it never generates one)
 cmd_journal() {
@@ -1412,6 +1505,8 @@ cmd_exec() {
 	restore) action_restore ;;
 	restart) action_restart ;;
 	remove-foreign) action_remove_foreign ;;
+	repair-box) action_repair_box ;;
+	rebuild-manifest) action_rebuild_manifest ;;
 	*) run_result failed-cleaned "unknown action $(plan action)" "update the app" ;;
 	esac
 }

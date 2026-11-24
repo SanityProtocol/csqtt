@@ -78,6 +78,9 @@ private const val USAGE = """usage: deploy-cli <command>
   journal <target> <id> [lines]   «Журнал»: its unit's last lines
   remove-foreign <target> <name> [purge]   a stock systemd install removed (B11b; <name> as inspect prints it, its unit):
                           every object it has listed first, then removed; its store kept, or with purge, gone
+  repair <target> <code>  «Исправить» a box problem (B11c): B14/B24 a Docker prereq without its helper, B15 the stock
+                          certificate timer beside swg's take-over, S1 our sysctl drop-in left with no instance of ours
+  rebuild-manifest <target> <id>   «Починить» an instance of ours whose manifest was lost (B11c): rebuilt from what lives
   update <target> <id>    an instance of ours to the target's core (B10): stage, switch, verify, rolled back on a failure;
                           then its connection read back (the same passwords and pin) and checked from here
 exit: 0 done · 2 usage · 3 the host key changed (both fingerprints printed) · 4 an SSH failure (its kind printed)
@@ -111,8 +114,9 @@ private fun dispatch(args: Array<String>): Int {
         args.size == 3 && args[0] == "update" -> withSession(File(args[1])) { session, p -> update(session, p, File(args[1]), args[2]) }
         args.size in 3..4 && args[0] == "remove" && (args.size == 3 || args[3] == "purge") ->
             withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], if (args.size == 4) "purge" else "remove") }
-        args.size == 3 && args[0] in setOf("restore", "restart") ->
+        args.size == 3 && args[0] in setOf("restore", "restart", "rebuild-manifest") ->
             withSession(File(args[1])) { session, p -> maintain(session, p, File(args[1]), args[2], args[0]) }
+        args.size == 3 && args[0] == "repair" -> withSession(File(args[1])) { session, p -> repairBox(session, p, File(args[1]), args[2]) }
         args.size in 3..4 && args[0] == "remove-foreign" && (args.size == 3 || args[3] == "purge") ->
             withSession(File(args[1])) { session, p -> removeForeign(session, p, File(args[1]), args[2], args.size == 4) }
         args.size in 3..4 && args[0] == "journal" -> withSession(File(args[1])) { session, p ->
@@ -620,6 +624,7 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
         "remove" -> com.csqtt.deploy.run.Maintenance.remove(install, purge = false)
         "purge" -> com.csqtt.deploy.run.Maintenance.remove(install, purge = true)
         "restart" -> com.csqtt.deploy.run.Maintenance.restart(install)
+        "rebuild-manifest" -> com.csqtt.deploy.run.Maintenance.rebuildManifest(install)
         else -> {
             if (coreRunStopped(report)) return 6
             val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
@@ -647,8 +652,39 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
         }
     }
     val code = follow(runner, coordinator, runId, before)
-    if (code != 0 || verb == "remove" || verb == "purge") return code
+    if (code != 0 || verb == "remove" || verb == "purge" || verb == "rebuild-manifest") return code
     return readBack(root, id, p.prop("host").orEmpty(), null)
+}
+
+/** «Исправить» a box problem (P2 B11c): inspected, the problem with that code found, its repair run. */
+private fun repairBox(session: SshSession, p: Properties, target: File, code: String): Int {
+    val remote = session.asRemote()
+    val root = RootRunner(remote, Privilege.detect(remote, p.getProperty("sudo_password")))
+    val result = root.runScript(Bundle.bytes("lib/marker.sh") + Bundle.bytes("inspect.sh"), emptyList(), deadlineMs = 60_000)
+    val report = LineCodec.parse(result.stdoutText) as? Report.Complete ?: return 4.also { println("inspection: report broken") }
+    val problem = Classifier.classify(Inventory.from(report.lines)).problems.firstOrNull { it.code == code }
+        ?: return 2.also { println("no box problem $code on this box") }
+    val plan = com.csqtt.deploy.run.BoxRepair.plan(problem) ?: return 2.also { println("$code has no repair: ${problem.detail}") }
+    println("will: repair $code (${problem.subject}): ${problem.detail}")
+    val runner = Runner(remote, root)
+    val coordinator = coordinator(target)
+    val runId = Runner.newRunId()
+    val before = coordinator.state
+    coordinator.move(DeployState.Running(runId))
+    when (val outcome = runner.start(runId, plan)) {
+        is StartOutcome.Started -> {}
+        is StartOutcome.Busy -> {
+            coordinator.move(if (outcome.activeRunId.isNotEmpty()) DeployState.Running(outcome.activeRunId) else before)
+            println("busy: run ${outcome.activeRunId} holds the box (attach follows it)")
+            return 8
+        }
+        is StartOutcome.Refused -> {
+            coordinator.move(before)
+            println("refused: ${outcome.reason}")
+            return 7
+        }
+    }
+    return follow(runner, coordinator, runId, before)
 }
 
 /** A stock systemd install removed (P2 B11b): inspected, its every object listed as the app lists them, then the run. */

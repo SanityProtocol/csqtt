@@ -53,8 +53,11 @@ data class Installation(
         get() = units.firstOrNull()?.id ?: containers.firstOrNull()?.name ?: stores.firstOrNull()?.dir ?: procs.firstOrNull()?.exe ?: "?"
 }
 
-/** A problem of the box rather than of one installation (B9 two servers on one port, B14 a prereq without its helper…). */
-data class BoxProblem(val code: String, val detail: String)
+/**
+ * A problem of the box rather than of one installation (B9 two servers on one port, B14 a prereq without its helper…).
+ * [subject]: the unit a repair acts on (B14, B24, B15), "" for the rest.
+ */
+data class BoxProblem(val code: String, val detail: String, val subject: String = "")
 
 class Classification(val installations: List<Installation>, val problems: List<BoxProblem>) {
     /** Docker is installed and was not asked (stopped): an installation it may hold looks like a leftover, and is not one. */
@@ -372,14 +375,21 @@ object Classifier {
         // B14/B24: a unit docker.service requires whose helper is gone takes Docker down at the next boot
         inv.dockerRequires.forEach { required ->
             inv.units.find { it.id == required && it.execPresent == false }?.let {
-                problems += BoxProblem(if (required.startsWith("mrtt")) "B24" else "B14", "$required: ${it.exec} is missing")
+                problems += BoxProblem(if (required.startsWith("mrtt")) "B24" else "B14", "$required: ${it.exec} is missing", required)
             }
         }
         // B15: swg's instance on the stock port while the stock install still has its renewal timer on
         val swgOnStock = installs.any { it.owner == Owner.SWG_BARE && it.claims.udpPort == 46000 }
         if (swgOnStock && installs.any { it.owner == Owner.APP_STANDARD && it.state in setOf(InstallState.DORMANT, InstallState.STOPPED) } &&
             inv.units.any { it.id == "csqtt-letsencrypt.timer" && it.active == "active" }) {
-            problems += BoxProblem("B15", "swg-panel took over the stock install, whose certificate timer still runs")
+            problems += BoxProblem("B15", "swg-panel took over the stock install, whose certificate timer still runs", "csqtt-letsencrypt.timer")
+        }
+        // S1, ours: our sysctl drop-in left with no instance of ours and no csqtt server beside to keep it for (B11a verify R1):
+        // kept while a stock or swg server ran, that server went its own way, and it turns forwarding on at every boot for nobody
+        val dropIn = "/etc/sysctl.d/99-sanity-csqtt.conf"
+        if (inv.files.any { it.path == dropIn } && installs.none { it.owner == Owner.OURS && it.units.isNotEmpty() } &&
+            inv.procs.none { it.comm in setOf("csqtt", "csqtt25", "csqtt-server", "csqtt-swg") }) {
+            problems += BoxProblem("S1", "our sysctl drop-in is left with no instance of ours: it turns forwarding on at every boot", dropIn)
         }
         // B17: csqtt1 held by a program that is not the stock server, on a box with a stock install, whose every start deletes
         // csqtt1 (a box with no stock install has nobody to take it away)

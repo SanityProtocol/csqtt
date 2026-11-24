@@ -152,6 +152,23 @@ object Maintenance {
     fun idOf(install: com.csqtt.deploy.inspect.Installation): String = UpdateRun.idOf(install)
         ?: install.stores.firstNotNullOfOrNull { Regex("^/var/lib/sanityprotocol/csqtt/([0-9a-f]{6})$").find(it.dir)?.groupValues?.get(1) }
         ?: throw IllegalArgumentException("${install.name} is not an instance of ours")
+
+    /** «Починить» for an instance of ours whose manifest was lost (§1.3; P2 B11c): rebuilt from its live objects, by the id. */
+    fun rebuildManifest(install: com.csqtt.deploy.inspect.Installation): RunPlan =
+        RunPlan("rebuild-manifest", linkedMapOf("id" to idOf(install)))
+}
+
+/**
+ * «Исправить» for the box problems that have a repair (§1.3 "Box problems"; P2 B11c): B14/B24, a Docker prereq unit whose
+ * helper is gone, which takes Docker down at its next start; B15, the stock certificate timer still running beside swg-panel's
+ * take-over; S1, our sysctl drop-in left with no instance of ours (B11a verify R1). The run re-checks the condition before it
+ * changes anything.
+ */
+object BoxRepair {
+    fun plan(problem: com.csqtt.deploy.inspect.BoxProblem): RunPlan? =
+        if (problem.code in com.csqtt.deploy.plan.Manager.REPAIRABLE && problem.subject.isNotEmpty()) {
+            RunPlan("repair-box", linkedMapOf("code" to problem.code, "unit" to problem.subject))
+        } else null
 }
 
 /** What the app needs to connect to an instance and to open its panel; [certSha256] pins the panel (null: not readable). */

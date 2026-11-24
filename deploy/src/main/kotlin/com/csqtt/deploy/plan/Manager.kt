@@ -74,8 +74,11 @@ data class Offer(val action: Action, val recommended: Boolean = false, val folde
 /** One line of the list: the installation, what it is to us, what may be done, and why nothing may when nothing may. */
 data class Entry(val installation: Installation, val compatibility: Compatibility, val offers: List<Offer>, val note: String?)
 
-/** A box problem with what the app can do about it (§1.3 "Box problems"): B14 and B15 get «Исправить», B9 and B17 a name. */
-data class BoxIssue(val code: String, val detail: String, val repairable: Boolean)
+/**
+ * A box problem with what the app can do about it (§1.3 "Box problems"): B14 and B15 get «Исправить», B9 and B17 a name.
+ * [subject]: the unit its repair acts on (BoxRepair's plan carries it).
+ */
+data class BoxIssue(val code: String, val detail: String, val repairable: Boolean, val subject: String = "")
 
 object Manager {
     private val STOCK = setOf(Owner.APP_STANDARD, Owner.APP_SIDE, Owner.SIDE_TOOL)
@@ -98,12 +101,19 @@ object Manager {
         classification.installations.map { entry(it, classification, carried, inv) }
 
     /**
-     * Every box problem, named (B6 review F10): B14, B24 and B15 get «Исправить»; the rest are said, never dropped, so the
-     * user learns why an offer is missing (B10's foreign holder of a claimed port, B11's interrupted install…).
+     * Every box problem, named (B6 review F10): B14, B24, B15 and our own S1 get «Исправить»; the rest are said, never dropped,
+     * so the user learns why an offer is missing (B10's foreign holder of a claimed port, B11's interrupted install…).
      */
     fun boxIssues(classification: Classification): List<BoxIssue> = classification.problems.map { problem ->
-        BoxIssue(problem.code, problem.detail, repairable = problem.code in setOf("B14", "B24", "B15"))
+        BoxIssue(problem.code, problem.detail, repairable = problem.code in REPAIRABLE && problem.subject.isNotEmpty(), subject = problem.subject)
     }
+
+    /** The box problems «Исправить» has a run for (BoxRepair). */
+    val REPAIRABLE = setOf("B14", "B24", "B15", "S1")
+
+    /** An instance of ours whose manifest is gone (wiped by hand): its unit there, its state dir without manifest.json (§1.3). */
+    fun manifestLost(install: Installation): Boolean = install.owner == Owner.OURS && install.units.isNotEmpty() &&
+        install.stores.any { it.dir.startsWith("/var/lib/sanityprotocol/csqtt/") && "manifest.json" !in it.files }
 
     /** M-150 first, whatever the line (B6 review F3): a build newer than the carried one is never updated or repaired. */
     fun compatibility(install: Installation, carried: Version): Compatibility {
@@ -178,6 +188,10 @@ object Manager {
     private fun ours(install: Installation, compatibility: Compatibility, classification: Classification, carried: Version,
         inv: Inventory): Entry {
         heldBy(install, classification, inv)?.let { return held(install, compatibility, it) }
+        // the manifest lost: «Починить» rebuilds it from the live objects by the id, whatever the build; removal is bounded by
+        // our names, as always (§1.3)
+        if (manifestLost(install)) return Entry(install, compatibility, listOf(Offer(Action.REPAIR, recommended = true), Offer(Action.REMOVE)),
+            "Манифест экземпляра потерян: «Починить» соберёт его заново")
         val newer = compatibility == Compatibility.NEWER_THAN_APP
         val installed = Version.parse(install.build?.version.orEmpty())
         val update = !newer && installed != null && carried > installed
