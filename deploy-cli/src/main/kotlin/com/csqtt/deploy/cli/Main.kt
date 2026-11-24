@@ -517,10 +517,8 @@ private fun create(session: SshSession, p: Properties, target: File, words: List
         rootfsChoice(preflight, inventory, core, p) ?: return 2
     } else null
     val plan = Proposer.createPlan(proposal, classification)
-    val dockerWill = if (rootfs != null) com.csqtt.deploy.run.DockerMode.hostChanges(preflight) + when (val source = rootfs.source) {
-        is com.csqtt.deploy.run.DockerMode.Source.Present -> "Файловая система образа уже на сервере"
-        is com.csqtt.deploy.run.DockerMode.Source.Fetch -> "Сервер скачает файловую систему образа: ${source.url}"
-        is com.csqtt.deploy.run.DockerMode.Source.Upload -> "Файловая система образа уйдёт на сервер отсюда (${rootfs.pin.bytes / 1024} КБ)"
+    val dockerWill = if (rootfs != null) {
+        com.csqtt.deploy.run.DockerMode.hostChanges(preflight) + com.csqtt.deploy.run.DockerMode.sourceWill(rootfs)
     } else emptyList()
     (plan.will + CreateRun.hostChanges(preflight, proposal) + dockerWill).forEach { println("will: $it") }
     plan.unchanged.forEach { println("unchanged: $it") }
@@ -682,8 +680,15 @@ private fun maintain(session: SshSession, p: Properties, target: File, id: Strin
             if (coreRunStopped(report)) return 6
             val corePath = p.prop("core") ?: return 2.also { println("the target names no core=<file>") }
             val core = Core(File(corePath).readBytes(), p.prop("core_version") ?: return 2.also { println("the target names no core_version=") })
+            val preflight = Preflight.from(report.lines)
             val rootfs = if (com.csqtt.deploy.run.UpdateRun.inDocker(install)) {
-                rootfsChoice(Preflight.from(report.lines), inventory, core, p) ?: return 2
+                // a kept store of an instance in Docker comes back in Docker: refused as a create is, its «Будет» a create's
+                // Docker lines (B13c review F4)
+                com.csqtt.deploy.run.DockerMode.refusal(preflight)?.let { return 2.also { _ -> println("refused: Docker: $it") } }
+                rootfsChoice(preflight, inventory, core, p)?.also { choice ->
+                    (com.csqtt.deploy.run.DockerMode.hostChanges(preflight) + com.csqtt.deploy.run.DockerMode.sourceWill(choice))
+                        .forEach { println("will: $it") }
+                } ?: return 2
             } else null
             com.csqtt.deploy.run.Maintenance.restore(install, core, rootfs)
         }

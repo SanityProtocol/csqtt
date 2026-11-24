@@ -169,7 +169,12 @@ object UpdateRun {
         // an instance in Docker (P2 B13c): no unit to re-check; its new image stands on the root filesystem the plan names
         if (install.units.isEmpty() && install.containers.isNotEmpty()) {
             val choice = checkNotNull(rootfs) { "an update in Docker needs its root filesystem" }
+            // the host's copy of its build, as the inspection hashed it: another phone's update since fails this one cleaned
+            // (M-150; B13c review F3)
+            val bin = "/opt/sanityprotocol/csqtt/$id/current/csqtt-server"
+            val sha = inv.exeAt(bin)?.sha
             return RunPlan("update", linkedMapOf("id" to id, "version" to core.version, "core_sha" to core.sha256) +
+                (if (sha != null) mapOf("expect_bin" to bin, "expect_sha" to sha) else emptyMap()) +
                 CreateRun.dockerKeys(choice), core = core.bytes, rootfs = CreateRun.upload(choice))
         }
         val unit = install.units.first()

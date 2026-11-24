@@ -86,6 +86,13 @@ object DockerMode {
         return null
     }
 
+    /** Where the root filesystem comes from, for a «Будет» (a create's, an update's, a restore's). */
+    fun sourceWill(choice: RootfsChoice): String = when (val source = choice.source) {
+        is Source.Present -> "Файловая система образа уже на сервере"
+        is Source.Fetch -> "Сервер скачает файловую систему образа: ${source.url}"
+        is Source.Upload -> "Файловая система образа уйдёт на сервер отсюда (${choice.pin.bytes / 1024} КБ)"
+    }
+
     /** What a Docker create changes beyond a create's host changes, for its «Будет». */
     fun hostChanges(preflight: Preflight): List<String> {
         val docker = preflight.facts("docker")

@@ -241,4 +241,45 @@ class DockerTest {
         assertTrue("\"\$RUNS\"/*/core \"\$RUNS\"/*/rootfs 2>/dev/null" in runSh)
         assertTrue("|| { rm -rf \"\$di_ctx\"; cr_fail \"Docker would not build the image\"; }" in body("dk_image"))
     }
+
+    @Test
+    fun aDockerUpdateReChecksTheBuildTheInspectionSaw() {
+        // B13c review F3: the host's copy of its build, hashed by the inspection, re-checked by the run (M-150: another phone's
+        // update since fails this one cleaned)
+        val sha = "a".repeat(64)
+        val inv = inventory(*oursInDocker("0a1b2c"),
+            "CSQTT_INV|exe|sha=$sha|path=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server|size=1|label=|caption=0|startup=|swg=0|mrtt=0|ctr=0",
+            "CSQTT_INV|bin|path=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server|sha=$sha")
+        val install = Classifier.classify(inv).installations.single()
+        val plan = UpdateRun.plan(install, inv, Core(ByteArray(1), "2.7.0"), RootfsChoice(checkNotNull(Rootfs.pin("amd64")), DockerMode.Source.Present)).planText()
+        assertTrue(plan, "\nexpect_bin=/opt/sanityprotocol/csqtt/0a1b2c/current/csqtt-server\n" in "\n$plan" && "\nexpect_sha=$sha\n" in "\n$plan")
+        assertEquals("Файловая система образа уже на сервере", DockerMode.sourceWill(RootfsChoice(checkNotNull(Rootfs.pin("amd64")), DockerMode.Source.Present)))
+    }
+
+    @Test
+    fun aDockerInstanceHoldsUnderCutsAndLeavesNoImageBehind() {
+        // B13c review F6: the build that runs is its container's image, which must be the one `current` names
+        assertTrue("{{.State.Running}} {{.Config.Image}}" in body("up_running") && "readlink \"\$up_root/current\"" in body("up_running"))
+        val back = body("up_back")
+        assertTrue(back, back.indexOf("up_start >/dev/null 2>&1") in 0 until back.indexOf("rm -f \"\$UP_PENDING\""))
+        val restart = body("action_restart")
+        assertTrue(restart, "!= \"\$rt_img\" ]; then" in restart && "run_cmd dk_run \"\$rt_ctr\" \"\$rt_img\"" in restart)
+        // F2: the record names its boot; a Docker record from an earlier boot whose new build's container came back goes, the
+        // store kept; a verified restart drops it
+        assertTrue("boot=%s\\n" in body("action_update"))
+        assertTrue(body("up_recover").contains("/proc/sys/kernel/random/boot_id"))
+        assertTrue(restart, "rm -f \"\$in_state/update.pending\"" in restart)
+        // F1: a cut update's image with its directory; every release's image at a removal; the root filesystems swept by layer;
+        // the update's stage rewrites no root filesystem line
+        val recover = body("up_recover")
+        assertTrue(recover, "dk_image_rm \"sanity-csqtt:\${rc_new##*/}\"" in recover)
+        val down = body("inst_take_down")
+        assertTrue(down, "for in_r in \"\$in_root\"/releases/*/; do" in down && "dk_rootfs_sweep" in down)
+        assertTrue("dk_rootfs_sweep" in body("up_prune"))
+        assertFalse("s|^# rootfs .*|" in body("action_update"))
+        // F4: a restore asks Docker nothing while it is stopped; F5: its docker file is its own object
+        val restore = body("action_restore")
+        assertTrue(restore, "[ \$rs_dk_live = 1 ] && docker container inspect" in restore)
+        assertTrue(restore, restore.indexOf("mf_add file \"\$in_state/docker\"") in 0 until restore.indexOf(">\"\$in_state/docker\""))
+    }
 }

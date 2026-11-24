@@ -862,6 +862,13 @@ dk_image_rm() {
 	return 0
 }
 
+# every root filesystem image of ours through dk_image_rm: each goes once no image of ours stands on it (after an update
+# across a pin change the older one is named nowhere any more: B13c review F1)
+dk_rootfs_sweep() {
+	for dr_t in $(docker images --format '{{.Repository}}:{{.Tag}}' sanity-csqtt-rootfs 2>/dev/null); do dk_image_rm "$dr_t"; done
+	return 0
+}
+
 # the last lines a container wrote, for a result's cause
 dk_lines() { docker logs --tail 5 "$1" 2>&1 | tr '\n' ' ' | cut -c1-300; }
 
@@ -1235,9 +1242,10 @@ up_prune() {  # the release before stays for one more update; older ones go (an 
 		up_r=${up_r%/}
 		[ "$up_r" = "$up_new" ] || [ "$up_r" = "$up_old" ] || {
 			rm -rf "$up_r"
-			[ $up_docker = 0 ] || { dk_image_rm "sanity-csqtt:${up_r##*/}"; dk_image_rm "$(sed -n 's/^# rootfs //p' "$up_state/docker")"; }
+			[ $up_docker = 0 ] || dk_image_rm "sanity-csqtt:${up_r##*/}"
 		}
 	done
+	[ $up_docker = 0 ] || dk_rootfs_sweep
 }
 
 # The instance's server stopped and started on the build `current` names (P2 B13c): its unit, or, in Docker, its container made
@@ -1261,7 +1269,9 @@ up_start() {
 	run_cmd dk_run "$up_ctr" "$us_img" "$up_state" "$us_fw" $up_flags
 }
 up_running() {
-	if [ $up_docker = 1 ]; then [ "$(docker inspect -f '{{.State.Running}}' "$up_ctr" 2>/dev/null)" = true ]
+	# (in Docker the build that runs is its container's image, which must be the one `current` names: B13c review F6)
+	if [ $up_docker = 1 ]; then
+		[ "$(docker inspect -f '{{.State.Running}} {{.Config.Image}}' "$up_ctr" 2>/dev/null)" = "true sanity-csqtt:$(basename "$(readlink "$up_root/current")")" ]
 	else systemctl is-active --quiet "$up_unit"; fi
 }
 up_where_runs() {  # for a result's cause: the server's state word
@@ -1289,12 +1299,15 @@ up_back() {
 		ln -sfn "$up_old" "$up_root/current.new" && mv -Tf "$up_root/current.new" "$up_root/current" ||
 			run_result failed-not-rolled-back "$1; cannot switch back to $up_old" "«Починить»: $up_where"
 	fi
-	[ "$up_new" = "$up_old" ] || rm -rf "$up_new"
-	rm -f "$UP_PENDING"
+	# the server back on the build before first, its record dropped only then (a cut between them must find the record:
+	# B13c review F6); the failed build's directory and image after it (Docker refuses an image a container, stopped or not,
+	# still uses: the zoo, 13:48 UTC)
 	up_start >/dev/null 2>&1
-	# the failed build's image once its container is made again on the build before (Docker refuses an image a container,
-	# stopped or not, still uses: the zoo, 13:48 UTC)
-	[ $up_docker = 0 ] || [ "$up_new" = "$up_old" ] || dk_image_rm "sanity-csqtt:${up_new##*/}"
+	rm -f "$UP_PENDING"
+	if [ "$up_new" != "$up_old" ]; then
+		rm -rf "$up_new"
+		[ $up_docker = 0 ] || dk_image_rm "sanity-csqtt:${up_new##*/}"
+	fi
 	up_why=$(inst_verify "$up_check" "$up_udp" "$up_web" "$up_iface" "$up_secret")
 	[ -z "$up_why" ] || run_result failed-not-rolled-back \
 		"$1; the rollback did not serve either: $up_why ($(up_where_runs), current -> $(readlink "$up_root/current"))" \
@@ -1324,9 +1337,20 @@ up_recover() {
 	: >"$RUN_DIR/switching"
 	rm -rf "$up_copy.new" "$up_state/.restore"
 	if [ "$(readlink "$up_root/current")" != "$rc_new" ] || [ "$rc_new" = "$rc_old" ]; then
-		[ "$rc_new" = "$rc_old" ] || [ "$rc_new" = "$(readlink "$up_root/current")" ] || rm -rf "$rc_new"
-		rm -f "$UP_PENDING"
 		up_running || up_start
+		rm -f "$UP_PENDING"
+		if [ "$rc_new" != "$rc_old" ] && [ "$rc_new" != "$(readlink "$up_root/current")" ]; then
+			rm -rf "$rc_new"
+			[ $up_docker = 0 ] || dk_image_rm "sanity-csqtt:${rc_new##*/}"
+		fi
+		return 0
+	fi
+	# In Docker, a record from an earlier boot whose new build's container came back with it: the store has served on that
+	# build since, so the copy is no rollback point any more (a unit's ExecStartPost drops such a record at its first start
+	# outside a run, B10 verify N1). The record goes; the run goes on from that build (B13c review F2)
+	if [ $up_docker = 1 ] && [ "$(sed -n 's/^boot=//p' "$UP_PENDING" | head -n 1)" != "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] &&
+		up_running; then
+		rm -f "$UP_PENDING"
 		return 0
 	fi
 	up_old=$rc_old up_new=$rc_new
@@ -1398,9 +1422,6 @@ action_update() {
 		# shellcheck disable=SC2086 # the instance's own flags
 		up_said=$(docker run --rm --network none "$up_img" /opt/sanityprotocol/csqtt-server $up_flags --version 2>&1 | head -n 1)
 		[ "$up_said" = "csqtt $up_version CSQTT-WIRE-3" ] || cr_fail "the new core does not run in its image: $up_said" "check the box's architecture"
-		# the docker file names the root filesystem the image now stands on
-		sed "s|^# rootfs .*|# rootfs sanity-csqtt-rootfs:$(printf '%.8s' "$(plan rootfs_sha256)")|" "$up_state/docker" >"$up_state/docker.new" &&
-			mv -f "$up_state/docker.new" "$up_state/docker" || cr_fail "cannot write $up_state/docker"
 	fi
 	if [ "$up_new" != "$up_old" ]; then
 		mkdir -p "$up_new" && install -m 755 "$RUN_DIR/core" "$up_new/csqtt-server.new" && mv -f "$up_new/csqtt-server.new" "$up_new/csqtt-server" ||
@@ -1420,7 +1441,8 @@ action_update() {
 	else
 		# recorded, stopped, its store copied aside, `current` flipped
 		up_with=store
-		printf 'old=%s\nnew=%s\n' "$up_old" "$up_new" >"$UP_PENDING.new" && mv -f "$UP_PENDING.new" "$UP_PENDING" ||
+		printf 'old=%s\nnew=%s\nboot=%s\n' "$up_old" "$up_new" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" >"$UP_PENDING.new" &&
+			mv -f "$UP_PENDING.new" "$UP_PENDING" ||
 			{ rm -f "$UP_PENDING.new"; action_cleanup; run_result failed-cleaned "cannot write $UP_PENDING" "check the box's disk"; }
 		up_stop
 		if ! up_copy_store 2>"$RUN_DIR/copy.err"; then
@@ -1534,9 +1556,13 @@ inst_take_down() {
 			run_cmd docker stop -t 15 "$in_ctr"
 			run_cmd docker rm -f "$in_ctr"
 		fi
-		for in_i in "$(sed -n 's/^# image //p' "$in_state/docker")" "$(sed -n 's/^# rootfs //p' "$in_state/docker")"; do
-			dk_image_rm "$in_i"
-		done
+		# (every release's image: the one before an update is kept with its release, B13c review F1; a restore taking a cut
+		# restore down keeps them, the same again)
+		if [ "${IN_KEEP_IMAGES:-0}" = 0 ]; then
+			dk_image_rm "$(sed -n 's/^# image //p' "$in_state/docker")"
+			for in_r in "$in_root"/releases/*/; do [ ! -d "$in_r" ] || dk_image_rm "sanity-csqtt:$(basename "$in_r")"; done
+			dk_rootfs_sweep
+		fi
 		# (its lines are unit.saved's now, for «Восстановить»: the file alone marks a live instance, review F4)
 		rm -f "$in_state/docker"
 	fi
@@ -1589,16 +1615,23 @@ action_restore() {
 	inst_paths "$rs_id"
 	[ -f "$in_state/unit.saved" ] || run_result failed-cleaned "sqc-$rs_id has no kept store to restore" "check again"
 	# a store an instance in Docker kept (P2 B13c): it comes back in Docker, its container made again from today's image
-	rs_docker=0 rs_ctr=sanity-csqtt-$rs_id
+	rs_docker=0 rs_ctr=sanity-csqtt-$rs_id rs_dk_live=0
 	! grep -q '^# docker ' "$in_state/unit.saved" || rs_docker=1
-	if [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ] || { [ $rs_docker = 1 ] && docker container inspect "$rs_ctr" >/dev/null 2>&1; }; then
+	# (Docker is asked only while it runs: a stopped one's socket would start it, and with it every container that has a
+	# restart policy, unrecorded and unannounced: B13c review F4; a systemd restore never asks it)
+	[ $rs_docker = 0 ] || ! systemctl is-active --quiet docker.service || rs_dk_live=1
+	if [ -e "$in_root" ] || [ -f "/etc/systemd/system/$in_unit" ] || { [ $rs_dk_live = 1 ] && docker container inspect "$rs_ctr" >/dev/null 2>&1; }; then
 		systemctl is-active --quiet "$in_unit" && run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
-		[ "$(docker inspect -f '{{.State.Running}}' "$rs_ctr" 2>/dev/null)" != true ] || run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
+		[ $rs_dk_live = 0 ] || [ "$(docker inspect -f '{{.State.Running}}' "$rs_ctr" 2>/dev/null)" != true ] ||
+			run_result failed-cleaned "sqc-$rs_id is installed already" "check again"
 		# a restore (or a removal) cut off before its end left part of it, its flags still kept: what it made goes first, by
 		# the id, as a removal takes it, and the restore runs again (B11a review F4)
 		run_phase "take down" 5
 		: >"$RUN_DIR/switching"
+		# (the images a cut restore made stay for this one: the same again, B13c review)
+		IN_KEEP_IMAGES=1
 		inst_take_down "$rs_id"
+		IN_KEEP_IMAGES=0
 		MF_OBJECTS="dir $in_state" MF_HOST=''
 		mf_write
 		rm -f "$RUN_DIR/switching"
@@ -1667,6 +1700,8 @@ action_restore() {
 		# shellcheck disable=SC2086 # the flags it ran with
 		rs_said=$(docker run --rm --network none "$rs_image" /opt/sanityprotocol/csqtt-server $rs_flags --version 2>&1 | head -n 1)
 		[ "$rs_said" = "csqtt $rs_version CSQTT-WIRE-3" ] || cr_fail "the core does not run in its image: $rs_said" "check the box's architecture"
+		# (its own object: a failed or cancelled restore takes it, never leaving it beside unit.saved: B13c review F5)
+		mf_add file "$in_state/docker"
 		printf '# docker %s\n# image %s\n# rootfs %s\nExecStart=/opt/sanityprotocol/csqtt-server %s\n' "$rs_ctr" "$rs_image" "$rs_rootfs" \
 			"$rs_flags" >"$in_state/docker" || cr_fail "cannot write $in_state/docker"
 	else
@@ -1720,8 +1755,22 @@ action_restart() {
 		rt_flags=$(sed -n 's|^ExecStart=[^ ]*csqtt-server ||p' "$in_state/docker" | head -n 1)
 		run_phase switch 50
 		: >"$RUN_DIR/switching"
-		run_cmd docker restart -t 15 "$rt_ctr" ||
-			run_result failed-not-rolled-back "$rt_ctr did not start: $(dk_lines "$rt_ctr")" "read its journal («Журнал»)"
+		# on the build `current` names: a container of another image (an update cut between its flip and its container) is
+		# made again, never restarted on the build before (B13c review F6)
+		rt_img=sanity-csqtt:$(basename "$(readlink "$in_root/current")")
+		if [ "$(docker inspect -f '{{.Config.Image}}' "$rt_ctr" 2>/dev/null)" != "$rt_img" ]; then
+			sed "s|^# image .*|# image $rt_img|" "$in_state/docker" >"$in_state/docker.new" && mv -f "$in_state/docker.new" "$in_state/docker" ||
+				run_result failed-cleaned "cannot write $in_state/docker" "check the box's disk"
+			docker rm -f "$rt_ctr" >/dev/null 2>&1
+			rt_fw=none
+			[ ! -f "$in_state/open.sh" ] || rt_fw=iptables
+			# shellcheck disable=SC2086 # the instance's own flags
+			run_cmd dk_run "$rt_ctr" "$rt_img" "$in_state" "$rt_fw" $rt_flags ||
+				run_result failed-not-rolled-back "$rt_ctr did not start: $(dk_lines "$rt_ctr")" "read its journal («Журнал»)"
+		else
+			run_cmd docker restart -t 15 "$rt_ctr" ||
+				run_result failed-not-rolled-back "$rt_ctr did not start: $(dk_lines "$rt_ctr")" "read its journal («Журнал»)"
+		fi
 	else
 		[ -f "/etc/systemd/system/$in_unit" ] || run_result failed-cleaned "sqc-$rt_id is not installed here" "check again"
 		rt_check=$in_unit
@@ -1737,6 +1786,9 @@ action_restart() {
 		"$(printf '%s\n' "$rt_flags" | sed -n 's/.*--web-port \([0-9]*\).*/\1/p')" "$(printf '%s\n' "$rt_flags" | sed -n 's/.*--iface \([^ ]*\).*/\1/p')" \
 		"$(inst_env "/var/lib/sanityprotocol/csqtt/$rt_id" CSQTT_WEB_SECRET_PATH)")
 	[ -z "$rt_why" ] || run_result failed-not-rolled-back "$rt_why" "read its journal («Журнал»)"
+	# (in Docker no unit's ExecStartPost drops an update's record: a verified restart on the build `current` names does,
+	# B13c review F2)
+	[ "${rt_ctr:-}" = "" ] || rm -f "$in_state/update.pending"
 	run_phase "done" 100
 	run_result ok "" ""
 }
