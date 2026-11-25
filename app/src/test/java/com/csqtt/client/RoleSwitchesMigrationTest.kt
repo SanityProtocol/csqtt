@@ -1,24 +1,25 @@
 package com.csqtt.client
 
 import androidx.datastore.preferences.core.MutablePreferences
-import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import com.csqtt.client.Store253Snapshots.asMap
 import com.csqtt.client.Store253Snapshots.changedKeys
 import com.csqtt.client.Store253Snapshots.load
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The roles batch, store step 5: the role becomes «Показывать деплой» (on for an owner or anyone with a server), and the
- * role and the per-profile «Показывать логи» go; a fresh install writes neither switch.
+ * The role and the tab switches are gone (the roles batch, then P3 B0): store step 5 removes the role and the per-profile
+ * «Показывать логи», step 7 the two app-wide switches, and «Сервер» follows what the store holds (K4, userHasServer).
  */
 class RoleSwitchesMigrationTest {
-    /** A store the B5e1…B5e3b builds left (version 4): step 5 alone runs. */
-    private fun atVersion4(json: String): MutablePreferences =
-        load(json).also { it[intPreferencesKey("store_schema_version")] = 4 }
+    /** A store the B5e1…B5e3b builds left (version 4): step 5 and the later ones run. */
+    private fun atVersion(version: Int, json: String): MutablePreferences =
+        load(json).also { it[intPreferencesKey("store_schema_version")] = version }
 
     private fun migrate(prefs: MutablePreferences): Pair<Map<String, Any>, Map<String, Any>> {
         val before = asMap(prefs)
@@ -27,32 +28,20 @@ class RoleSwitchesMigrationTest {
     }
 
     @Test
-    fun `an owner gets the deploy tab, and the role goes`() {
-        val (before, after) = migrate(
-            atVersion4("""{"strings": {"peer": "203.0.113.5"}, "booleans": {"ui_owner_mode": true}}"""),
-        )
-        assertEquals(setOf("ui_owner_mode", "show_deploy_tab", "store_schema_version"), changedKeys(before, after))
-        assertEquals(true, after["show_deploy_tab"])
+    fun `the role goes and no switch is written, and an owner still has a server`() {
+        val prefs = atVersion(4, """{"strings": {"peer": "203.0.113.5"}, "booleans": {"ui_owner_mode": true}}""")
+        val (before, after) = migrate(prefs)
+        assertEquals(setOf("ui_owner_mode", "store_schema_version"), changedKeys(before, after))
         assertNull(after["ui_owner_mode"])
+        assertNull(after["show_deploy_tab"])
         assertNull(after["show_logs_tab"])
+        assertTrue(SettingsStore.userHasServer(prefs))
     }
 
     @Test
-    fun `a participant with a server gets the deploy tab`() {
-        val (_, after) = migrate(
-            atVersion4(
-                """{"strings": {"csqtt_link_3": "${Store253Snapshots.participantLink}", "deploy_ip_7": "198.51.100.7"},
-                    "ints": {"active_profile": 3},
-                    "booleans": {"csqtt_link_mode_3": true, "ui_owner_mode": false}}""",
-            ),
-        )
-        assertEquals(true, after["show_deploy_tab"])
-        assertNull(after["ui_owner_mode"])
-    }
-
-    @Test
-    fun `a participant without one gets neither switch, and every per-profile logs choice goes`() {
-        val prefs = atVersion4(
+    fun `every per-profile logs choice goes`() {
+        val prefs = atVersion(
+            4,
             """{"strings": {"csqtt_link_3": "${Store253Snapshots.participantLink}", "deploy_ip_4": " "},
                 "ints": {"active_profile": 3},
                 "booleans": {"csqtt_link_mode_3": true, "ui_owner_mode": false, "participant_show_logs": true,
@@ -64,39 +53,61 @@ class RoleSwitchesMigrationTest {
                 "store_schema_version"),
             changedKeys(before, after),
         )
-        assertNull(after["show_deploy_tab"])
-        assertNull(after["show_logs_tab"])
+        assertFalse("a link and a blank address are no server", SettingsStore.userHasServer(prefs))
     }
 
     @Test
-    fun `a fresh install has neither switch`() {
+    fun `step 7 removes the two switches an earlier 2_6_0 build stored, and nothing else`() {
+        for (version in listOf(5, 6)) {
+            val prefs = atVersion(
+                version,
+                """{"strings": {"peer": "203.0.113.5"}, "booleans": {"show_deploy_tab": true, "show_logs_tab": false}}""",
+            )
+            val (before, after) = migrate(prefs)
+            assertEquals("from $version", setOf("show_deploy_tab", "show_logs_tab", "store_schema_version"), changedKeys(before, after))
+            assertNull(after["show_deploy_tab"])
+            assertNull(after["show_logs_tab"])
+        }
+    }
+
+    @Test
+    fun `a fresh install has neither switch nor a server`() {
         val prefs = mutablePreferencesOf()
         SettingsStore.migrateStore(prefs)
         assertNull(asMap(prefs)["show_deploy_tab"])
         assertNull(asMap(prefs)["show_logs_tab"])
         assertNull(asMap(prefs)["ui_owner_mode"])
+        assertFalse(SettingsStore.userHasServer(prefs))
     }
 
     @Test
-    fun `with no stored role the active profile's mode decides, and a switch already set is kept`() {
-        val own = migrate(atVersion4("""{"strings": {"peer_2": "192.0.2.2"}, "ints": {"active_profile": 2}}""")).second
-        assertEquals(true, own["show_deploy_tab"])
-        val link = migrate(
-            atVersion4("""{"ints": {"active_profile": 2}, "booleans": {"csqtt_link_mode_2": true}}"""),
-        ).second
-        assertNull(link["show_deploy_tab"])
-        val chosen = migrate(
-            atVersion4("""{"booleans": {"ui_owner_mode": true, "show_deploy_tab": false}}"""),
-        ).second
-        assertEquals(false, chosen["show_deploy_tab"])
-        assertNull(chosen["ui_owner_mode"])
+    fun `the user has a server with a VPS record or a profile that dials an address, whichever profile is open`() {
+        // an own-server profile that is not the open one
+        assertTrue(SettingsStore.userHasServer(load("""{"strings": {"peer_2": "192.0.2.2"}, "ints": {"active_profile": 5}}""")))
+        // a participant who also keeps a VPS record
+        assertTrue(
+            SettingsStore.userHasServer(
+                load(
+                    """{"strings": {"csqtt_link_3": "${Store253Snapshots.participantLink}", "deploy_ip_7": "198.51.100.7"},
+                        "ints": {"active_profile": 3}, "booleans": {"csqtt_link_mode_3": true}}""",
+                ),
+            ),
+        )
+        // a link profile is the owner's server, not the user's: its address counts for nothing
+        assertFalse(
+            SettingsStore.userHasServer(
+                load("""{"strings": {"peer_2": "192.0.2.2", "csqtt_link_2": "${Store253Snapshots.participantLink}"},
+                         "booleans": {"csqtt_link_mode_2": true}}"""),
+            ),
+        )
+        // the secret path alone, written by opening the tab, is no record
+        assertFalse(SettingsStore.userHasServer(load("""{"strings": {"deploy_secret_path_uuid_3": "uuid"}}""")))
     }
 
     @Test
-    fun `step 5 runs once`() {
-        val prefs = atVersion4("""{"booleans": {"ui_owner_mode": true}}""")
+    fun `the steps run once`() {
+        val prefs = atVersion(4, """{"booleans": {"ui_owner_mode": true, "show_deploy_tab": true}}""")
         SettingsStore.migrateStore(prefs)
-        prefs.remove(booleanPreferencesKey("show_deploy_tab"))
         val once = asMap(prefs)
         SettingsStore.migrateStore(prefs)
         assertEquals(once, asMap(prefs))

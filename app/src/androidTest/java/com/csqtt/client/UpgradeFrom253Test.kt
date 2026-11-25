@@ -81,9 +81,11 @@ class UpgradeFrom253Test {
             assertEquals("subpw", subscriptionLink.password)
             assertEquals(7, prefs[intPreferencesKey("vps_ref_7")])
             assertNull(prefs[intPreferencesKey("vps_ref_3")])
-            // the roles batch: the owner role the switch showed became «Показывать деплой»; the role key is gone
-            assertEquals(true, prefs[booleanPreferencesKey("show_deploy_tab")])
+            // the role and the tab switches are gone (the roles batch, P3 B0): «Сервер» follows what the store holds
             assertNull(prefs[booleanPreferencesKey("ui_owner_mode")])
+            assertNull(prefs[booleanPreferencesKey("show_deploy_tab")])
+            assertNull(prefs[booleanPreferencesKey("show_logs_tab")])
+            assertEquals(true, SettingsStore.userHasServer(prefs))
         } finally {
             file.delete()
         }

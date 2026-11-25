@@ -24,8 +24,7 @@ class StoreMigrationsTest {
         val (before, after) = migrate(Store253Snapshots.owner)
         assertEquals(
             // vps_ref: step 2 (B5b2) links its deploy data as record 0
-            // show_deploy_tab: steps 4 and 5 (B5e1, the roles batch) turn the owner role the switch showed into it
-            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref", "show_deploy_tab"),
+            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref"),
             changedKeys(before, after),
         )
         assertNull(after["ui_design"])
@@ -83,7 +82,7 @@ class StoreMigrationsTest {
         // step 3 (B5c1, M-170): the subscription slot becomes the participant link it came from
         assertEquals(
             setOf(
-                "vk_auth_mode_2", "workers_per_hash_2", "store_schema_version", "show_deploy_tab",
+                "vk_auth_mode_2", "workers_per_hash_2", "store_schema_version",
                 "peer_5", "connection_password_local_5", "csqtt_link_5", "csqtt_link_mode_5",
             ),
             changedKeys(before, after),
@@ -106,9 +105,9 @@ class StoreMigrationsTest {
         val (before, after) = migrate(Store253Snapshots.allSlots)
         val expected = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
             .map { if (it == 0) "workers_per_hash" else "workers_per_hash_$it" }
-            .toSet() + "store_schema_version" + "show_deploy_tab"
+            .toSet() + "store_schema_version"
         assertEquals(expected, changedKeys(before, after))
-        assertEquals(setOf(10), expected.minus(setOf("store_schema_version", "show_deploy_tab")).map { after[it] }.toSet())
+        assertEquals(setOf(10), expected.minus("store_schema_version").map { after[it] }.toSet())
     }
 
     @Test
@@ -132,30 +131,32 @@ class StoreMigrationsTest {
     }
 
     @Test
-    fun `steps 4 and 5 turn the role the switch showed, from the active profile, into the deploy tab switch`() {
-        assertEquals(true, migrate(Store253Snapshots.owner).second["show_deploy_tab"])
-        assertNull(migrate(Store253Snapshots.participant).second["show_deploy_tab"])
-        val chosen = Store253Snapshots.participant.replace(
-            "\"booleans\": {", "\"booleans\": {\"ui_owner_mode\": true, ",
-        )
-        val after = migrate(chosen).second
-        assertEquals(true, after["show_deploy_tab"])
-        assertNull(after["ui_owner_mode"])
+    fun `a 2_5_3 store gets no role and no tab switch, and its owner has a server by what it holds`() {
+        for (snapshot in listOf(Store253Snapshots.owner, Store253Snapshots.participant, Store253Snapshots.subscriptionAndToken)) {
+            val after = migrate(snapshot).second
+            assertNull(after["ui_owner_mode"])
+            assertNull(after["show_deploy_tab"])
+            assertNull(after["show_logs_tab"])
+        }
+        assertEquals(true, SettingsStore.userHasServer(load(Store253Snapshots.owner).also(SettingsStore::migrateStore)))
+        assertEquals(false, SettingsStore.userHasServer(load(Store253Snapshots.participant).also(SettingsStore::migrateStore)))
     }
 
     @Test
-    fun `step 4 reads the role before step 3 turns a 2_5_3 subscription slot into a link profile`() {
-        // the active slot is a subscription slot without auto-update: owner mode in 2.5.3, so the switch showed «Владелец»
-        val activeSubscription = Store253Snapshots.subscriptionAndToken.replace(
-            "\"ints\": {", "\"ints\": {\"active_profile\": 5, ",
+    fun `a 2_5_3 subscription slot is the owner's link after step 3, so it alone is no server of the user's`() {
+        // 2.5.3 kept a subscription node in owner mode with its address; step 3 (M-170) makes it a link profile
+        val onlySubscription = load(
+            """{"strings": {"peer_5": "192.0.2.10", "subscription_url_5": "https://sub.example.invalid/s/abc",
+                            "connection_password_local_5": "s"},
+                "ints": {"active_profile": 5}, "booleans": {"default_role_decided": true}}""",
         )
-        val after = migrate(activeSubscription).second
-        assertEquals(true, after["csqtt_link_mode_5"])   // step 3 made it a link profile
-        assertEquals(true, after["show_deploy_tab"])      // the role stays the one shown
+        SettingsStore.migrateStore(onlySubscription)
+        assertEquals(true, asMap(onlySubscription)["csqtt_link_mode_5"])
+        assertEquals(false, SettingsStore.userHasServer(onlySubscription))
     }
 
     @Test
-    fun `step 6 removes the logging switch and the never-read detailed flag, and nothing else`() {
+    fun `step 6 removes the logging switch and the never-read detailed flag`() {
         val prefs = load(
             """{"ints": {"store_schema_version": 5, "active_profile": 2},
                "booleans": {"logging_enabled": false, "detailed_logs": true, "show_logs_tab": true}}""",
@@ -163,10 +164,10 @@ class StoreMigrationsTest {
         val before = asMap(prefs)
         SettingsStore.migrateStore(prefs)
         val after = asMap(prefs)
-        assertEquals(setOf("logging_enabled", "detailed_logs", "store_schema_version"), changedKeys(before, after))
+        // show_logs_tab: step 7 (P3 B0) takes the tab switches out
+        assertEquals(setOf("logging_enabled", "detailed_logs", "show_logs_tab", "store_schema_version"), changedKeys(before, after))
         assertNull(after["logging_enabled"])
         assertNull(after["detailed_logs"])
-        assertEquals(true, after["show_logs_tab"])
         assertEquals(SettingsStore.STORE_SCHEMA, after["store_schema_version"])
     }
 }

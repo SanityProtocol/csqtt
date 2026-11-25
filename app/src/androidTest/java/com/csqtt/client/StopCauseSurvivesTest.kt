@@ -71,7 +71,7 @@ class StopCauseSurvivesTest {
 
             compose.onNodeWithText("Туннель").performClick()
             compose.waitUntil(5_000) { !shown(CAUSE) }
-            compose.onNodeWithText("Подкл.").performClick()
+            compose.onNodeWithText("Главная").performClick()
             compose.waitUntil(5_000) { shown(CAUSE) }
 
             scenario.recreate()

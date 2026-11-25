@@ -8,6 +8,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 class CsqttApplication : Application() {
+    /** What outlives the screens (§4.2 rules 8 and 9): made once, with the process. */
+    internal val owners = AppOwners()
+
     override fun onCreate() {
         super.onCreate()
         // B5g: the log's tail an earlier process left goes in front of this one's; a crash writes this one's

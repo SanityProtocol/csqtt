@@ -3,7 +3,8 @@
 # Usage: ci/test.sh <source tree> <server|client|app|deploy|bundle|e2e> [e2e only: a substring of the case names to run]
 #   server: cargo test of rust-server for the target it ships on (x86_64 musl, built through zig like ci/build-server.sh)
 #   client: cargo test of rust-client on the host target (its sni.rs includes the tree's root domains.txt)
-#   app:    the Gradle unit tests (testDebugUnitTest; AGP 9 has no release unit-test task)
+#   app:    the Gradle unit tests (testDebugUnitTest; AGP 9 has no release unit-test task); among them the strings check
+#           (StringsInResourcesTest: no text for the user in the one design's code, only in res/values/strings.xml)
 #   deploy: deploy v3's engine and command line (pure JVM): :deploy's unit tests, which also run the bundle's POSIX half on
 #           the image's sh (dash), then deploy-cli's installDist and one run of the laid-out command (bundle-check)
 #   bundle: deploy-bundle/'s scripts: shellcheck on each, in the dialect its `shellcheck shell=` line names, BusyBox ash's

@@ -6,12 +6,39 @@
     <string name="app_name">CSQTT</string>
     <string name="widget_disconnected">Отключено</string>
     <string name="widget_toggle_vpn">Переключить VPN</string>
-    <string name="nav_connection">Подкл.</string>
-    <string name="nav_tunnel">Туннель</string>
-    <string name="nav_deploy">Деплой</string>
-    <string name="nav_exceptions">Маршрут</string>
-    <string name="nav_logs">Логи</string>
-    <string name="nav_info">Инфо</string>
+
+    <!-- The one design (2.6.0, P3). Every string a screen under ui/ shows is here (D12): StringsInResourcesTest. -->
+    <string name="brand_name">CSQTT</string>
+    <string name="brand_version">v%1$s</string>
+    <string name="brand_build">сборка SanityProtocol</string>
+    <string name="tab_home">Главная</string>
+    <string name="tab_tunnel">Туннель</string>
+    <string name="tab_server">Сервер</string>
+    <string name="tab_logs">Логи</string>
+    <string name="tab_routes">Маршруты</string>
+    <plurals name="tab_logs_new_errors">
+        <item quantity="one">%1$d новая ошибка</item>
+        <item quantity="few">%1$d новые ошибки</item>
+        <item quantity="many">%1$d новых ошибок</item>
+        <item quantity="other">%1$d новых ошибок</item>
+    </plurals>
+    <string name="action_back">Назад</string>
+    <string name="secret_show">Показать пароль</string>
+    <string name="secret_hide">Скрыть пароль</string>
+    <string name="ping_unit">мс</string>
+    <string name="ping_no_answer">нет ответа</string>
+    <string name="ping_none_figure">—</string>
+    <plurals name="ping_ms_spoken">
+        <item quantity="one">%1$d миллисекунда</item>
+        <item quantity="few">%1$d миллисекунды</item>
+        <item quantity="many">%1$d миллисекунд</item>
+        <item quantity="other">%1$d миллисекунд</item>
+    </plurals>
+    <string name="instance_more">Ещё действия</string>
+    <string name="instance_details">Подробнее</string>
+    <string name="link_invalid">Неверная ссылка CSQTT</string>
+    <string name="link_not_opened">Не удалось открыть ссылку</string>
+    <string name="update_postponed">Обновление отложено на 24 часа</string>
 
     <string name="action_clear">Очистить</string>
     <string name="action_copy">Копировать</string>

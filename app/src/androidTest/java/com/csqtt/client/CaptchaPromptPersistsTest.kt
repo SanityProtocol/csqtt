@@ -80,7 +80,7 @@ class CaptchaPromptPersistsTest {
 
             compose.onNodeWithText("Туннель").performClick()
             compose.waitUntil(5_000) { !shown("Решить капчу") }
-            compose.onNodeWithText("Подкл.").performClick()
+            compose.onNodeWithText("Главная").performClick()
             compose.waitUntil(5_000) { shown("Решить капчу") }
 
             scenario.recreate()

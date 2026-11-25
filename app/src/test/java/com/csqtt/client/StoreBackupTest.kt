@@ -39,7 +39,7 @@ class StoreBackupTest {
             "ints": {"server_peer_port": 46100, "server_web_port": 46102, "vps_ref": 0, "vps_ref_9": 9,
                      "workers_per_hash_3": 30, "vpn_mtu_3": 1280, "active_profile": 3, "battery_saver_percent": 30, "store_schema_version": 2},
             "booleans": {"manual_ports_enabled": true, "csqtt_link_mode_3": true, "auto_pause_on_wifi": true,
-                         "default_role_decided": true, "show_deploy_tab": true, "show_logs_tab": false},
+                         "default_role_decided": true},
             "longs": {"deploy_last_inspection_at": 1761000000000, "connection_generation": 7}}""",
     )
 
@@ -72,8 +72,7 @@ class StoreBackupTest {
             "server_web_port", "vps_ref", "manual_ports_enabled", "deploy_last_inspection_at", "csqtt_link_3",
             "profile_name_3", "workers_per_hash_3", "vpn_mtu_3", "csqtt_link_mode_3", "peer_5", "subscription_url_5",
             "connection_password_local_5", "deploy_ip_9", "vps_ref_9", "theme_mode", "battery_saver_mode",
-            "battery_saver_percent", "auto_pause_on_wifi", "active_profile", "subscription_meta_v1", "show_deploy_tab",
-            "show_logs_tab")) {
+            "battery_saver_percent", "auto_pause_on_wifi", "active_profile", "subscription_meta_v1")) {
             assertEquals(name, sourceMap[name], restored[name])
         }
         // secrets come back encrypted with this phone's key; the connection password as a local value

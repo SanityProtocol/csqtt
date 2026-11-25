@@ -45,7 +45,6 @@ import com.csqtt.client.BatterySaver
 import com.csqtt.client.ui.legacy.dialogs.ImportExportDialog
 import com.csqtt.client.ui.legacy.dialogs.QrScannerDialog
 import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
-import com.csqtt.client.ui.legacy.dialogs.SupportDeveloperDialog
 import com.csqtt.client.ui.legacy.dialogs.TurnSubnetsDialog
 
 @Composable
@@ -60,13 +59,12 @@ fun FloatingToolbar(
     onFingerprintChange: (String) -> Unit,
     autoPauseOnWifi: Boolean,
     onAutoPauseOnWifiChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** The way to «Сервер» for a user who has no server yet (P3 B0: the tab is in the bar only for one who has); null hides it. */
+    onOpenServer: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    // the roles batch: what the app shows, app-wide; how each profile connects follows what it holds (the Туннель tab)
-    val showDeployTab by settingsStore.showDeployTab.collectAsStateWithLifecycle(initialValue = false)
-    val showLogsTab by settingsStore.showLogsTab.collectAsStateWithLifecycle(initialValue = true)
     val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(
         initialValue = CsqttConstants.VkAuth.MODE_CALLS,
     )
@@ -80,7 +78,6 @@ fun FloatingToolbar(
     var isExpanded by rememberSaveable { mutableStateOf(false) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
     var scannedLink by rememberSaveable { mutableStateOf<String?>(null) }
-    var showSupportDeveloperDialog by rememberSaveable { mutableStateOf(false) }
     var showImportExportDialog by rememberSaveable { mutableStateOf(false) }
     var showAutoPauseInfo by rememberSaveable { mutableStateOf(false) }
     var showBatterySaverInfo by rememberSaveable { mutableStateOf(false) }
@@ -116,18 +113,6 @@ fun FloatingToolbar(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         modifier = modifier
     ) {
-        IconButton(
-            onClick = { showSupportDeveloperDialog = true },
-            modifier = Modifier.size(38.dp),
-        ) {
-            Icon(
-                painter = painterResource(id = R.drawable.ic_donate_heart),
-                contentDescription = "Поддержать разработчика",
-                modifier = Modifier.size(24.dp),
-                tint = settingsIconTint,
-            )
-        }
-
         IconButton(
             onClick = { showImportExportDialog = true },
             modifier = Modifier.size(38.dp),
@@ -170,12 +155,6 @@ fun FloatingToolbar(
                 tint = settingsIconTint,
             )
         }
-    }
-
-    if (showSupportDeveloperDialog) {
-        SupportDeveloperDialog(
-            onDismissRequest = { showSupportDeveloperDialog = false }
-        )
     }
 
     if (showImportExportDialog) {
@@ -250,23 +229,6 @@ fun FloatingToolbar(
                             )
                         }
                     }
-
-                    CsqttSettingRow(
-                        title = "Показывать деплой",
-                        checked = showDeployTab,
-                        onCheckedChange = { checked -> scope.launch { settingsStore.saveShowDeployTab(checked) } },
-                    )
-
-                    CsqttSettingRow(
-                        title = "Показывать логи",
-                        checked = showLogsTab,
-                        onCheckedChange = { checked -> scope.launch { settingsStore.saveShowLogsTab(checked) } },
-                    )
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                    )
 
                     // participants switch profiles too (one per link), as in V2. The real profiles only, and a last item
                     // that adds one (M-97)
@@ -365,6 +327,15 @@ fun FloatingToolbar(
 
                     if (!csqttLinkMode) {
                         SheetAction("Выбор TURN подсетей", onClick = { showTurnSubnetsDialog = true })
+                    }
+
+                    // P3 B0: «Показывать деплой» is gone, so someone without a server opens «Сервер» from here; the tab
+                    // stays in the bar while it is open, and for good once a server is there
+                    if (onOpenServer != null) {
+                        SheetAction("Установить свой сервер", onClick = {
+                            isExpanded = false
+                            onOpenServer()
+                        })
                     }
 
                     // M-91 (B5g): the check on demand; «Инфо», which held it, has had no way in since 2.5.0 (review F1).

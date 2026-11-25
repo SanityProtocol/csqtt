@@ -39,7 +39,7 @@ class MigrationRunsOnceTest {
         val prefs = mutablePreferencesOf()
         SettingsStore.migrateStore(prefs)
         assertEquals(
-            // no show_deploy_tab nor show_logs_tab: Логи shown, Деплой hidden (the roles batch, D28)
+            // no tab switch: «Логи» for everyone, «Сервер» for a user with a server (D28, D29)
             mapOf(
                 "csqtt_link_mode" to true, "default_role_decided" to true,
                 "store_schema_version" to SettingsStore.STORE_SCHEMA,

@@ -3,7 +3,7 @@
 <!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 -->
 
 <resources>
-    <color name="app_background">#131316</color>
+    <color name="app_background">#101216</color>
 
     <!-- Google Pixel / Material You Widget Styling - Dark Theme -->
     <color name="widget_card_background">#1B1B1F</color>

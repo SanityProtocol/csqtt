@@ -95,7 +95,7 @@ class HashCheckSurvivesDialogTest {
             compose.waitUntil(5_000) { shown("Проверяем...") }
             compose.onNodeWithText("Сохранить").performClick()
             compose.waitUntil(5_000) { !shown("Проверяем...") }
-            compose.onNodeWithText("Подкл.").performClick()
+            compose.onNodeWithText("Главная").performClick()
             scenario.recreate()
             compose.waitUntil(10_000) { shown("Туннель") }
             runBlocking { store.saveActiveProfile(OTHER) }

@@ -58,7 +58,7 @@ class WifiOfferPersistsTest {
 
             compose.onNodeWithText("Туннель").performClick()
             compose.waitUntil(5_000) { !shown(question) }
-            compose.onNodeWithText("Подкл.").performClick()
+            compose.onNodeWithText("Главная").performClick()
             compose.waitUntil(5_000) { shown(question) }
 
             scenario.recreate()

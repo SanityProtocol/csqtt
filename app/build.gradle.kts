@@ -191,6 +191,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
+    // NavModel (P3 B0): the ViewModel with a SavedStateHandle; androidx.activity brings it already, named here as it is used
+    implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.11.0")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("com.hierynomus:sshj:0.38.0") {
         exclude(group = "org.bouncycastle", module = "bcprov-jdk18on")

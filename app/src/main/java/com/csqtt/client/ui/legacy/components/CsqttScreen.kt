@@ -7,13 +7,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
@@ -21,18 +19,8 @@ import androidx.compose.ui.semantics.semantics
 import com.csqtt.client.ui.legacy.design.CsqttSizes
 import com.csqtt.client.ui.legacy.design.CsqttSpacing
 
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Icon
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.csqtt.client.R
 
-internal val LocalCsqttHeaderActions = staticCompositionLocalOf<(@Composable RowScope.() -> Unit)?> { null }
-
+/** A classic screen's frame. The header (the wordmark, the version, the header buttons) is the shell's since P3 B0. */
 @Composable
 fun CsqttScreen(
     modifier: Modifier = Modifier,
@@ -41,8 +29,6 @@ fun CsqttScreen(
     actions: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val headerActions = LocalCsqttHeaderActions.current
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -56,48 +42,6 @@ fun CsqttScreen(
                 .widthIn(max = CsqttSizes.ContentMaxWidth),
             verticalArrangement = Arrangement.spacedBy(CsqttSpacing.Md),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(1.dp),
-                    horizontalAlignment = Alignment.Start
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_csqtt_logo),
-                        contentDescription = "CSQTT",
-                        tint = Color.Unspecified,
-                        modifier = Modifier.height(22.dp)
-                    )
-                    // SanityProtocol build: the version (from the build, in the drawn subtitle's gradient) reads first;
-                    // the build's own name is a small, quiet line under it
-                    Text(
-                        text = "v${com.csqtt.client.BuildConfig.VERSION_NAME} by amurcanov",
-                        style = androidx.compose.ui.text.TextStyle(
-                            brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
-                                listOf(Color(0xFF45B7FF), Color(0xFF2087FF), Color(0xFF075BFF))
-                            ),
-                        ),
-                        fontSize = 14.sp,
-                        lineHeight = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    Text(
-                        text = "сборка SanityProtocol",
-                        fontSize = 9.sp,
-                        lineHeight = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-
-                headerActions?.let { Row(content = it) }
-            }
             if (!title.isNullOrBlank() || actions != null) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),

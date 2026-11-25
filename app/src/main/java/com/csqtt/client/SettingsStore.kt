@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -321,12 +322,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val DEPLOY_SERVER_NAME = profileString("deploy_server_name", VPS)
         private val DEPLOY_PROFILE_NAMES_CLEANED = booleanPreferencesKey("deploy_profile_names_cleaned_v2")
         private val DEFAULT_ROLE_DECIDED = booleanPreferencesKey("default_role_decided")
-        // M-75's role (B5e1, written by store step 4); step 5 turns it into SHOW_DEPLOY_TAB and removes it
+        // M-75's role (B5e1, written by store step 4); step 5 removes it
         private val UI_OWNER_MODE = booleanPreferencesKey("ui_owner_mode")
-        // the roles batch: what the app shows, app-wide — «Показывать логи» (on when absent) and «Показывать деплой» (off
-        // when absent: a fresh install is participant-first, D28). How each profile connects follows what it holds
-        private val SHOW_LOGS_TAB = booleanPreferencesKey("show_logs_tab")
-        private val SHOW_DEPLOY_TAB = booleanPreferencesKey("show_deploy_tab")
         // M-79: VK accounts by user id, each token encrypted (VkAccounts); a device credential, never in a backup
         private val VK_ACCOUNTS = stringPreferencesKey("vk_accounts_v1")
         private val DEPLOY_LOGIN = profileString("deploy_login", VPS)
@@ -493,13 +490,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         @Volatile
         internal var cachedCsqttLinkMode: Boolean? = null
 
-        // the tab switches as last read in this process: a recreated screen starts from them, not from the defaults,
-        // so its nav bar does not change on the first frames (roles batch review F2)
+        // whether the user has a server, as last read in this process: a recreated screen starts from it, so its tab bar
+        // does not change on the first frames (roles batch review F2)
         @Volatile
-        internal var cachedShowDeployTab: Boolean? = null
-
-        @Volatile
-        internal var cachedShowLogsTab: Boolean? = null
+        internal var cachedHasServer: Boolean? = null
 
         @Volatile
         internal var cachedWorkersPerHash: Int? = null
@@ -558,7 +552,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 6
+        internal const val STORE_SCHEMA = 7
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -604,9 +598,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     step { if (vpsRecordExists(prefs, profile)) prefs[getProfileKey(VPS_REF, profile)] = profile }
                 }
             }
-            // step 4 records the role the switch showed: read before step 3 turns a 2.5.3 subscription slot (owner mode
-            // there) into a link profile (B5e1 review F3)
-            val activeLinkModeShown = prefs[getProfileKey(CSQTT_LINK_MODE, prefs[ACTIVE_PROFILE] ?: 0)] == true
             if (from < 3) {
                 // 2.6.0, B5c1: a subscription slot is the owner's link, not an owner-mode slot holding the owner's hashes
                 // as its own (M-170)
@@ -614,22 +605,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     step { subscriptionSlotToLink(prefs, profile) }
                 }
             }
-            if (from < 4) {
-                // 2.6.0, B5e1 (M-75): the role the switch showed becomes the user's own, kept when profiles change
-                step {
-                    if (prefs[UI_OWNER_MODE] == null) prefs[UI_OWNER_MODE] = !activeLinkModeShown
-                }
-            }
             if (from < 5) {
-                // 2.6.0, the roles batch: the role becomes «Показывать деплой», on for an owner or anyone with a server (a
-                // VPS record with an address); else nothing is written, so a fresh install shows Логи and not Деплой
-                // (D28). Logs are shown to everyone now, so the per-profile participant choice goes
-                step {
-                    val owner = prefs[UI_OWNER_MODE] ?: !activeLinkModeShown
-                    val hasServer = (CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX)
-                        .any { !prefs[getProfileKey(DEPLOY_IP, it)].isNullOrBlank() }
-                    if (prefs[SHOW_DEPLOY_TAB] == null && (owner || hasServer)) prefs[SHOW_DEPLOY_TAB] = true
-                }
+                // 2.6.0. Steps 4 and 5 (B5e1, the roles batch) carried the role 2.5.3's switch showed, as `ui_owner_mode`
+                // and then as «Показывать деплой». The tab bar now follows what the store holds (userHasServer, P3 B0), so
+                // only the removals are left: the role, and the per-profile participant choice of «Логи» (D29: everyone)
                 prefs.remove(UI_OWNER_MODE)
                 for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
                     prefs.remove(booleanPreferencesKey(slotKeyName("participant_show_logs", profile)))
@@ -639,6 +618,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 // 2.6.0, B5g: the log is always recorded, so «Активное логирование» goes; «detailed_logs» was never read
                 prefs.remove(booleanPreferencesKey("logging_enabled"))
                 prefs.remove(booleanPreferencesKey("detailed_logs"))
+            }
+            if (from < 7) {
+                // 2.6.0, P3 B0: «Показывать деплой» and «Показывать логи» go (K4: «Сервер» for anyone with a server; D29:
+                // «Логи» for everyone); a store an earlier 2.6.0 build wrote them into loses them here
+                prefs.remove(booleanPreferencesKey("show_deploy_tab"))
+                prefs.remove(booleanPreferencesKey("show_logs_tab"))
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
         }
@@ -724,8 +709,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
                 BATTERY_SAVER_MODE to StoredKind.STRING, BATTERY_SAVER_PERCENT to StoredKind.INT,
                 THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
-                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT, SHOW_LOGS_TAB to StoredKind.BOOLEAN,
-                SHOW_DEPLOY_TAB to StoredKind.BOOLEAN,
+                UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT,
             ).associate { (key, kind) -> key.name to kind }
         }
 
@@ -824,6 +808,15 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         /** The VPS record [profile] links, or null. */
         internal fun linkedVps(prefs: Preferences, profile: Int): Int? =
             prefs[getProfileKey(VPS_REF, profile)]?.takeIf { it in profileIndices }
+
+        /**
+         * K4 (D20): the user has a server of their own, whichever profile is open: a VPS record, or a profile that dials
+         * a server by its address (not a link). «Сервер» is in the tab bar for them; a participant has four tabs (D28).
+         */
+        internal fun userHasServer(prefs: Preferences): Boolean = profileIndices.any { index ->
+            vpsRecordExists(prefs, index) ||
+                (prefs[getProfileKey(CSQTT_LINK_MODE, index)] != true && !prefs[getProfileKey(PEER, index)].isNullOrBlank())
+        }
 
         /**
          * The VPS record a deploy-form write of [profile] goes to: its own, or on the first write a free one (the profile's
@@ -1219,9 +1212,9 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             return free
         }
 
-        /** «Добавить профиль» (the roles batch): the new profile waits for a server with «Показывать деплой» on, else a link. */
+        /** «Добавить профиль» (the roles batch): the new profile waits for a server when the user has one, else for a link. */
         internal fun newProfileKeys(prefs: MutablePreferences): Int? =
-            addProfileKeys(prefs, linkMode = prefs[SHOW_DEPLOY_TAB] != true)
+            addProfileKeys(prefs, linkMode = !userHasServer(prefs))
 
         /**
          * The roles batch: a profile's mode follows what it holds. While it holds nothing for its mode (no link in link
@@ -2094,15 +2087,9 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     // Last in the class, after every property: Kotlin assigns them top to bottom, and the collectors below start on
     // other threads at once. Above the flows they read, a collector could run before its flow was assigned and call
     // collect on null, which crashed the app at launch on slower phones (Redmi).
-    /** «Показывать логи», app-wide (the roles batch): on unless turned off. */
-    val showLogsTab: Flow<Boolean> = dataStore.data.map { prefs ->
-        (prefs[SHOW_LOGS_TAB] ?: true).also { cachedShowLogsTab = it }
-    }
-
-    /** «Показывать деплой», app-wide: off unless turned on; store step 5 turned it on for owners and anyone with a server. */
-    val showDeployTab: Flow<Boolean> = dataStore.data.map { prefs ->
-        (prefs[SHOW_DEPLOY_TAB] ?: false).also { cachedShowDeployTab = it }
-    }
+    /** K4: the user has a server (userHasServer), so «Сервер» is in the tab bar. */
+    val hasServer: Flow<Boolean> = dataStore.data.map { prefs -> userHasServer(prefs) }.distinctUntilChanged()
+        .onEach { cachedHasServer = it }
 
     init {
         // the cached values are the screens' (the active profile): only an Active store starts them
@@ -2395,14 +2382,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             importParticipantLinkKeys(prefs, link, intoNew, activate)?.let { written = it to profileDisplayName(prefs, it) }
         }
         return written
-    }
-
-    suspend fun saveShowLogsTab(show: Boolean) {
-        dataStore.edit { it[SHOW_LOGS_TAB] = show }
-    }
-
-    suspend fun saveShowDeployTab(show: Boolean) {
-        dataStore.edit { it[SHOW_DEPLOY_TAB] = show }
     }
 
     /**

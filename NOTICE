@@ -16,3 +16,7 @@ Third-party components keep their own licences, which ship in the app under app/
 The client core's DPI split (rust-client/dpi_split.rs) is ported from Gooby, https://github.com/Endlad2/Gooby,
 Copyright 2026 Gooby contributors, under the Apache License 2.0. Its LICENSE and NOTICE ship as
 app/src/main/assets/licenses/Gooby-LICENSE.txt and Gooby-NOTICE.txt; the file's header says what changed.
+
+The app's outline icons (app/src/main/java/com/csqtt/client/ui/design/Icons.kt) are Lucide's, https://lucide.dev,
+Copyright (c) Lucide Icons and Contributors, under the ISC License, some of them derived from Feather, Copyright (c)
+2013-present Cole Bemis, under the MIT License. Both licences ship as app/src/main/assets/licenses/Lucide-LICENSE.txt.

@@ -103,14 +103,17 @@ class ProfileModeFollowsContentTest {
     }
 
     @Test
-    fun `a new profile waits for a server with the deploy tab shown, else for a link`() {
-        val shown = load("""{"strings": {"peer": "192.0.2.1"}, "booleans": {"show_deploy_tab": true}}""")
-        val added = SettingsStore.newProfileKeys(shown)!!
-        assertFalse(mode(shown, added))
-        val hidden = load("""{"strings": {"peer": "192.0.2.1"}}""")
-        val addedHidden = SettingsStore.newProfileKeys(hidden)!!
-        assertTrue(mode(hidden, addedHidden))
-        val off = load("""{"strings": {"peer": "192.0.2.1"}, "booleans": {"show_deploy_tab": false}}""")
-        assertTrue(mode(off, SettingsStore.newProfileKeys(off)!!))
+    fun `a new profile waits for a server when the user has one, else for a link`() {
+        val owner = load("""{"strings": {"peer": "192.0.2.1"}}""")
+        assertFalse(mode(owner, SettingsStore.newProfileKeys(owner)!!))
+        val withRecord = load(
+            """{"strings": {"csqtt_link": "${Store253Snapshots.participantLink}", "deploy_ip_4": "203.0.113.40"},
+                "booleans": {"csqtt_link_mode": true}}""",
+        )
+        assertFalse(mode(withRecord, SettingsStore.newProfileKeys(withRecord)!!))
+        val participant = load(
+            """{"strings": {"csqtt_link": "${Store253Snapshots.participantLink}"}, "booleans": {"csqtt_link_mode": true}}""",
+        )
+        assertTrue(mode(participant, SettingsStore.newProfileKeys(participant)!!))
     }
 }

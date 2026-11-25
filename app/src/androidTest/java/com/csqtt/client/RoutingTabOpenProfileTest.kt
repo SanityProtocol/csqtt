@@ -63,8 +63,8 @@ class RoutingTabOpenProfileTest {
         TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(RUN, null, emptyList()))
         TunnelManager.serverRoutingActive.value = true
         ActivityScenario.launch(MainActivity::class.java).use {
-            compose.waitUntil(10_000) { shown("Маршрут") }
-            compose.onNodeWithText("Маршрут").performClick()
+            compose.waitUntil(10_000) { shown("Маршруты") }
+            compose.onNodeWithText("Маршруты").performClick()
             compose.waitUntil(5_000) { shown(SYNCED) && !shown(CONTROLS) }
 
             // another profile opened during the run: its own controls

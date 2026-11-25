@@ -44,11 +44,15 @@
         android:theme="@style/Theme.CSQTTClient"
         android:networkSecurityConfig="@xml/network_security_config">
 
+        <!-- enableOnBackInvokedCallback: predictive Back (§4.2 rule 4) for this activity, whose Back goes through the shell's
+             one handler; an attribute of the activity from Android 14, where the system's Back preview is -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize"
+            android:enableOnBackInvokedCallback="true"
             android:exported="true"
-            android:launchMode="singleTop">
+            android:launchMode="singleTop"
+            tools:targetApi="34">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
