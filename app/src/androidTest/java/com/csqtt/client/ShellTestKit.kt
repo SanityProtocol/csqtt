@@ -74,11 +74,12 @@ internal object ShellTestKit {
     }
 
     /**
-     * What a process death leaves of the screen: the saved-instance state and nothing held in memory by the activity.
-     * The view models go before the recreate, so the new activity builds its [com.csqtt.client.ui.shell.NavModel] from the
-     * saved state alone, as after a kill.
+     * The activity again from its saved state alone: the view models go before the recreate, so the new activity builds
+     * its [com.csqtt.client.ui.shell.NavModel] from what was saved. It is as near to a process death as one process gets,
+     * and no nearer: whatever only a new process changes (the hash an overlay's saved state is found by) is pinned in
+     * NavModelTest instead.
      */
-    fun ActivityScenario<MainActivity>.recreateAsAfterProcessDeath() {
+    fun ActivityScenario<MainActivity>.recreateFromSavedStateAlone() {
         onActivity { it.viewModelStore.clear() }
         recreate()
     }

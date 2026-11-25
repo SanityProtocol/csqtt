@@ -133,7 +133,7 @@ internal fun Chip(text: String, modifier: Modifier = Modifier, kind: ChipKind = 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (dot) Box(Modifier.size(8.dp).background(ink, CircleShape))
-        Text(text, style = if (small) Type.tag else Type.chip, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(text, style = if (small) Type.chipSmall else Type.chip, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -152,7 +152,7 @@ internal fun Facts(items: List<Pair<FactKind, String>>, modifier: Modifier = Mod
                     FactKind.Info -> Icons.info to colors.accentText
                 }
                 Icon(icon, contentDescription = null, modifier = Modifier.padding(top = 1.dp).size(18.dp), tint = tint)
-                Text(text, style = Type.body, color = colors.text)
+                Text(text, style = Type.fact, color = colors.text)
             }
         }
     }
@@ -259,8 +259,13 @@ internal fun TermLine(text: String, modifier: Modifier = Modifier, kind: TermKin
         TermKind.Info -> Ink.termInfo
     }
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (time != null) Text(time, style = Type.mono, color = Ink.termMuted)
-        Text(text, style = Type.mono, color = ink, modifier = Modifier.weight(1f))
-        if (repeats > 1) Text("×$repeats", style = Type.tag, color = Ink.termMuted)
+        if (time != null) Text(time, style = Type.term, color = Ink.termMuted)
+        Text(text, style = Type.term, color = ink, modifier = Modifier.weight(1f))
+        if (repeats > 1) {
+            Text(
+                "×$repeats", style = Type.tag, color = Ink.termCount,
+                modifier = Modifier.background(Ink.termCountBg, RoundedCornerShape(8.dp)).padding(horizontal = 6.dp),
+            )
+        }
     }
 }

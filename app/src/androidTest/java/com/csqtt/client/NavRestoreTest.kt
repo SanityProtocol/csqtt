@@ -11,7 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.csqtt.client.ShellTestKit.recreateAsAfterProcessDeath
+import com.csqtt.client.ShellTestKit.recreateFromSavedStateAlone
 import com.csqtt.client.ShellTestKit.savedStateBytes
 import com.csqtt.client.ui.shell.SecretDrafts
 import com.csqtt.client.ui.shell.Tab
@@ -27,7 +27,8 @@ import org.junit.runner.RunWith
 
 /**
  * APP-PLAN §4.2 rules 2 and 11 for the shell: the open tab, a screen, a sheet with a draft in it and a dialog stay
- * through a tab change, a recreate and a process death; a password being typed is in memory and never in what the
+ * through a tab change, a recreate and a return from the saved state alone (the view models gone, as after a process
+ * death; what only a new process changes is NavModelTest's); a password being typed is in memory and never in what the
  * system keeps of the activity.
  */
 @RunWith(AndroidJUnit4::class)
@@ -72,7 +73,7 @@ class NavRestoreTest {
     }
 
     @Test
-    fun theTabTheOverlaysAndADraftOutliveATabChangeARecreateAndAProcessDeath() {
+    fun theTabTheOverlaysAndADraftOutliveATabChangeARecreateAndTheLossOfTheViewModels() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             compose.waitUntil(10_000) { shown("Логи") }
             compose.onNodeWithText("Логи").performClick()
@@ -100,9 +101,9 @@ class NavRestoreTest {
             assertEquals("the password draft outlives a recreate", SECRET, SecretDrafts[ShellTestKit.SECRET_KEY])
             assertTrue("the password is on the screen after a recreate", passwordIsMasked())
 
-            // a process death: only the saved state comes back
-            scenario.recreateAsAfterProcessDeath()
-            everythingIsStillThere(scenario, "after a process death")
+            // as after a process death: the view models are gone, only the saved state comes back
+            scenario.recreateFromSavedStateAlone()
+            everythingIsStillThere(scenario, "from the saved state alone")
 
             // a tab asked for from outside the bar (a notification's tap) shows it: the screen over the tabs closes,
             // the sheet and the question stay until they are answered

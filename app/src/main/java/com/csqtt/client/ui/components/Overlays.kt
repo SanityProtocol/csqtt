@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -163,10 +164,13 @@ internal fun ScreenFrame(title: String, onBack: () -> Unit, modifier: Modifier =
 internal fun MessageHost(messages: Messages, modifier: Modifier = Modifier) {
     val message by messages.current.collectAsStateWithLifecycle()
     val shown = message ?: return
+    // the owner's clock: a message raised while no screen drew it has less time left, or none
+    val left = remember(shown.id) { messages.remaining(shown) }
     LaunchedEffect(shown.id) {
-        delay(if (shown.action != null) 8_000 else 4_000)
+        delay(left)
         messages.dismiss(shown.id)
     }
+    if (left <= 0) return
     Row(
         modifier = modifier
             .padding(horizontal = 12.dp)
@@ -179,10 +183,10 @@ internal fun MessageHost(messages: Messages, modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(shown.text, style = Type.body, color = Color.White, modifier = Modifier.weight(1f))
+        Text(shown.text, style = Type.message, color = Color.White, modifier = Modifier.weight(1f))
         shown.action?.let { action ->
             Text(
-                action, style = Type.bodyStrong, color = Ink.messageAction,
+                action, style = Type.messageAction, color = Ink.messageAction,
                 modifier = Modifier.clickable(role = Role.Button) { messages.act(shown.id) },
             )
         }

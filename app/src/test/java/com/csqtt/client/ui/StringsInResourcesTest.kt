@@ -6,15 +6,16 @@ import org.junit.Test
 import java.io.File
 
 /**
- * D12 (P3-PLAN §1.1): the one design's text is in res/values/strings.xml, never in a composable. The app is Russian
- * now, so a string literal with a Cyrillic letter under ui/ is text for the user; classic's screens (ui/legacy) go with
- * their cards and are not read. Comments may say anything.
+ * D12 (P3-PLAN §1.1): the one design's text is in res/values/strings.xml, never in a composable. What this reads: the
+ * string literals under ui/ outside ui/legacy (classic's screens go with their cards), and it finds the Russian ones —
+ * the app is Russian now, so a literal with a Cyrillic letter is text for the user. A Latin literal («OK») is not found:
+ * that one is the reviewer's. Comments may say anything.
  */
 class StringsInResourcesTest {
     private val root = File("src/main/java/com/csqtt/client/ui")
 
     @Test
-    fun `no screen of the one design carries its text in code`() {
+    fun `no screen of the one design carries Russian text in its code`() {
         assertTrue("the test runs from the app module: ${root.absolutePath}", root.isDirectory)
         val files = root.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }

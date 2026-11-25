@@ -12,7 +12,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -20,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import com.csqtt.client.R
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.design.Type
+import com.csqtt.client.ui.design.pluralText
 
 /** How a ping reads: the figure, [bars] of three, and a colour, so the colour is never the only cue (F-A11y). */
 internal enum class PingGrade(val bars: Int) { Good(3), Fair(2), Slow(1), Bad(0), NoAnswer(0) }
@@ -46,7 +46,7 @@ internal fun MsPill(ms: Int?, modifier: Modifier = Modifier) {
         PingGrade.NoAnswer -> colors.faint
     }
     val figure = ms?.takeIf { grade != PingGrade.NoAnswer }
-    val spoken = if (figure != null) pluralStringResource(R.plurals.ping_ms_spoken, figure, figure) else stringResource(R.string.ping_no_answer)
+    val spoken = if (figure != null) pluralText(R.plurals.ping_ms_spoken, figure) else stringResource(R.string.ping_no_answer)
     Row(
         modifier.clearAndSetSemantics { contentDescription = spoken },
         horizontalArrangement = Arrangement.spacedBy(6.dp),

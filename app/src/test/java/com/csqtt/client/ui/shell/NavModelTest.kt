@@ -88,6 +88,19 @@ class NavModelTest {
     }
 
     @Test
+    fun `an overlay's key and hash are the same in every process`() {
+        // Compose finds a group's saved state by the hash of its key, and after a process death that is all a sheet's
+        // draft is found by. A data class's default hash takes its enum's, which is the enum's identity: new in each
+        // process. So the key is strings, and the hash is pinned here to numbers no process changes.
+        val dest = Dest("profiles", Layer.Sheet, "3")
+        assertEquals("profiles\u00003", dest.stateKey)
+        assertEquals(-1002263574, "profiles".hashCode())
+        assertEquals(-1102620228, dest.hashCode())
+        assertEquals(dest, Dest("profiles", Layer.Sheet, "3"))
+        assertFalse(dest == Dest("profiles", Layer.Dialog, "3"))
+    }
+
+    @Test
     fun `the saved state holds only what a Bundle takes`() {
         val handle = SavedStateHandle()
         NavModel(handle).apply {

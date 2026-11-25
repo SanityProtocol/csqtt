@@ -35,7 +35,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -52,6 +51,7 @@ import com.csqtt.client.ui.components.MessageHost
 import com.csqtt.client.ui.components.TabBadge
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.design.Icons
+import com.csqtt.client.ui.design.pluralText
 import kotlin.math.abs
 
 /**
@@ -115,7 +115,7 @@ internal fun Shell(
     // a screen that was closed starts fresh the next time it is opened
     val drawn = remember { mutableSetOf<String>() }
     SideEffect {
-        val open = screens.mapTo(HashSet()) { it.stateKey() }
+        val open = screens.mapTo(HashSet()) { it.stateKey }
         (drawn - open).forEach { holder.removeState(it) }
         drawn.clear()
         drawn.addAll(open)
@@ -129,7 +129,7 @@ internal fun Shell(
         if (screen == null) {
             holder.SaveableStateProvider(TABS) { TabsPage(hasServer, headerActions, tabContent, barHeight) { barHeight = it } }
         } else {
-            holder.SaveableStateProvider(screen.stateKey()) { Routes.find(screen.route)?.invoke(screen) { nav.close(screen) } }
+            holder.SaveableStateProvider(screen.stateKey) { Routes.find(screen.route)?.invoke(screen) { nav.close(screen) } }
         }
         // 16 dp over the bar, or over a keyboard taller than it; over a screen, which has no bar, over the system's edge
         val bar = with(density) { (if (screen == null) barHeight else 0).toDp() }
@@ -142,14 +142,13 @@ internal fun Shell(
                 .padding(bottom = 16.dp),
         )
         // each sheet and dialog is its own keyed group, so one stays itself, with its drafts, when the stack under or
-        // around it changes; a key inside an `if` would be matched by position and rebuilt
+        // around it changes (a key inside an `if` would be matched by position and rebuilt), and after a process death
+        // (its key is strings: Dest.stateKey)
         for (dest in nav.stack.filter { it.layer != Layer.Screen }) {
-            key(dest) { Routes.find(dest.route)?.invoke(dest) { nav.close(dest) } }
+            key(dest.stateKey) { Routes.find(dest.route)?.invoke(dest) { nav.close(dest) } }
         }
     }
 }
-
-private fun Dest.stateKey(): String = "screen:$route:$arg"
 
 private const val TABS = "tabs"
 
@@ -243,8 +242,9 @@ private fun tabBadges(): Map<Tab, TabBadge> {
     val running by TunnelManager.running.collectAsStateWithLifecycle()
     val badges = HashMap<Tab, TabBadge>()
     if (unread > 0) {
-        val spoken = pluralStringResource(R.plurals.tab_logs_new_errors, unread, unread)
-        badges[Tab.Logs] = TabBadge(unread.toString(), warn = !running, description = spoken)
+        val spoken = pluralText(R.plurals.tab_logs_new_errors, unread)
+        // the pill is as wide as the tab's corner lets it be: past 99 it says so, TalkBack still reads the count
+        badges[Tab.Logs] = TabBadge(if (unread > 99) MANY else unread.toString(), warn = !running, description = spoken)
     }
     for (question in questions.asReversed()) {
         badges[question.place.tab()] = TabBadge(QUESTION_MARK, warn = true, description = question.title)
@@ -253,3 +253,4 @@ private fun tabBadges(): Map<Tab, TabBadge> {
 }
 
 private const val QUESTION_MARK = "!"
+private const val MANY = "99+"

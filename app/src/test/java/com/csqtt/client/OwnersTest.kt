@@ -36,6 +36,23 @@ class OwnersTest {
     }
 
     @Test
+    fun `a message's time runs from when it was raised, whoever draws it`() {
+        var clock = 1_000L
+        val messages = Messages(now = { clock })
+        messages.show("Скопировано")
+        val plain = messages.current.value!!
+        assertEquals(4_000L, messages.remaining(plain))
+        clock += 3_000
+        assertEquals(1_000L, messages.remaining(plain))
+        // raised with no screen to draw it, found hours later: its time is up
+        clock += 3_600_000
+        assertEquals(0L, messages.remaining(plain))
+
+        messages.show("Порядок изменён", action = "Отменить") {}
+        assertEquals("a message with an action stays longer", 8_000L, messages.remaining(messages.current.value!!))
+    }
+
+    @Test
     fun `a message's action runs once and takes the message away`() {
         val messages = Messages()
         var undone = 0

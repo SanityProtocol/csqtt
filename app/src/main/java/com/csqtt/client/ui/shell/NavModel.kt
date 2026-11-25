@@ -24,7 +24,21 @@ internal enum class Layer { Screen, Sheet, Dialog }
  * One open overlay: a route of the table ([Routes]), its layer and a short argument, an id or a pasted link. Never a
  * list (the saved state has a size limit), never a password (§4.2 rule 2: see [SecretDrafts]).
  */
-internal data class Dest(val route: String, val layer: Layer, val arg: String = "")
+internal data class Dest(val route: String, val layer: Layer, val arg: String = "") {
+    /**
+     * The key of this overlay's group and of its saved state: a route is open once, so its name and argument say which.
+     * Strings, because the key must be the same in every process: Compose finds a group's saved state again by the hash
+     * of its key, and after a process death that is all that is left to find a sheet's draft by.
+     */
+    val stateKey: String get() = route + SEPARATOR + arg
+
+    /** The same in every process too, for any use of a [Dest] as a key: an enum's own hash is its identity, new each time. */
+    override fun hashCode(): Int = 31 * (31 * route.hashCode() + layer.ordinal) + arg.hashCode()
+
+    private companion object {
+        const val SEPARATOR = "\u0000"
+    }
+}
 
 /**
  * Where the user is (§4.2 rule 2): the open tab and the overlays over it. It outlives a recreate as a ViewModel and a

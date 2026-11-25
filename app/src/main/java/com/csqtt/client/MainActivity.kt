@@ -276,7 +276,9 @@ class MainActivity : ComponentActivity() {
                 release = release,
                 onPostpone = {
                     AppUpdates.postpone(appSettingsStore, release)
-                    owners.messages.show(getString(R.string.update_postponed))
+                    // a toast, over classic's «Настройки» when the check was started there; the shell's own message
+                    // is drawn under a dialog (B6b moves the toasts, once «Настройки» is the shell's)
+                    showRaisedToast(getString(R.string.update_postponed), Toast.LENGTH_SHORT)
                 },
                 onUpdate = {
                     AppUpdates.accept(appSettingsStore, release)
@@ -316,7 +318,7 @@ class MainActivity : ComponentActivity() {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).apply { addCategory(Intent.CATEGORY_BROWSABLE) })
         } catch (_: Exception) {
-            owners.messages.show(getString(R.string.link_not_opened))
+            showRaisedToast(getString(R.string.link_not_opened), Toast.LENGTH_SHORT)
         }
     }
 
@@ -333,7 +335,7 @@ class MainActivity : ComponentActivity() {
         if (intent?.action != Intent.ACTION_VIEW) return
         val raw = intent.dataString ?: return
         // the link is a question (M-70): it stays in the navigation until the user answers it, a newer link in its place
-        if (parseCsqttLink(raw) == null) owners.messages.show(getString(R.string.link_invalid)) else nav.open(Routes.linkImport(raw))
+        if (parseCsqttLink(raw) == null) showRaisedToast(getString(R.string.link_invalid), Toast.LENGTH_SHORT) else nav.open(Routes.linkImport(raw))
     }
 
     /** The intro dialog first when a system prompt is about to come and the intro was never shown (L-29). */

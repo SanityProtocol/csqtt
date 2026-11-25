@@ -60,6 +60,8 @@ internal object Ink {
     val termError = Color(0xFFFF8A80)
     val termWarn = Color(0xFFFFAD68)
     val termInfo = Color(0xFF7DB1FF)
+    val termCountBg = Color(0xFF2A3140)
+    val termCount = Color(0xFFC7CFDC)
     val messageBg = Color(0xFF2A2F38)
     val messageAction = Color(0xFF9CC4FF)
 }
@@ -76,6 +78,9 @@ internal object Type {
     val dialogTitle = style(19.0, 26, 600)
     val cardTitle = style(16.0, 22, 600)
     val body = style(15.0, 20)
+    val fact = style(14.0, 20)
+    val message = style(14.0, 19)
+    val messageAction = style(14.0, 19, 600)
     val bodyStrong = style(15.0, 20, 600)
     val button = style(14.5, 20, 500)
     val buttonSmall = style(13.5, 18, 500)
@@ -86,11 +91,13 @@ internal object Type {
     val label = style(13.0, 16, 500)
     val sub = style(12.5, 17)
     val chip = style(12.5, 16, 500)
+    val chipSmall = style(11.0, 14, 500)
     val tab = style(12.0, 14, 500)
     val caption = style(11.5, 14)
     val badge = style(11.0, 18, 600)
     val tag = style(10.5, 14, 600)
-    val mono = style(12.5, 19).copy(fontFamily = FontFamily.Monospace)
+    val mono = style(13.0, 18).copy(fontFamily = FontFamily.Monospace)
+    val term = style(12.5, 19).copy(fontFamily = FontFamily.Monospace)
 }
 
 internal object Shape {

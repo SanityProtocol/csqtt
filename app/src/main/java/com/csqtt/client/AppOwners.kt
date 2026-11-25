@@ -35,21 +35,26 @@ internal class Questions {
     fun settle(id: String) = asked.update { list -> list.filterNot { it.id == id } }
 }
 
-/** A short message over the tab bar. */
-internal class Message(val id: Long, val text: String, val action: String?, internal val onAction: (() -> Unit)?)
+/** A short message over the tab bar; [until] is when its time is up, on its owner's clock. */
+internal class Message(val id: Long, val text: String, val action: String?, internal val onAction: (() -> Unit)?, val until: Long)
 
 /**
  * The app's short messages (M-90's rule, kept): one at a time, a new one takes the place of the one shown. A message
- * confirms what the user just did; a result they rely on is never only here (rule 8).
+ * confirms what the user just did; a result they rely on is never only here (rule 8). Its time runs from when it was
+ * raised, whatever draws it: one nobody saw in time is not shown hours later, at the next opening of the app.
  */
-internal class Messages {
+internal class Messages(private val now: () -> Long = { System.nanoTime() / 1_000_000 }) {
     private val shown = MutableStateFlow<Message?>(null)
     val current: StateFlow<Message?> = shown.asStateFlow()
     private val ids = java.util.concurrent.atomic.AtomicLong()
 
     fun show(text: String, action: String? = null, onAction: (() -> Unit)? = null) {
-        shown.value = Message(ids.incrementAndGet(), text, action, onAction)
+        val life = if (action != null) WITH_ACTION_MS else PLAIN_MS
+        shown.value = Message(ids.incrementAndGet(), text, action, onAction, until = now() + life)
     }
+
+    /** How long [message] may still be shown, in milliseconds; 0 when its time is up. */
+    fun remaining(message: Message): Long = (message.until - now()).coerceAtLeast(0)
 
     /** Only the message [id] names goes: one shown after it stays. */
     fun dismiss(id: Long) = shown.update { if (it?.id == id) null else it }
@@ -58,5 +63,10 @@ internal class Messages {
         val message = shown.value?.takeIf { it.id == id } ?: return
         dismiss(id)
         message.onAction?.invoke()
+    }
+
+    private companion object {
+        const val PLAIN_MS = 4_000L
+        const val WITH_ACTION_MS = 8_000L
     }
 }

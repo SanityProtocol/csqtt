@@ -3,30 +3,19 @@ package com.csqtt.client.ui.shell
 import androidx.lifecycle.SavedStateHandle
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
- * §4.2 rule 2 and M-174: a password being typed is kept in memory only. It is in nothing the navigation saves, a new
- * model (a recreate) still finds it, and the form that is done takes its own drafts away and no other form's.
+ * §4.2 rule 2 and M-174: a password being typed is kept in memory only, in [SecretDrafts], which has no way to the saved
+ * state. That nothing of it reaches what the system keeps of the activity is NavRestoreTest's check, on the bytes of the
+ * saved state; here: a new model (a recreate) still finds the draft, and the form that is done takes its own drafts
+ * away and no other form's.
  */
 class SecretDraftNeverSavedTest {
     private val secret = "correct horse battery staple"
 
     @After
     fun clear() = SecretDrafts.clear("")
-
-    @Test
-    fun `a secret draft is in no value the navigation saves`() {
-        val handle = SavedStateHandle()
-        val nav = NavModel(handle)
-        nav.select(Tab.Server)
-        nav.open(Dest("vps-access", Layer.Sheet, "7"))
-        SecretDrafts["vps-access:7:ssh-password"] = secret
-        val saved = handle.keys().map { it to handle.get<Any?>(it) }
-        assertFalse(saved.toString(), saved.toString().contains(secret))
-        assertFalse(saved.toString().contains("ssh-password"))
-    }
 
     @Test
     fun `the draft outlives the model, as a recreate does, and is gone when its form clears it`() {

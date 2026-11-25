@@ -10,6 +10,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.csqtt.client.ui.shell.FirstFrame
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -35,7 +36,8 @@ class ShellStartTest {
     @get:Rule
     val compose = createEmptyComposeRule()
 
-    private val store by lazy { SettingsStore(InstrumentationRegistry.getInstrumentation().targetContext) }
+    private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private val store by lazy { SettingsStore(context) }
     private lateinit var before: String
 
     private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
@@ -69,8 +71,9 @@ class ShellStartTest {
         runBlocking { assertTrue(store.restoreBackupJson(ShellTestKit.backup(withServer = false))) }
         ActivityScenario.launch(MainActivity::class.java).use {
             compose.waitUntil(10_000) { shown("Главная") }
-            // a participant: four tabs
+            // a participant: four tabs, and that is what the next start's first frame draws
             compose.waitUntil(10_000) { !shown("Сервер") }
+            compose.waitUntil(10_000) { !FirstFrame(context).hasServer }
 
             // the way in: «Настройки» → «Установить свой сервер» opens the tab, and it stays while it is open
             compose.onNodeWithContentDescription("Быстрые настройки").performClick()
@@ -85,6 +88,7 @@ class ShellStartTest {
             // a server appears in the store (a deploy's end, a restore): the tab is there for good, the entry is not
             runBlocking { assertTrue(store.restoreBackupJson(ShellTestKit.backup(withServer = true))) }
             compose.waitUntil(10_000) { shown("Сервер") }
+            compose.waitUntil(10_000) { FirstFrame(context).hasServer }
             compose.onNodeWithText("Логи").assertIsSelected()
             compose.onNodeWithContentDescription("Быстрые настройки").performClick()
             compose.waitUntil(5_000) { shown("Проверить обновления") }

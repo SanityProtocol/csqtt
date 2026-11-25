@@ -45,13 +45,16 @@
         android:networkSecurityConfig="@xml/network_security_config">
 
         <!-- enableOnBackInvokedCallback: predictive Back (§4.2 rule 4) for this activity, whose Back goes through the shell's
-             one handler; an attribute of the activity from Android 14, where the system's Back preview is -->
+             one handler; an attribute of the activity from Android 14, where the system's Back preview is.
+             adjustResize: before Android 11 the keyboard's height reaches the app only with it; the shell, drawn edge to
+             edge, lifts the page over the keyboard itself (M-95) -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize"
             android:enableOnBackInvokedCallback="true"
             android:exported="true"
             android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize"
             tools:targetApi="34">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

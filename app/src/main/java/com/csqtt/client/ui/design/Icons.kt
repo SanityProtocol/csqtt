@@ -19,7 +19,7 @@ import androidx.compose.ui.unit.dp
 
 /**
  * The outline icons of the canvas: Lucide's glyphs (ISC, assets/licenses/Lucide-LICENSE.txt) on a 24 grid with a 1.8
- * stroke and round ends. Each is built on first use; IconsTest builds them all, so a mistyped path fails in CI.
+ * stroke and round ends. Each is built on first use; DesignTokensTest builds them all, so a mistyped path fails in CI.
  */
 internal object Icons {
     private fun stroke(vararg paths: String): Lazy<ImageVector> = lazy {

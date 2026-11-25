@@ -810,12 +810,16 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             prefs[getProfileKey(VPS_REF, profile)]?.takeIf { it in profileIndices }
 
         /**
-         * K4 (D20): the user has a server of their own, whichever profile is open: a VPS record, or a profile that dials
-         * a server by its address (not a link). «Сервер» is in the tab bar for them; a participant has four tabs (D28).
+         * K4 (D20): the user has a server of their own, whichever profile is open: a VPS record with an address, or a
+         * profile that dials an address of its own — not a link's, and not a subscription's node (a 2.5.3 subscription
+         * slot keeps its owner mode and address until its next refresh makes it a link). «Сервер» is in the tab bar for
+         * them; a participant has four tabs (D28).
          */
         internal fun userHasServer(prefs: Preferences): Boolean = profileIndices.any { index ->
-            vpsRecordExists(prefs, index) ||
-                (prefs[getProfileKey(CSQTT_LINK_MODE, index)] != true && !prefs[getProfileKey(PEER, index)].isNullOrBlank())
+            !prefs[getProfileKey(DEPLOY_IP, index)].isNullOrBlank() ||
+                (prefs[getProfileKey(CSQTT_LINK_MODE, index)] != true &&
+                    !prefs[getProfileKey(PEER, index)].isNullOrBlank() &&
+                    prefs[getProfileKey(SUBSCRIPTION_URL, index)].isNullOrBlank())
         }
 
         /**

@@ -143,16 +143,27 @@ class StoreMigrationsTest {
     }
 
     @Test
-    fun `a 2_5_3 subscription slot is the owner's link after step 3, so it alone is no server of the user's`() {
-        // 2.5.3 kept a subscription node in owner mode with its address; step 3 (M-170) makes it a link profile
-        val onlySubscription = load(
+    fun `a 2_5_3 subscription slot is no server of the user's, converted by step 3 or left for its refresh`() {
+        // 2.5.3 kept a subscription node in owner mode with its address. Step 3 (M-170) makes a link profile of one that
+        // never refreshes; one with auto-update stays as it is until its next refresh converts it
+        val never = load(
             """{"strings": {"peer_5": "192.0.2.10", "subscription_url_5": "https://sub.example.invalid/s/abc",
                             "connection_password_local_5": "s"},
                 "ints": {"active_profile": 5}, "booleans": {"default_role_decided": true}}""",
         )
-        SettingsStore.migrateStore(onlySubscription)
-        assertEquals(true, asMap(onlySubscription)["csqtt_link_mode_5"])
-        assertEquals(false, SettingsStore.userHasServer(onlySubscription))
+        SettingsStore.migrateStore(never)
+        assertEquals(true, asMap(never)["csqtt_link_mode_5"])
+        assertEquals(false, SettingsStore.userHasServer(never))
+
+        val refreshing = load(
+            """{"strings": {"peer_5": "192.0.2.10", "subscription_url_5": "https://sub.example.invalid/s/abc",
+                            "connection_password_local_5": "s",
+                            "subscription_meta_v1": "{\"https://sub.example.invalid/s/abc\":{\"autoUpdateMinutes\":60}}"},
+                "ints": {"active_profile": 5}, "booleans": {"default_role_decided": true}}""",
+        )
+        SettingsStore.migrateStore(refreshing)
+        assertNull("left for its refresh", asMap(refreshing)["csqtt_link_mode_5"])
+        assertEquals(false, SettingsStore.userHasServer(refreshing))
     }
 
     @Test

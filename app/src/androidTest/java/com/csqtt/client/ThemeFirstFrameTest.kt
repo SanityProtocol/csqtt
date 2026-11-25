@@ -89,8 +89,9 @@ class ThemeFirstFrameTest {
         assertEquals("a dark frame before the light theme: $frames", emptyList<Boolean>(), frames.filter { it })
     }
 
+    /** What a first start after the update reads, with nothing kept yet: «Система» and a participant's bar. */
     @Test
-    fun aFirstStartAfterTheUpdateHasNoMirrorAndFollowsTheSystem() {
+    fun withNothingKeptTheFirstFrameReadsTheSystemsThemeAndNoServerTab() {
         context.getSharedPreferences("first_frame", Context.MODE_PRIVATE).edit().clear().commit()
         assertEquals(CsqttConstants.Theme.MODE_SYSTEM, FirstFrame(context).themeMode)
         assertEquals(false, FirstFrame(context).hasServer)

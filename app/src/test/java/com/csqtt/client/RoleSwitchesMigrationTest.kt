@@ -100,8 +100,21 @@ class RoleSwitchesMigrationTest {
                          "booleans": {"csqtt_link_mode_2": true}}"""),
             ),
         )
-        // the secret path alone, written by opening the tab, is no record
+        // a record with no address is no server: the secret path written by opening the tab, an address typed and
+        // erased (its flags stay), «Docker» flipped
         assertFalse(SettingsStore.userHasServer(load("""{"strings": {"deploy_secret_path_uuid_3": "uuid"}}""")))
+        assertFalse(
+            SettingsStore.userHasServer(
+                load("""{"strings": {"deploy_ip_3": " ", "deploy_login_3": "root"},
+                         "booleans": {"deploy_server_configured_3": false, "deploy_docker_install_3": true}}"""),
+            ),
+        )
+        // a 2.5.3 subscription slot its next refresh will make a link: owner mode and an address, but the owner's node
+        assertFalse(
+            SettingsStore.userHasServer(
+                load("""{"strings": {"peer_5": "192.0.2.10", "subscription_url_5": "https://sub.example.invalid/s/abc"}}"""),
+            ),
+        )
     }
 
     @Test
