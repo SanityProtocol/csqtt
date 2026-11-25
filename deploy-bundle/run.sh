@@ -1598,6 +1598,9 @@ host_dropin_drop() {
 	# (a stock unit counts installed, running or not: slim and the side tool write no sysctl file of their own and refuse to
 	# start with forwarding off, B18; its removal drops this file after it, B11c review F3)
 	for hd_u in /etc/systemd/system/sanity-csqtt-*.service /etc/systemd/system/csqtt.service /etc/systemd/system/csqtt25.service; do
+		# (our certificate's renewal unit is no instance: le_drop takes it after this, with the last instance, so counting it
+		# kept the drop-in on every box with our certificate, the P2 public check's purge)
+		case $hd_u in */sanity-csqtt-le.service) continue ;; esac
 		[ -f "$hd_u" ] && return 0
 	done
 	# (an instance of ours in Docker counts by its docker file, whatever Docker's state: asking a stopped Docker would start it

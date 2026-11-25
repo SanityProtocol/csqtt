@@ -222,4 +222,38 @@ class RepairTest {
         assertFalse(Regex("MF_OBJECTS=\\$\\(mf_objects_of \"[^\"]+\"\\)").containsMatchIn(both))
         assertFalse(Regex("MF_HOST=\\$\\(mf_host_of \"[^\"]+\"\\)").containsMatchIn(both))
     }
+
+    @Test
+    fun theLastRemovalTakesTheDropInBesideOurCertificate() {
+        // the P2 public check's purge (alb-onyx, 2026-11-25): our certificate's renewal unit counted as an instance of ours, so the
+        // last instance's removal kept the drop-in, forwarding on at every boot (le_drop takes that unit only after it); an
+        // instance's unit, a stock unit and a docker file of ours still keep it
+        val root = kotlin.io.path.createTempDirectory("csqtt-dropin").toFile()
+        try {
+            val dropIn = File(root, "etc/sysctl.d/99-sanity-csqtt.conf")
+            val body = function("host_dropin_drop")
+                .replace("/etc/systemd/system/", "${root.path}/etc/systemd/system/")
+                .replace("/var/lib/sanityprotocol/", "${root.path}/var/lib/sanityprotocol/")
+            fun kept(vararg present: String): Boolean {
+                File(root, "etc").deleteRecursively()
+                File(root, "var").deleteRecursively()
+                dropIn.parentFile.mkdirs()
+                dropIn.writeText("# net.core.somaxconn was 4096\nnet.core.somaxconn = 65535\n")
+                for (p in present) File(root, p).apply { parentFile.mkdirs() }.writeText("")
+                val sh = File(root, "check.sh")
+                sh.writeText("HOST_DROPIN=${dropIn.path}\npgrep() { return 1; }\nsysctl() { :; }\n" + body + "host_dropin_drop\n")
+                val proc = ProcessBuilder("sh", sh.path).redirectErrorStream(true).start()
+                assertTrue(proc.waitFor(30, TimeUnit.SECONDS))
+                assertEquals(proc.inputStream.bufferedReader().readText(), 0, proc.exitValue())
+                return dropIn.exists()
+            }
+            assertFalse(kept("etc/systemd/system/sanity-csqtt-le.service"))
+            assertFalse(kept())
+            assertTrue(kept("etc/systemd/system/sanity-csqtt-le.service", "etc/systemd/system/sanity-csqtt-0a1b2c.service"))
+            assertTrue(kept("etc/systemd/system/csqtt.service"))
+            assertTrue(kept("var/lib/sanityprotocol/csqtt/0a1b2c/docker"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }
