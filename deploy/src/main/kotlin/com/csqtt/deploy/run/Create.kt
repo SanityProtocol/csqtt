@@ -65,7 +65,7 @@ object CreateRun {
             if (preflight.facts("nat")["iptables"] == "0") "Установит iptables (без него сервер не выпустит клиентов в интернет)" else null,
             if (preflight.facts("forwarding")["ipv4"] == "1") "Закрепит пересылку пакетов (ip_forward) после перезагрузки"
             else "Включит пересылку пакетов (ip_forward), и после перезагрузки тоже",
-            "Поднимет сетевые буферы до значений 2.5.3 там, где они ниже (/etc/sysctl.d/99-sanity-csqtt.conf)",
+            "Поднимет сетевые буферы до рекомендуемых значений там, где они ниже (/etc/sysctl.d/99-sanity-csqtt.conf)",
             when {
                 firewall["ufw"] == "active" -> "Откроет в ufw: ${ports.joinToString(", ")}"
                 firewall["firewalld"] == "active" ->
