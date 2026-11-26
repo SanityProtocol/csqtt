@@ -59,7 +59,7 @@ class ProfileDeleteClearsAllKeysTest {
             }
         }
         this[intPreferencesKey("active_profile")] = 7
-        this[stringPreferencesKey("battery_saver_mode")] = "below"
+        this[stringPreferencesKey("subscription_meta_v1")] = "{}"
         this[stringPreferencesKey("theme_mode")] = "dark"
     }
 

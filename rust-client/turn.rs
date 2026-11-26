@@ -970,7 +970,9 @@ async fn driver_loop_udp(common: DriverCommon, socket: Arc<UdpSocket>) {
     let mut cleanup_deadline = None;
     let mut cleanup_permit: Option<OwnedSemaphorePermit> = None;
     let mut shutdown_requested = false;
-    let mut native_deadline = Instant::now();
+    // the core's deadlines are the relay's: on the boot clock, so a wake after a sleep finds them due (§1.9)
+    let mut native_deadline = crate::clock::Instant::now();
+    let mut sleeps = crate::clock::sleeps();
     let mut pump_needed = true;
     let mut receive_errors = UdpReceiveErrors::default();
     loop {
@@ -992,12 +994,11 @@ async fn driver_loop_udp(common: DriverCommon, socket: Arc<UdpSocket>) {
                 break;
             }
         }
-        let now = Instant::now();
-        if pump_needed || now >= native_deadline {
+        if pump_needed || crate::clock::Instant::now() >= native_deadline {
             match pump_native(&outbound, &core, &shared, server, peer).await {
                 Ok(delay) => {
-                    native_deadline =
-                        Instant::now() + delay.unwrap_or(Duration::from_secs(24 * 60 * 60));
+                    native_deadline = crate::clock::Instant::now()
+                        + delay.unwrap_or(Duration::from_secs(24 * 60 * 60));
                     pump_needed = false;
                     continue;
                 }
@@ -1019,9 +1020,10 @@ async fn driver_loop_udp(common: DriverCommon, socket: Arc<UdpSocket>) {
                 }
             }
         }
-        let wait_deadline =
-            cleanup_deadline.map_or(native_deadline, |deadline| deadline.min(native_deadline));
-        let mut wait = wait_deadline.saturating_duration_since(Instant::now());
+        let mut wait = native_deadline.saturating_duration_since(crate::clock::Instant::now());
+        if let Some(deadline) = cleanup_deadline {
+            wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+        }
         if wait.is_zero() {
             wait = Duration::from_millis(1);
         }
@@ -1134,6 +1136,8 @@ async fn driver_loop_udp(common: DriverCommon, socket: Arc<UdpSocket>) {
                 biased;
                 _ = shared.wake.notified() => DriverEvent::Wake,
                 _ = tokio::time::sleep(wait) => DriverEvent::Timer,
+                // the phone slept: tokio's timer has the rest of its wait to count, the deadlines are due now
+                _ = sleeps.changed() => DriverEvent::Timer,
                 result = socket.readable() => DriverEvent::Readable(result),
             };
             match event {
@@ -1170,7 +1174,9 @@ async fn driver_loop_stream(
     let mut cleanup_deadline = None;
     let mut cleanup_permit: Option<OwnedSemaphorePermit> = None;
     let mut shutdown_requested = false;
-    let mut native_deadline = Instant::now();
+    // the core's deadlines are the relay's: on the boot clock, so a wake after a sleep finds them due (§1.9)
+    let mut native_deadline = crate::clock::Instant::now();
+    let mut sleeps = crate::clock::sleeps();
     let mut pump_needed = true;
     loop {
         if shared.closing.load(Ordering::Acquire) {
@@ -1191,12 +1197,11 @@ async fn driver_loop_stream(
                 break;
             }
         }
-        let now = Instant::now();
-        if pump_needed || now >= native_deadline {
+        if pump_needed || crate::clock::Instant::now() >= native_deadline {
             match pump_native(&outbound, &core, &shared, server, peer).await {
                 Ok(delay) => {
-                    native_deadline =
-                        Instant::now() + delay.unwrap_or(Duration::from_secs(24 * 60 * 60));
+                    native_deadline = crate::clock::Instant::now()
+                        + delay.unwrap_or(Duration::from_secs(24 * 60 * 60));
                     pump_needed = false;
                     continue;
                 }
@@ -1218,9 +1223,10 @@ async fn driver_loop_stream(
                 }
             }
         }
-        let wait_deadline =
-            cleanup_deadline.map_or(native_deadline, |deadline| deadline.min(native_deadline));
-        let mut wait = wait_deadline.saturating_duration_since(Instant::now());
+        let mut wait = native_deadline.saturating_duration_since(crate::clock::Instant::now());
+        if let Some(deadline) = cleanup_deadline {
+            wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+        }
         if wait.is_zero() {
             wait = Duration::from_millis(1);
         }
@@ -1228,6 +1234,7 @@ async fn driver_loop_stream(
             biased;
             _ = shared.wake.notified() => StreamDriverEvent::Wake,
             _ = tokio::time::sleep(wait) => StreamDriverEvent::Timer,
+            _ = sleeps.changed() => StreamDriverEvent::Timer,
             changed = write_failure.changed() => StreamDriverEvent::WriteFailure(changed),
             result = reader.read_frame(&pool) => StreamDriverEvent::Frame(result),
         };

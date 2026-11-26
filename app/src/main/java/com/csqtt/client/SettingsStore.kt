@@ -393,18 +393,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val EXTRA_WORKERS = profileBoolean("extra_workers")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
         private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
-        private val BATTERY_OPTIMIZATION_PROMPT_HANDLED =
-            booleanPreferencesKey("battery_optimization_prompt_handled")
-        // the one explanation before the first notification and battery prompts was shown (L-29)
-        private val PERMISSION_INTRO_SHOWN = booleanPreferencesKey("permission_intro_shown")
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
         // B5f2: where the auto-pause acts — #19's keys; the networks the user dismissed («Не сейчас») added
         private val WIFI_RULE = stringPreferencesKey("wifi_network_list_mode")
         private val WIFI_CHECKED = stringPreferencesKey("wifi_network_list_ssids")
         private val WIFI_SAVED = stringPreferencesKey("wifi_saved_ssids")
         private val WIFI_DISMISSED = stringPreferencesKey("wifi_dismissed_ssids")
-        private val BATTERY_SAVER_MODE = stringPreferencesKey("battery_saver_mode")
-        private val BATTERY_SAVER_PERCENT = intPreferencesKey("battery_saver_percent")
         private val DOMAIN_ROUTING_ENABLED = profileBoolean("domain_routing_enabled")
         private val DOMAIN_IS_WHITELIST = profileBoolean("domain_is_whitelist")
         private val EXCLUDE_RU_ZONES_ENABLED = profileBoolean("exclude_ru_zones_enabled")
@@ -552,7 +546,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 7
+        internal const val STORE_SCHEMA = 8
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -624,6 +618,14 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 // «Логи» for everyone); a store an earlier 2.6.0 build wrote them into loses them here
                 prefs.remove(booleanPreferencesKey("show_deploy_tab"))
                 prefs.remove(booleanPreferencesKey("show_logs_tab"))
+            }
+            if (from < 8) {
+                // 2.6.0, P3 B0s (§1.9): the tunnel sleeps with the phone, with nothing to set and nothing to grant, so
+                // «Экономия батареи», the battery exemption's prompt and the intro before it go, and their keys with them
+                prefs.remove(stringPreferencesKey("battery_saver_mode"))
+                prefs.remove(intPreferencesKey("battery_saver_percent"))
+                prefs.remove(booleanPreferencesKey("battery_optimization_prompt_handled"))
+                prefs.remove(booleanPreferencesKey("permission_intro_shown"))
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
         }
@@ -707,7 +709,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 INFO_ACTIONS_EXPANDED to StoredKind.BOOLEAN, INFO_PROJECT_EXPANDED to StoredKind.BOOLEAN,
                 SUBSCRIPTION_META to StoredKind.STRING, AUTO_JS_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN,
                 TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
-                BATTERY_SAVER_MODE to StoredKind.STRING, BATTERY_SAVER_PERCENT to StoredKind.INT,
                 THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
                 UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT,
             ).associate { (key, kind) -> key.name to kind }
@@ -717,7 +718,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         internal val notBackedUpGlobalKeys: Set<String> by lazy {
             listOf(
                 STORE_SCHEMA_VERSION, DEPLOY_PROFILE_NAMES_CLEANED, DEFAULT_ROLE_DECIDED, SPLIT_TUNNEL_WHITELIST_MIGRATED,
-                BATTERY_OPTIMIZATION_PROMPT_HANDLED, PERMISSION_INTRO_SHOWN, UPDATE_LAST_CHECK_AT, UPDATE_LATEST_VERSION, UPDATE_LAST_ERROR,
+                UPDATE_LAST_CHECK_AT, UPDATE_LATEST_VERSION, UPDATE_LAST_ERROR,
                 UPDATE_POSTPONE_UNTIL, UPDATE_POSTPONE_VERSION, UPDATE_DIALOG_LAST_SHOWN_VERSION, UPDATE_DIALOG_LAST_SHOWN_AT,
                 UPDATE_DIALOG_LAST_ACTION_VERSION, UPDATE_DIALOG_LAST_ACTION, UPDATE_DIALOG_LAST_ACTION_AT,
                 CLIENT_ID_CHECK_RESULTS, CONNECTION_GENERATION, TUNNEL_LAST_DIAGNOSTIC, TUNNEL_LAST_DIAGNOSTIC_AT,
@@ -2050,10 +2051,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     }
     /** B5f2: the switch, the rule and the networks. */
     internal val wifiRules: Flow<WifiRules> = dataStore.data.map { readWifiRules(it) }.distinctUntilChanged()
-    val batterySaverMode: Flow<String> = dataStore.data.map { it[BATTERY_SAVER_MODE] ?: BatterySaver.DEFAULT_MODE }
-    val batterySaverPercent: Flow<Int> = dataStore.data.map { it[BATTERY_SAVER_PERCENT] ?: BatterySaver.DEFAULT_PERCENT }
-    suspend fun isBatteryOptimizationPromptHandled(): Boolean =
-        dataStore.data.first()[BATTERY_OPTIMIZATION_PROMPT_HANDLED] ?: false
 
     val themeMode: Flow<String> = dataStore.data.map { it[THEME_MODE] ?: "system" }
     val isDynamicColor: Flow<Boolean> = dataStore.data.map { it[IS_DYNAMIC_COLOR] ?: false }
@@ -2767,26 +2764,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs -> dismissWifi(prefs, name) }
     }
 
-    suspend fun saveBatterySaverMode(mode: String) {
-        dataStore.edit { prefs -> prefs[BATTERY_SAVER_MODE] = mode }
-    }
-
-    suspend fun saveBatterySaverPercent(percent: Int) {
-        dataStore.edit { prefs -> prefs[BATTERY_SAVER_PERCENT] = percent.coerceIn(5, 95) }
-    }
-
-    suspend fun isPermissionIntroShown(): Boolean = dataStore.data.first()[PERMISSION_INTRO_SHOWN] ?: false
-
-    suspend fun markPermissionIntroShown() {
-        dataStore.edit { prefs -> prefs[PERMISSION_INTRO_SHOWN] = true }
-    }
-
-    suspend fun markBatteryOptimizationPromptHandled() {
-        dataStore.edit { prefs ->
-            prefs[BATTERY_OPTIMIZATION_PROMPT_HANDLED] = true
-        }
-    }
-
     suspend fun saveCaptchaMode(mode: String) {
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
@@ -3276,8 +3253,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             settings.put("is_dynamic_color", prefs[IS_DYNAMIC_COLOR] ?: false)
             settings.put("theme_palette", prefs[THEME_PALETTE] ?: "pure_black")
             settings.put("auto_pause_on_wifi", prefs[AUTO_PAUSE_ON_WIFI] ?: false)
-            settings.put("battery_saver_mode", prefs[BATTERY_SAVER_MODE] ?: BatterySaver.DEFAULT_MODE)
-            settings.put("battery_saver_percent", prefs[BATTERY_SAVER_PERCENT] ?: BatterySaver.DEFAULT_PERCENT)
             settings.put("selected_fingerprint", prefs[getProfileKey(SELECTED_FINGERPRINT, p)] ?: "chrome")
             settings.put("selected_turn_subnet", prefs[getProfileKey(SELECTED_TURN_SUBNET, p)] ?: "")
             settings.put("turn_subnet_ip_limit", prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] ?: "ALL")
@@ -3396,10 +3371,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     if (s.has("is_dynamic_color")) mutable[IS_DYNAMIC_COLOR] = s.getBoolean("is_dynamic_color")
                     if (s.has("theme_palette")) mutable[THEME_PALETTE] = s.getString("theme_palette")
                     if (s.has("auto_pause_on_wifi")) mutable[AUTO_PAUSE_ON_WIFI] = s.getBoolean("auto_pause_on_wifi")
-                    // an unknown mode (a newer or edited export) leaves the stored one: the UI could show it only as «Авто»
-                    s.optString("battery_saver_mode").takeIf { mode -> BatterySaver.MODES.any { it.first == mode } }
-                        ?.let { mutable[BATTERY_SAVER_MODE] = it }
-                    if (s.has("battery_saver_percent")) mutable[BATTERY_SAVER_PERCENT] = s.getInt("battery_saver_percent").coerceIn(5, 95)
                     if (s.has("selected_fingerprint")) mutable[getProfileKey(SELECTED_FINGERPRINT, p)] = s.getString("selected_fingerprint")
                     if (s.has("selected_turn_subnet")) mutable[getProfileKey(SELECTED_TURN_SUBNET, p)] = s.getString("selected_turn_subnet")
                     if (s.has("turn_subnet_ip_limit")) mutable[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] = s.getString("turn_subnet_ip_limit")

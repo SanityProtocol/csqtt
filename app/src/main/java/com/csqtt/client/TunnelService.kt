@@ -10,9 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.BatteryManager
 import android.net.wifi.WifiInfo
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -56,12 +54,10 @@ private const val NETWORK_LOSS_GRACE_MS = 2_000L
 private const val AUTO_PAUSE_WIFI_RECONCILE_MS = 15_000L
 // the lock screen shows this tunnel notice: it never names the network (B5f2, F6)
 private const val WIFI_PAUSE_NOTICE = "Ожидание. Автопауза при Wi-Fi"
-private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
 private const val AWAIT_NETWORK_SHOWN_AFTER_MS = 5_000L
 private const val AWAIT_NETWORK_RESCAN_MS = 15_000L
 // M-74: the tunnel service refreshes due subscriptions at most this often while connected
 private const val SUBSCRIPTION_CHECK_WHILE_CONNECTED_MS = 60 * 60_000L
-private const val WAKE_LOCK_RENEWAL_WINDOW_MS = 60 * 1_000L
 private const val VK_PROBE_CONNECT_TIMEOUT_MS = 3_000
 private const val VK_PROBE_READ_TIMEOUT_MS = 3_000
 private val VK_PROBE_URLS = listOf(
@@ -90,9 +86,13 @@ class TunnelService : Service() {
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Default)
 
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wakeLockExpiresAtElapsedMs = 0L
-    private var wifiLock: WifiManager.WifiLock? = null
+    // P3 §1.9: the CPU and the Wi-Fi radio are held only while that buys something (TunnelLockPolicy)
+    private val locks by lazy { TunnelLocks(this) }
+    private val lockPolicy = TunnelLockPolicy()
+    private var lockWatchJob: Job? = null
+    private var screenReceiver: BroadcastReceiver? = null
+    @Volatile
+    private var screenOn = true
     private var updateJob: Job? = null
     private var startJob: Job? = null
     // bumped on Main by a start, a restore (a switch and a resume included), a stop and a deploy; read by background work
@@ -140,20 +140,6 @@ class TunnelService : Service() {
     private var autoPauseRequested = false
     @Volatile
     private var autoPausedForWifi = false
-    // «Экономия батареи»: the setting, and the charge as the sticky battery broadcast last said (main thread)
-    @Volatile
-    private var batterySaverMode = BatterySaver.DEFAULT_MODE
-    // nothing is decided before the stored mode is read: the sticky battery broadcast arrives at once, and the default
-    // («Авто») could let go of the locks for a moment under a user's «Выкл»
-    @Volatile
-    private var batterySaverLoaded = false
-    @Volatile
-    private var batterySaverPercent = BatterySaver.DEFAULT_PERCENT
-    private var batteryLevel = -1
-    private var batteryCharging = false
-    private var systemPowerSave = false
-    private var batteryReceiver: BroadcastReceiver? = null
-    private var batterySaverJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -161,13 +147,12 @@ class TunnelService : Service() {
         TunnelManager.activeScope = serviceScope
         createNotificationChannel()
 
-        acquireWakeLock()
         connectivityManager = getSystemService(ConnectivityManager::class.java)
         registerAirplaneModeReceiver()
         registerPhysicalNetworkCallback()
         observeAutoPauseOnWifi()
         observeDomainRoutingSettings()
-        observeBatterySaver()
+        watchLocks()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -361,7 +346,7 @@ class TunnelService : Service() {
                     val notification = createNotification("Установка на сервер...", "DEPLOY_CANCEL", "Отменить")
                     startPersistentForeground(notification, forRun = false)
                     prepareForDeploy()
-                    acquireWakeLock()
+                    reconcileLocks()
                 } catch (e: Exception) {
                     DeployManager.writeError(
                         "Deploy foreground service error (${e.javaClass.simpleName}): ${e.message}\n" +
@@ -894,8 +879,7 @@ class TunnelService : Service() {
             return
         }
         updateNotification("Подключение...")
-        acquireWakeLock()
-        acquireWifiLock()
+        reconcileLocks()
 
         CaptchaWebViewManager.onTunnelStart(applicationContext)
 
@@ -1063,9 +1047,9 @@ class TunnelService : Service() {
      * (suspendForNoNetwork): «Нет сети — ожидание», ended only by a stop, a Wi-Fi pause or a deploy, which cancel the
      * start job. There was a 60 s limit here: after it 2.5.3 left the service in the foreground saying «Запуск...», and
      * ending the run instead dropped the user's intent on a Wi-Fi auto-pause resume in a lift or the metro.
-     * The wait follows the network callbacks (no poll) and holds the CPU as a running tunnel does, so a network that
-     * comes back without a callback (data back on the same mobile network) is found by its probe within seconds;
-     * «Экономия батареи» lets the lock go, as for a running tunnel.
+     * The wait follows the network callbacks; the networks are also looked at again every 15 s the phone is awake, for
+     * one that comes back without a callback (data back on the same mobile network). Nothing is held awake for the wait
+     * (P3 §1.9): with the screen off and no network there is nothing to do until the phone wakes.
      */
     private suspend fun awaitVkNetwork() {
         if (physicalNetworks.hasUsableNetwork()) return
@@ -1086,9 +1070,7 @@ class TunnelService : Service() {
                     withContext(Dispatchers.Main) { if (!isStopping) updateNotification("Нет сети — ожидание") }
                     while (isActive) {
                         delay(AWAIT_NETWORK_RESCAN_MS)
-                        // the lock renewed as the running tunnel's 2 s loop renews it; the networks looked at again in
-                        // case a callback was missed
-                        withContext(Dispatchers.Main) { if (!isStopping) acquireWakeLock() }
+                        // the networks looked at again in case a callback was missed
                         kickPhysicalCandidateProbes()
                     }
                 }
@@ -1313,7 +1295,7 @@ class TunnelService : Service() {
                 store.clearRunProfile()
             }
         }
-        releaseWifiLock()
+        reconcileLocks()
     }
 
     private fun releaseTunnelResources(finishVkCalls: Boolean = false) {
@@ -1323,8 +1305,7 @@ class TunnelService : Service() {
         CaptchaWebViewManager.onTunnelStop()
         if (finishVkCalls) VkAutoCallsManager.finishActiveCalls()
         TunnelManager.stop(finishVkCalls, notifyController = false)
-        releaseWakeLock()
-        releaseWifiLock()
+        locks.release()
     }
 
     private fun observeAutoPauseOnWifi() {
@@ -1410,85 +1391,6 @@ class TunnelService : Service() {
             seedWifiName()
             reconcileWifiAutoPause()
         }
-    }
-
-    /**
-     * «Экономия батареи»: in force («Авто» — the phone's battery saver is on; «Свой уровень» — at or below the chosen
-     * charge and not charging), the service lets go of its wake lock and TunVpnService of its own; out of force again,
-     * they are taken back while the tunnel runs. The charge and the phone's saver come from their broadcasts, which
-     * arrive only while the CPU is awake anyway.
-     */
-    private fun observeBatterySaver() {
-        val powerManager = getSystemService(PowerManager::class.java)
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                if (intent.action == PowerManager.ACTION_POWER_SAVE_MODE_CHANGED) {
-                    systemPowerSave = powerManager?.isPowerSaveMode == true
-                } else {
-                    readBattery(intent)
-                }
-                reconcileBatterySaver()
-            }
-        }
-        systemPowerSave = powerManager?.isPowerSaveMode == true
-        runCatching {
-            ContextCompat.registerReceiver(
-                this,
-                receiver,
-                IntentFilter(Intent.ACTION_BATTERY_CHANGED).apply {
-                    addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
-                },
-                ContextCompat.RECEIVER_NOT_EXPORTED,
-            )
-        }.onSuccess { sticky ->
-            batteryReceiver = receiver
-            sticky?.let(::readBattery)
-        }
-        batterySaverJob?.cancel()
-        batterySaverJob = serviceScope.launch {
-            val store = SettingsStore(applicationContext)
-            combine(store.batterySaverMode, store.batterySaverPercent) { mode, percent -> mode to percent }
-                .collect { (mode, percent) ->
-                    batterySaverMode = mode
-                    batterySaverPercent = percent
-                    batterySaverLoaded = true
-                    withContext(Dispatchers.Main) { reconcileBatterySaver() }
-                }
-        }
-    }
-
-    private fun readBattery(intent: Intent) {
-        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-        batteryLevel = if (level >= 0 && scale > 0) level * 100 / scale else -1
-        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-        batteryCharging = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0 ||
-            status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-    }
-
-    private fun reconcileBatterySaver() {
-        if (!batterySaverLoaded) return
-        val save = BatterySaver.shouldSave(
-            batterySaverMode, batterySaverPercent, batteryLevel, batteryCharging, systemPowerSave,
-        )
-        if (save == BatterySaver.active.value) return
-        BatterySaver.setActive(save)
-        if (save) {
-            if (!DeployManager.isDeploying.value) releaseWakeLock()
-            TunnelManager.updateLog(
-                "battery_saver",
-                if (batterySaverMode == BatterySaver.MODE_AUTO) {
-                    "[BAT] Экономия батареи: включено энергосбережение телефона — при выключенном экране туннель может засыпать"
-                } else {
-                    "[BAT] Экономия батареи: заряд $batteryLevel % — при выключенном экране туннель может засыпать"
-                },
-                2,
-            )
-        } else {
-            if (TunnelManager.running.value && !autoPausedForWifi) acquireWakeLock()
-            TunnelManager.updateLog("battery_saver", "[BAT] Экономия батареи выключена — туннель снова не засыпает", 2)
-        }
-        TunVpnService.instance?.onBatterySaverChanged(save)
     }
 
     /**
@@ -1593,8 +1495,7 @@ class TunnelService : Service() {
             pauseDataPlane = { TunnelManager.pauseForWifi() },
         )
         if (!completed) return
-        releaseWakeLock()
-        releaseWifiLock()
+        reconcileLocks()
         updateNotification(WIFI_PAUSE_NOTICE)
         startWifiAutoPauseWatch()
     }
@@ -1604,7 +1505,6 @@ class TunnelService : Service() {
         autoPausedForWifi = false
         stopWifiAutoPauseWatch()
         TunnelManager.leaveWifiAutoPause()
-        acquireWakeLock()
         TunnelManager.updateLog(
             "wifi_auto_resume",
             "[NET] Автопауза Wi-Fi завершена · восстановление подключения",
@@ -1724,58 +1624,66 @@ class TunnelService : Service() {
         }
     }
 
+    /**
+     * P3 §1.9: the locks follow what the tunnel is doing. Asked on every change of the connection state and of a deploy,
+     * on the screen going on or off, and every 2 s the tunnel loop runs (a transfer's window, a repair's time limit).
+     * M-50: the lock operations are serialized (the Wi-Fi pause and the stop run off Main), and a stopping service
+     * holds nothing, so a late call after the stop's release cannot leave a lock held.
+     */
     @Synchronized
-    private fun acquireWakeLock() {
-        if (isStopping) return
-        // «Экономия батареи» in force: the CPU may sleep, the tunnel with it — except for a deploy, which needs it awake
-        if (BatterySaver.active.value && !DeployManager.isDeploying.value) {
-            releaseWakeLock() // one a deploy or a server check took meanwhile
+    private fun reconcileLocks() {
+        if (isStopping) {
+            locks.release()
             return
         }
-        val now = SystemClock.elapsedRealtime()
-        if (wakeLock?.isHeld == true && now < wakeLockExpiresAtElapsedMs - WAKE_LOCK_RENEWAL_WINDOW_MS) return
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "csqtt:tunnel_cpu"
-        ).apply {
-            setReferenceCounted(false)
-            acquire(WAKE_LOCK_TIMEOUT_MS)
-        }
-        wakeLockExpiresAtElapsedMs = now + WAKE_LOCK_TIMEOUT_MS
-    }
-
-    // M-50: the lock operations are serialized — the Wi-Fi pause and resume and the stop run them off Main, beside the
-    // stats loop and the battery broadcast on Main — and none is taken once the service stops, so a late acquire after
-    // the stop's release cannot leave a lock held
-    @Synchronized
-    @Suppress("DEPRECATION")
-    private fun acquireWifiLock() {
-        if (isStopping || wifiLock?.isHeld == true) return
-        val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-
-        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "csqtt:wifi_perf").apply {
-            setReferenceCounted(false)
-            acquire()
+        val state = TunnelManager.currentConnectionState()
+        val deploying = DeployManager.isDeploying.value
+        val heldBefore = locks.holdsCpu
+        locks.hold(
+            lockPolicy.decide(
+                nowMs = SystemClock.elapsedRealtime(),
+                run = !autoPausedForWifi && (TunnelManager.running.value || TunnelManager.starting.value),
+                screenOn = screenOn,
+                work = state.isWork,
+                deploying = deploying,
+                totalBytes = TunnelManager.trafficBytes(),
+            ),
+        )
+        // the night's record: when the phone was kept awake for the tunnel behind a dark screen, and what for
+        val held = locks.holdsCpu
+        if (held != heldBefore && TunnelManager.running.value && !screenOn) {
+            val line = when {
+                !held -> "[СОН] Туннель в покое: телефон может спать"
+                deploying -> "[СОН] Телефон не засыпает: идёт установка"
+                state.isWork -> "[СОН] Телефон не засыпает: идёт подключение"
+                else -> "[СОН] Телефон не засыпает: идёт передача данных"
+            }
+            TunnelManager.updateLog("sleep_lock", line, 26, false, LogLevel.NET)
         }
     }
 
-    @Synchronized
-    private fun releaseWakeLock() {
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
+    /** P3 §1.9: the state and a deploy move the locks at once; the screen wakes the core's streams too. */
+    private fun watchLocks() {
+        screenOn = screenInteractive()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                screenOn = intent.action == Intent.ACTION_SCREEN_ON
+                // streams the relay dropped in the phone's sleep are made again now, before the user's first tap
+                if (screenOn) TunnelManager.wake()
+                reconcileLocks()
+            }
         }
-        wakeLock = null
-        wakeLockExpiresAtElapsedMs = 0L
-    }
-
-    @Synchronized
-    private fun releaseWifiLock() {
-        if (wifiLock?.isHeld == true) {
-            wifiLock?.release()
+        runCatching {
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter(Intent.ACTION_SCREEN_ON).apply { addAction(Intent.ACTION_SCREEN_OFF) },
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }.onSuccess { screenReceiver = receiver }
+        lockWatchJob = serviceScope.launch {
+            combine(TunnelManager.connectionState, DeployManager.isDeploying) { _, _ -> }.collect { reconcileLocks() }
         }
-        wifiLock = null
     }
 
     private fun startStatsUpdater() {
@@ -1795,10 +1703,7 @@ class TunnelService : Service() {
                     }
                 }
                 wasEverUp = wasEverUp || running || TunnelManager.processStartedAtMs > 0L
-                if (running) {
-                    acquireWakeLock()
-                    acquireWifiLock()
-                }
+                reconcileLocks()
                 if (
                     TunnelServicePolicy.shouldStop(
                         wasEverRunning = wasEverUp,
@@ -1987,11 +1892,10 @@ class TunnelService : Service() {
         autoPauseSettingsJob = null
         domainRoutingSettingsJob?.cancel()
         domainRoutingSettingsJob = null
-        batterySaverJob?.cancel()
-        batterySaverJob = null
-        batteryReceiver?.let { receiver -> runCatching { unregisterReceiver(receiver) } }
-        batteryReceiver = null
-        BatterySaver.setActive(false)
+        lockWatchJob?.cancel()
+        lockWatchJob = null
+        screenReceiver?.let { receiver -> runCatching { unregisterReceiver(receiver) } }
+        screenReceiver = null
         stopWifiAutoPauseWatch()
         updateJob?.cancel()
         networkSwapJob?.cancel()

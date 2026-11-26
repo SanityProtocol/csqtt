@@ -71,6 +71,37 @@ class RoleSwitchesMigrationTest {
     }
 
     @Test
+    fun `step 8 removes the battery saver, its prompt's flags and nothing else`() {
+        // P3 B0s (§1.9): the tunnel sleeps with the phone; nothing is set and nothing is granted
+        for (version in listOf(6, 7)) {
+            val prefs = atVersion(
+                version,
+                """{"strings": {"peer": "203.0.113.5", "battery_saver_mode": "level", "theme_mode": "dark"},
+                    "ints": {"battery_saver_percent": 30},
+                    "booleans": {"battery_optimization_prompt_handled": true, "permission_intro_shown": true,
+                                 "auto_pause_on_wifi": true, "default_role_decided": true}}""",
+            )
+            val (before, after) = migrate(prefs)
+            assertEquals(
+                "from $version",
+                setOf("battery_saver_mode", "battery_saver_percent", "battery_optimization_prompt_handled",
+                    "permission_intro_shown", "store_schema_version"),
+                changedKeys(before, after),
+            )
+            for (gone in listOf("battery_saver_mode", "battery_saver_percent", "battery_optimization_prompt_handled",
+                "permission_intro_shown")) {
+                assertNull(gone, after[gone])
+            }
+            assertEquals("dark", after["theme_mode"])
+            assertEquals(true, after["auto_pause_on_wifi"])
+        }
+        // a 2.5.3 phone's «Экономия батареи» goes the same way
+        val upgraded = migrate(load(Store253Snapshots.owner)).second
+        assertNull(upgraded["battery_saver_mode"])
+        assertNull(upgraded["battery_saver_percent"])
+    }
+
+    @Test
     fun `a fresh install has neither switch nor a server`() {
         val prefs = mutablePreferencesOf()
         SettingsStore.migrateStore(prefs)

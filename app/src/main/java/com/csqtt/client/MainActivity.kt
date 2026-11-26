@@ -1,23 +1,14 @@
 package com.csqtt.client
 
-import android.annotation.SuppressLint
-import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -25,7 +16,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
@@ -66,20 +56,7 @@ class MainActivity : ComponentActivity() {
     /** Where the user is (§4.2 rule 2): it outlives a recreate, and a process death through its saved state. */
     internal lateinit var nav: NavModel
         private set
-    private var showPermissionIntro by mutableStateOf(false)
     private var showVkAuthDialog by mutableStateOf(false)
-    private var batteryPromptInFlight = false
-
-    private val batteryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        batteryPromptInFlight = false
-        lifecycleScope.launch {
-            appSettingsStore.markBatteryOptimizationPromptHandled()
-        }
-    }
-
-    private val notificationLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        checkAndRequestBattery()
-    }
 
     companion object {
         @Volatile
@@ -172,8 +149,6 @@ class MainActivity : ComponentActivity() {
         val systemDark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         systemBars(isDarkMode(firstFrame.themeMode, systemDark))
 
-        startPermissionRequests()
-
         // Subscriptions refresh while the app is open
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -227,32 +202,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Classic's dialogs the activity itself asks with, until their cards replace them (the intro goes with B0s). */
+    /** Classic's dialogs the activity itself asks with, until their cards replace them. */
     @Composable
     private fun LegacyDialogs() {
-        if (showPermissionIntro) {
-            // one word before the system prompts, shown once (L-29)
-            AlertDialog(
-                onDismissRequest = {},
-                title = { Text("Два разрешения") },
-                text = {
-                    Text(
-                        "Уведомления — чтобы видеть состояние туннеля и запрос капчи VK: без них капча не " +
-                            "появится.\n\nРабота без ограничений батареи — чтобы туннель не засыпал при " +
-                            "выключенном экране.",
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showPermissionIntro = false
-                        lifecycleScope.launch {
-                            appSettingsStore.markPermissionIntroShown()
-                            checkAndRequestNotifications()
-                        }
-                    }) { Text("Продолжить") }
-                },
-            )
-        }
         if (showVkAuthDialog) {
             val onToken: (VkAuthPayload) -> Unit = { payload ->
                 showVkAuthDialog = false
@@ -336,69 +288,5 @@ class MainActivity : ComponentActivity() {
         val raw = intent.dataString ?: return
         // the link is a question (M-70): it stays in the navigation until the user answers it, a newer link in its place
         if (parseCsqttLink(raw) == null) showRaisedToast(getString(R.string.link_invalid), Toast.LENGTH_SHORT) else nav.open(Routes.linkImport(raw))
-    }
-
-    /** The intro dialog first when a system prompt is about to come and the intro was never shown (L-29). */
-    private fun startPermissionRequests() {
-        lifecycleScope.launch {
-            val notificationsMissing = Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) !=
-                PackageManager.PERMISSION_GRANTED
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            val batteryPromptDue = shouldRequestBatteryOptimizationExemption(
-                promptHandled = appSettingsStore.isBatteryOptimizationPromptHandled(),
-                alreadyExempt = powerManager.isIgnoringBatteryOptimizations(packageName),
-            )
-            if ((notificationsMissing || batteryPromptDue) && !appSettingsStore.isPermissionIntroShown()) {
-                showPermissionIntro = true
-            } else {
-                checkAndRequestNotifications()
-            }
-        }
-    }
-
-    private fun checkAndRequestNotifications() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            } else {
-                checkAndRequestBattery()
-            }
-        } else {
-            checkAndRequestBattery()
-        }
-    }
-
-    @SuppressLint("BatteryLife")
-    private fun checkAndRequestBattery() {
-        if (batteryPromptInFlight) return
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        lifecycleScope.launch {
-            val shouldRequest = shouldRequestBatteryOptimizationExemption(
-                promptHandled = appSettingsStore.isBatteryOptimizationPromptHandled(),
-                alreadyExempt = powerManager.isIgnoringBatteryOptimizations(packageName),
-            )
-            if (!shouldRequest) {
-                if (powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                    appSettingsStore.markBatteryOptimizationPromptHandled()
-                }
-                return@launch
-            }
-
-            batteryPromptInFlight = true
-            val launched = runCatching {
-                batteryLauncher.launch(
-                    Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        "package:$packageName".toUri(),
-                    ),
-                )
-                true
-            }.getOrDefault(false)
-            if (!launched) {
-                batteryPromptInFlight = false
-                appSettingsStore.markBatteryOptimizationPromptHandled()
-            }
-        }
     }
 }

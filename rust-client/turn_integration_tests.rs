@@ -4947,11 +4947,11 @@ async fn devices_a_fourth_device_is_refused_and_an_old_app_still_gets_in() {
     }
 }
 
-/// B6b, case 6: a device that stops sending (a phone that dies, no DISCONNECT) keeps its slot for 180 s, then gives it to
-/// the next device; the devices that carry are untouched.
+/// B6b, case 6: a device that stops sending (a phone that dies, no DISCONNECT) keeps its slot for 600 s (P3 §1.9: a
+/// phone asleep for minutes is still there), then gives it to the next device; the devices that carry are untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires ci/e2e-server.sh's standalone server, CSQTT_E2E_DEV_PEER and CSQTT_E2E_DEV_WEB"]
-async fn devices_a_silent_device_gives_its_slot_after_three_minutes() {
+async fn devices_a_silent_device_gives_its_slot_after_ten_minutes() {
     let peer = e2e_dev_peer();
     let password = "e2e-dev-limit-two-2026";
     e2e_limited_password(password, 2);
@@ -4959,9 +4959,13 @@ async fn devices_a_silent_device_gives_its_slot_after_three_minutes() {
     let b = E2eDevice::up(peer, password, Some(E2E_DEVICE_B), 702, "devices-silent-b").await;
     b.vanish().await;
     let refusal = E2eDevice::refused(peer, password, E2E_DEVICE_C, 703, "devices-silent-c1").await;
-    assert!(refusal.contains("лимит устройств"), "a slot freed before 180 s of silence: {refusal}");
-    // a keeps sending (a keepalive every 10 s), b sends nothing; past 180 s b's slot is the next device's
+    assert!(refusal.contains("лимит устройств"), "a slot freed before 600 s of silence: {refusal}");
+    // three minutes, the 2.5 server's rule, is a nap now: b keeps its slot
     tokio::time::sleep(Duration::from_secs(190)).await;
+    let refusal = E2eDevice::refused(peer, password, E2E_DEVICE_C, 705, "devices-silent-c3").await;
+    assert!(refusal.contains("лимит устройств"), "a slot freed after three minutes of silence: {refusal}");
+    // a keeps sending (a keepalive every 10 s), b sends nothing; past 600 s b's slot is the next device's
+    tokio::time::sleep(Duration::from_secs(420)).await;
     let c = E2eDevice::up(peer, password, Some(E2E_DEVICE_C), 704, "devices-silent-c2").await;
     assert!(c.alive().await, "the device in b's slot carries nothing");
     assert!(a.alive().await, "the device that kept sending lost its slot");

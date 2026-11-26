@@ -13,9 +13,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.material.icons.filled.BatterySaver
-import androidx.compose.material.icons.Icons
-import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -54,9 +51,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.NotificationManagerCompat
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.PowerManager
+import android.os.Build
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import android.provider.Settings
 import com.csqtt.client.ConnectionState
 import com.csqtt.client.TunnelProbe
@@ -65,7 +65,6 @@ import com.csqtt.client.buildTunnelStartIntent
 import com.csqtt.client.formatTraffic
 import com.csqtt.client.showsTraffic
 import kotlinx.coroutines.delay
-import com.csqtt.client.BatterySaver
 import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
@@ -209,6 +208,23 @@ internal fun ConnectionTab(
         }
     }
 
+    fun askVpnAndStart() {
+        val vpnIntent = VpnService.prepare(context)
+        if (vpnIntent != null) {
+            pendingStartAfterVpnPermission = true
+            vpnPermissionLauncher.launch(vpnIntent)
+        } else {
+            startTunnelService()
+        }
+    }
+
+    // P3 §1.9: the one runtime permission is asked by Android itself at a connect, right before the VPN consent, with
+    // no dialog of ours before it. Whatever the answer, the start goes on: refused, the screen says what is lost
+    // (NotificationsOffWarning). Android stops showing its dialog once it was refused for good
+    val notificationsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        askVpnAndStart()
+    }
+
     fun toggleTunnel() {
         val state = TunnelManager.currentConnectionState()
         if (state is ConnectionState.Stopping || TunnelManager.stopping.value) return
@@ -242,13 +258,10 @@ internal fun ConnectionTab(
             onInvalidConfiguration()
             return
         }
-        val vpnIntent = VpnService.prepare(context)
-        if (vpnIntent != null) {
-            pendingStartAfterVpnPermission = true
-            vpnPermissionLauncher.launch(vpnIntent)
-        } else {
-            startTunnelService()
-        }
+        val notificationsMissing = Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        if (notificationsMissing) notificationsLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) else askVpnAndStart()
     }
 
     CsqttScreen {
@@ -358,8 +371,8 @@ private fun TunnelConnectionPanel(
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center,
                 )
-                // B5f: the cause asks for a setting, so it carries the way there (review: «the battery prompt beside it»)
-                if (state.reason == StopCause.SYSTEM_KILLED || state.reason == StopCause.STOPPED_OUTSIDE) BackgroundWorkButton()
+                // B5f: the cause asks for a setting, so it carries the way there
+                if (state.reason == StopCause.SYSTEM_KILLED || state.reason == StopCause.STOPPED_OUTSIDE) AppSettingsButton()
             }
 
             // «Нужна капча» (B5h2): the captcha screen, which follows the core's ask; the logo still stops
@@ -393,28 +406,6 @@ private fun TunnelConnectionPanel(
                     handOverNoticeLine(it),
                     if (it.ok) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                 )
-            }
-
-            // «Экономия батареи» in force: said under the status, where the user looks
-            val batterySaving by BatterySaver.active.collectAsStateWithLifecycle()
-            if (batterySaving && state.powerIsOn) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.BatterySaver,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Text(
-                        text = BatterySaver.BADGE,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        textAlign = TextAlign.Center,
-                    )
-                }
             }
         }
     }
@@ -517,27 +508,22 @@ internal fun workersLine(active: Int, target: Int, serverLimit: Int?): String = 
 }
 
 /**
- * B5f: «Разрешить работу в фоне» — Android's own request to run without battery limits; already exempt, the app's settings,
- * where the phone's maker keeps its own background limits.
+ * B5f, P3 §1.9: a tunnel the phone itself stopped. The way to its cause is the app's page in Android's settings, where the
+ * phone's maker keeps its background limits; the app asks for no exemption of its own.
  */
 @Composable
-private fun BackgroundWorkButton() {
+private fun AppSettingsButton() {
     val context = LocalContext.current
     TextButton(
         onClick = {
-            val exempt = context.getSystemService(PowerManager::class.java)
-                ?.isIgnoringBatteryOptimizations(context.packageName) == true
-            val packageUri = Uri.parse("package:${context.packageName}")
-            val intent = if (exempt) {
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)
-            } else {
-                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, packageUri)
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
+                )
             }
-            runCatching { context.startActivity(intent) }
-                .onFailure { runCatching { context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)) } }
         },
     ) {
-        Text("Разрешить работу в фоне", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        Text("Настройки приложения", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
     }
 }
 

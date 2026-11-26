@@ -53,6 +53,11 @@ class UpgradeFrom253Test {
                 prefs[stringPreferencesKey("subscription_url_8")] = "https://sub.example.invalid/s"
                 prefs[stringPreferencesKey("connection_password_local_8")] = "subpw"
                 prefs[stringPreferencesKey("vk_hashes_8")] = hashA
+                // «Экономия батареи», the battery prompt's flag and the intro's flag (P3 B0s takes them out)
+                prefs[stringPreferencesKey("battery_saver_mode")] = "level"
+                prefs[intPreferencesKey("battery_saver_percent")] = 30
+                prefs[booleanPreferencesKey("battery_optimization_prompt_handled")] = true
+                prefs[booleanPreferencesKey("permission_intro_shown")] = true
             }
             oldScope.coroutineContext[kotlinx.coroutines.Job]!!.cancelAndJoin()
 
@@ -85,6 +90,11 @@ class UpgradeFrom253Test {
             assertNull(prefs[booleanPreferencesKey("ui_owner_mode")])
             assertNull(prefs[booleanPreferencesKey("show_deploy_tab")])
             assertNull(prefs[booleanPreferencesKey("show_logs_tab")])
+            // P3 B0s (§1.9): «Экономия батареи», the battery prompt's flag and the intro's flag are gone
+            assertNull(prefs[stringPreferencesKey("battery_saver_mode")])
+            assertNull(prefs[intPreferencesKey("battery_saver_percent")])
+            assertNull(prefs[booleanPreferencesKey("battery_optimization_prompt_handled")])
+            assertNull(prefs[booleanPreferencesKey("permission_intro_shown")])
             assertEquals(true, SettingsStore.userHasServer(prefs))
         } finally {
             file.delete()

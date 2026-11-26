@@ -304,6 +304,8 @@ object TunnelManager {
     /** The service waits for a network VK answers on, before the process starts. */
     internal val awaitingNetwork = MutableStateFlow(false)
     private val serverSilent = MutableStateFlow(false)
+    /** P3 §1.9: the core is at rest (STATS): its stream count may be zero with nothing wrong, and nothing is restarted. */
+    private val dormant = MutableStateFlow(false)
     private val runFatal = AtomicReference(FirstFatal())
     val failure = MutableStateFlow<String?>(null)
     /** The run's traffic from STATS (M-89); null before the first reading. */
@@ -317,7 +319,7 @@ object TunnelManager {
         listOf<kotlinx.coroutines.flow.Flow<Any?>>(
             running, starting, stopping, autoPausedForWifi, networkPaused, awaitingNetwork,
             ManlCaptchaWebViewManager.needed, tunconfThisProcess, vpnReady, activeWorkers, everConnected, serverSilent,
-            failure,
+            failure, dormant,
         ),
     ) { values: Array<Any?> ->
         deriveConnectionState(
@@ -334,6 +336,7 @@ object TunnelManager {
                 everConnected = values[10] as Boolean,
                 serverSilent = values[11] as Boolean,
                 failure = values[12] as String?,
+                dormant = values[13] as Boolean,
             ),
         )
     }.stateIn(scope, SharingStarted.Eagerly, ConnectionState.Idle)
@@ -353,6 +356,7 @@ object TunnelManager {
             everConnected = everConnected.value,
             serverSilent = serverSilent.value,
             failure = failure.value,
+            dormant = dormant.value,
         ),
     )
 
@@ -506,6 +510,18 @@ object TunnelManager {
             }
         }
     }
+
+    /**
+     * P3 §1.9: the screen came on. The core makes the streams its relay dropped in the phone's sleep again now, before
+     * the user's first tap needs them.
+     */
+    internal fun wake() {
+        val identity = processIdentity ?: return
+        activeScope.launch { writeProcessCommand(identity, "WAKE", "wake_command_error") }
+    }
+
+    /** P3 §1.9: all the run's processes have carried so far, up and down, for the lock policy (TunnelLocks). */
+    internal fun trafficBytes(): Long = traffic.value?.let { it.totalUp + it.totalDown } ?: 0L
 
     /** B5f2: a crash restart scheduled while offline, and the job that waits the longest delay for it. */
     private class OfflineRestart(val job: Job, val context: Context, val params: TunnelParams, val epoch: Long)
@@ -700,6 +716,11 @@ object TunnelManager {
                     updateProcessLog(identity, "stats", "[СЕТЬ] $msg", 25, false, LogLevel.NET)
                 }
                 activeWorkers.value = event.active
+                // §1.9: wanted again with no stream left (the relay dropped them in the phone's sleep). The core makes
+                // them again now; if it cannot, the recovery a zero count starts takes over, as when the count fell
+                val wokeEmpty = dormant.value && !event.dormant && event.active == 0
+                dormant.value = event.dormant
+                if (wokeEmpty) scheduleWorkerZeroRecovery(identity)
                 if (workerRecoveryPolicy.observe(event.active)) {
                     workerRecoveryJob?.cancel()
                     workerRecoveryJob = null
@@ -724,7 +745,8 @@ object TunnelManager {
             is TunnelEventParser.Event.ActiveZero -> {
                 if (activeWorkers.value != 0) updateProcessLog(identity, "stats", "[СЕТЬ] Активных: 0", 25, false, LogLevel.NET)
                 activeWorkers.value = 0
-                scheduleWorkerZeroRecovery(identity)
+                // a tunnel at rest has lost its streams to the phone's sleep, not to a fault: nothing is restarted (§1.9)
+                if (!dormant.value) scheduleWorkerZeroRecovery(identity)
             }
             is TunnelEventParser.Event.CallUnavailable -> handleUnavailableVkCall(event, identity)
             is TunnelEventParser.Event.NetworkSuspect -> verifyVkReachability(identity)
@@ -1079,7 +1101,7 @@ object TunnelManager {
         workerRecoveryJob = activeScope.launch {
             try {
                 delay(WORKER_ZERO_CONFIRMATION_MS)
-                if (!isCurrent(identity) || !running.value) return@launch
+                if (!isCurrent(identity) || !running.value || dormant.value) return@launch
                 if (!workerRecoveryPolicy.shouldRecover(activeWorkers.value, target)) return@launch
                 val context = activeContext() ?: return@launch
                 requestTransportRestart(
@@ -1575,6 +1597,7 @@ object TunnelManager {
         process = startedProcess
         tunconfThisProcess.value = false
         serverSilent.value = false
+        dormant.value = false
         targetWorkers.value = totalWorkers
         callRecoveryPending.set(false)
         nativeProcessPid = processIdOf(startedProcess)
@@ -1655,6 +1678,13 @@ object TunnelManager {
                         if (event != null && handleTunnelEvent(event, identity)) {
                             return@forEachLine
                         }
+                    }
+
+                    // P3 §1.9: the core's record of the phone's sleeps and of what each cost the relay path, kept as it
+                    // is said: the night's reading. Never a diagnostic of a fault, whatever it quotes
+                    if (lineTrim.startsWith("[СОН]")) {
+                        updateProcessLog(identity, "sleep", lineTrim, 26, false, LogLevel.NET)
+                        return@forEachLine
                     }
 
                     val isCritical = lineTrim.startsWith("CAPTCHA_SOLVE|") ||
@@ -1912,6 +1942,7 @@ object TunnelManager {
                         processIdentity = null
                         nativeProcessPid = null
                         activeWorkers.value = 0
+                        dormant.value = false
                         clearTrafficSpeed()
                         resetWorkerRecoveryState()
                         if (readerJob === coroutineContext[Job]) readerJob = null
@@ -2085,6 +2116,7 @@ object TunnelManager {
             processIdentity = null
             nativeProcessPid = null
             activeWorkers.value = 0
+            dormant.value = false
             return
         }
         val attached = (identity == null || processIdentity === identity) && process === targetProcess
@@ -2112,6 +2144,7 @@ object TunnelManager {
             }
         }
         activeWorkers.value = 0
+        dormant.value = false
     }
 
     private fun terminateExactProcess(

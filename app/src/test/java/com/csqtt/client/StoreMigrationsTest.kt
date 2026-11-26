@@ -23,8 +23,9 @@ class StoreMigrationsTest {
     fun `an owner keeps its role, port and secrets, while the design key goes and 18 workers become 10`() {
         val (before, after) = migrate(Store253Snapshots.owner)
         assertEquals(
-            // vps_ref: step 2 (B5b2) links its deploy data as record 0
-            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref"),
+            // vps_ref: step 2 (B5b2) links its deploy data as record 0; the battery saver's two: step 8 (P3 B0s)
+            setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref",
+                "battery_saver_mode", "battery_saver_percent"),
             changedKeys(before, after),
         )
         assertNull(after["ui_design"])

@@ -3,10 +3,8 @@ package com.csqtt.client
 import android.content.Intent
 import android.app.NotificationManager
 import android.net.VpnService
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.os.PowerManager
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -41,8 +39,6 @@ class TunVpnService : VpnService() {
     private var recoveryAttempts = 0
     @Volatile
     private var stopRequested = false
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
     @Volatile
     private var serviceDestroyed = false
 
@@ -58,58 +54,15 @@ class TunVpnService : VpnService() {
             private set
     }
 
-    // LOW_LATENCY Wi-Fi lock is active only with the screen on, so the deprecated HIGH_PERF mode is kept for the background VPN.
-    @Suppress("DEPRECATION")
-    private fun acquireLocks() {
-        // «Экономия батареи» in force: no CPU wake lock (the Wi-Fi lock stays)
-        if (!BatterySaver.active.value && wakeLock?.isHeld != true) {
-            val pm = getSystemService(PowerManager::class.java)
-            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "csqtt:tun_vpn_service")?.apply {
-                setReferenceCounted(false)
-                acquire(24 * 60 * 60 * 1000L)
-            }
-        }
-        if (wifiLock?.isHeld != true) {
-            val wm = applicationContext.getSystemService(WifiManager::class.java)
-            wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "csqtt:tun_vpn_wifi")?.apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        }
-    }
-
-    /** «Экономия батареи» came into force (let the CPU sleep) or ended (hold it again while the VPN runs). */
-    fun onBatterySaverChanged(save: Boolean) {
-        if (save) {
-            runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
-            wakeLock = null
-        } else if (!stopRequested && !serviceDestroyed) {
-            acquireLocks()
-        }
-    }
-
-    private fun releaseLocks() {
-        runCatching {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        }
-        wakeLock = null
-        runCatching {
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        }
-        wifiLock = null
-    }
-
     override fun onCreate() {
         super.onCreate()
         instance = this
-        acquireLocks()
         getSystemService(NotificationManager::class.java)
             .deleteNotificationChannel(CsqttConstants.Notifications.VPN_CHANNEL_ID)
         Log.d(TAG, "TunVpnService created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        acquireLocks()
         if (intent == null) {
             if (TunnelManager.running.value && !stopRequested) {
                 Log.i(TAG, "TunVpnService restarted by Android with null intent, recovering active VPN")
@@ -131,10 +84,9 @@ class TunVpnService : VpnService() {
         // an intent made for an older tunnel process, or overtaken by a newer one, is dropped (M-43)
         if (!TunnelManager.acceptsVpnIntent(intent)) {
             Log.i(TAG, "Dropped a stale ${intent.action} for generation ${intent.getLongExtra("vpn_generation", -1L)}")
-            // no run is on and no interface is up: nothing else will use this service, so it lets its locks go
+            // no run is on and no interface is up: nothing else will use this service
             val idle = synchronized(interfaceLock) { vpnInterface == null }
             if (idle && !TunnelManager.running.value && !stopRequested) {
-                releaseLocks()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -166,7 +118,6 @@ class TunVpnService : VpnService() {
                 stopRequested = true
                 serviceScope.launch {
                     vpnMutex.withLock { stopVpn() }
-                    releaseLocks()
                     stopSelf()
                 }
             }
@@ -444,7 +395,6 @@ class TunVpnService : VpnService() {
     private fun failVpn(message: String) {
         stopRequested = true
         stopVpn()
-        releaseLocks()
         TunnelManager.onVpnTerminalFailure(message, VpnFailureKind.TunEstablishFailed)
     }
 
@@ -487,7 +437,6 @@ class TunVpnService : VpnService() {
         serviceDestroyed = true
         serviceJob.cancel()
         stopVpn()
-        releaseLocks()
         instance = null
         if (unexpected) {
             TunnelManager.onVpnRecoverableFailure(
@@ -504,7 +453,6 @@ class TunVpnService : VpnService() {
         serviceDestroyed = true
         serviceJob.cancel()
         stopVpn()
-        releaseLocks()
         instance = null
         TunnelManager.onVpnTerminalFailure(
             "разрешение Android VPN было отозвано",

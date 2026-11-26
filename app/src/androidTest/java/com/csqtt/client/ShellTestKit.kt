@@ -57,14 +57,11 @@ internal object ShellTestKit {
         SecretDrafts.clear("test-sheet:")
     }
 
-    /** The first-start notification and battery prompts would stop the activity (and its UI) mid-test. */
+    /** Android's notifications prompt, asked at a connect (P3 §1.9), would stop the activity (and its UI) mid-test. */
     fun noSystemPromptsOverTheApp() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val pkg = instrumentation.targetContext.packageName
-        instrumentation.uiAutomation.apply {
-            executeShellCommand("pm grant $pkg android.permission.POST_NOTIFICATIONS").close()
-            executeShellCommand("dumpsys deviceidle whitelist +$pkg").close()
-        }
+        instrumentation.uiAutomation.executeShellCommand("pm grant $pkg android.permission.POST_NOTIFICATIONS").close()
     }
 
     /** Runs [command] as the shell user and waits for it to end. */

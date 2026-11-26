@@ -1,4 +1,7 @@
-use crate::stun_codec::{Class, Message};
+use crate::{
+    clock::Instant,
+    stun_codec::{Class, Message},
+};
 use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
@@ -7,7 +10,7 @@ use std::{
     collections::VecDeque,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) const RESULT_BUFFER_TOO_SMALL: i32 = -2;
@@ -76,6 +79,12 @@ const MAINTENANCE_RETRY_MAX: Duration = Duration::from_secs(30);
 const MAX_CHANNEL_MAINTENANCE_FAILURES: u8 = 4;
 const MAX_NONCE_RETRIES: u8 = 3;
 const CHANNEL_NUMBER: u16 = 0x4000;
+/// Two keepalives missed (the phone slept, §1.9): the relay, or the NAT in front of the phone, may have forgotten the
+/// allocation. It is asked at once, and its silence or refusal ends the allocation instead of being retried.
+const UNVERIFIED_AFTER: Duration = Duration::from_secs(20);
+/// The check after such a silence is given up after 3 s (sent at 0, 0.2, 0.6 and 1.4 s), not the 7.8 s of a request to a
+/// relay known to be there: when the relay is gone, whoever woke the phone waits that long for the streams to be remade.
+const UNVERIFIED_TRANSMISSIONS: u8 = 4;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TurnControlTransport {
@@ -212,6 +221,10 @@ struct Inner {
     permission_failures: u8,
     channel_failures: u8,
     keepalive: Option<Instant>,
+    /// The last look at the deadlines: a long way back means nothing was sent meanwhile.
+    last_poll: Option<Instant>,
+    /// Set by such a silence, until the relay answers a request of this allocation.
+    unverified: bool,
     shutting_down: bool,
     destroyed: bool,
     profile: CsqttTurnProfile,
@@ -322,6 +335,8 @@ impl NativeCore {
                 permission_failures: 0,
                 channel_failures: 0,
                 keepalive: None,
+                last_poll: None,
+                unverified: false,
                 shutting_down: false,
                 destroyed: false,
                 profile,
@@ -481,6 +496,14 @@ impl NativeCore {
         let mut inner = self.lock();
         if inner.destroyed {
             return Ok(None);
+        }
+        let silence = inner
+            .last_poll
+            .replace(now)
+            .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        if silence >= UNVERIFIED_AFTER && !inner.shutting_down && inner.state == STATE_READY {
+            inner.unverified = true;
+            inner.allocation_refresh = Some(now);
         }
         inner.expire_transactions(now);
         if !inner.shutting_down
@@ -817,13 +840,18 @@ impl Inner {
     }
 
     fn expire_transactions(&mut self, now: Instant) {
+        let transmissions = if self.unverified {
+            UNVERIFIED_TRANSMISSIONS
+        } else {
+            MAX_TRANSMISSIONS
+        };
         let mut index = 0;
         while index < self.pending.len() {
             if now < self.pending[index].next_attempt {
                 index += 1;
                 continue;
             }
-            if self.pending[index].transmissions >= MAX_TRANSMISSIONS {
+            if self.pending[index].transmissions >= transmissions {
                 let pending = self.pending.remove(index);
                 self.remove_queued_transaction(pending.transaction);
                 self.complete_failure(pending.operation, RESULT_TIMEOUT, 0, now);
@@ -904,6 +932,7 @@ impl Inner {
                 ));
                 self.allocation_expires_at = Some(now + Duration::from_secs(u64::from(lifetime)));
                 self.refresh_failures = 0;
+                self.unverified = false;
                 self.complete(operation, 0, 0);
             }
             Operation::Deallocate => {
@@ -918,11 +947,13 @@ impl Inner {
             }
             Operation::Permission => {
                 self.permission_failures = 0;
+                self.unverified = false;
                 self.complete(operation, 0, 0);
             }
             Operation::Channel => {
                 self.channel = Some(CHANNEL_NUMBER);
                 self.channel_failures = 0;
+                self.unverified = false;
                 self.push_event(NativeEvent {
                     kind: EVENT_CHANNEL_BOUND,
                     channel: CHANNEL_NUMBER,
@@ -946,6 +977,7 @@ impl Inner {
             operation,
             Operation::Refresh | Operation::Permission | Operation::Channel
         ) && self.state == STATE_READY
+            && !self.unverified
             && self
                 .allocation_expires_at
                 .is_some_and(|deadline| now < deadline)
@@ -1721,6 +1753,99 @@ mod tests {
             deallocate.attribute(ATTR_LIFETIME).unwrap().value,
             0u32.to_be_bytes()
         );
+    }
+
+    fn pull_requests(core: &NativeCore) -> Vec<(u16, [u8; 12])> {
+        let mut wire = [0u8; 2048];
+        let mut requests = Vec::new();
+        while let Some((length, _)) = core.pull_control(&mut wire).unwrap() {
+            if wire[0] & 0xc0 == 0x40 {
+                // a keepalive: channel data, not a request
+                requests.push((0, [0; 12]));
+            } else {
+                let request = Message::decode(&wire[..length]).unwrap();
+                requests.push((request.method(), request.transaction()));
+            }
+        }
+        requests
+    }
+
+    /// §1.9: the phone slept, the monotonic clock stood still. On the boot clock the first look at the deadlines after
+    /// the wake finds what fell due meanwhile and sends it at once.
+    #[test]
+    fn boot_clock_fires_overdue_deadlines_on_wake() {
+        let (core, key) = ready_core();
+        bind_ready_channel(&core, &key);
+        core.poll().unwrap();
+        assert!(pull_requests(&core).is_empty(), "nothing is due on a fresh allocation");
+
+        // a short nap: the keepalive that fell due in it goes out, nothing else
+        crate::clock::tests::sleep(Duration::from_secs(12));
+        core.poll().unwrap();
+        assert_eq!(pull_requests(&core), [(0, [0; 12])]);
+        assert!(!core.lock().unverified);
+
+        // three minutes: the permission and the channel are due (175 s), and the allocation is asked after at once
+        crate::clock::tests::sleep(Duration::from_secs(180));
+        let wait = core.poll().unwrap().unwrap();
+        let requests = pull_requests(&core);
+        assert_eq!(
+            requests.iter().map(|request| request.0).collect::<Vec<_>>(),
+            [METHOD_REFRESH as u16, METHOD_CREATE_PERMISSION as u16, METHOD_CHANNEL_BIND as u16]
+        );
+        assert!(core.lock().unverified);
+        assert!(wait < Duration::from_secs(1), "the next look is the requests' retransmission, not a deadline of the sleep");
+
+        // the relay answers: the allocation is known alive, on its usual schedule again
+        let refreshed = MessageBuilder::with_transaction(0x0104, requests[0].1)
+            .attribute(ATTR_LIFETIME, &600u32.to_be_bytes())
+            .finish_authenticated(&key)
+            .unwrap();
+        assert_eq!(core.input_stun(&refreshed), 0);
+        let inner = core.lock();
+        assert!(!inner.unverified);
+        assert_eq!(inner.state, STATE_READY);
+        let next_refresh = inner.allocation_refresh.unwrap() - Instant::now();
+        assert!(next_refresh > Duration::from_secs(299) && next_refresh <= Duration::from_secs(300));
+    }
+
+    /// §1.9: awake, a maintenance request the relay does not answer is retried while the allocation lives (the test
+    /// above this one in the file). After a sleep the same silence means the relay, or the NAT before it, forgot the
+    /// phone: the allocation ends at once, so its stream is made again when the tunnel is wanted, not after ten minutes.
+    #[test]
+    fn a_check_unanswered_after_a_sleep_ends_the_allocation() {
+        let (core, key) = ready_core();
+        bind_ready_channel(&core, &key);
+        core.poll().unwrap();
+        crate::clock::tests::sleep(Duration::from_secs(40));
+        core.poll().unwrap();
+        assert_eq!(pull_requests(&core), [(METHOD_REFRESH as u16, core.lock().pending[0].transaction)]);
+        let mut inner = core.lock();
+        let asked_at = inner.pending[0].next_attempt;
+        let mut given_up_at = asked_at;
+        let mut sent = 1;
+        while let Some(deadline) = inner.pending.first().map(|pending| pending.next_attempt) {
+            inner.expire_transactions(deadline);
+            sent += inner.controls.len();
+            inner.controls.clear();
+            given_up_at = deadline;
+        }
+        assert_eq!(inner.state, STATE_DESTROYING);
+        assert!(inner.allocation_refresh.is_none());
+        // sent at 0, 0.2, 0.6 and 1.4 s, given up at 3.0 s: the wait of whoever woke the phone
+        assert_eq!(sent, usize::from(UNVERIFIED_TRANSMISSIONS));
+        assert_eq!(given_up_at - asked_at, Duration::from_millis(2_800));
+    }
+
+    /// §1.9: an allocation whose 600 s ran out in the phone's sleep is gone on the relay, and here at the first look.
+    #[test]
+    fn an_allocation_that_expired_in_a_sleep_ends_on_wake() {
+        let (core, key) = ready_core();
+        bind_ready_channel(&core, &key);
+        core.poll().unwrap();
+        crate::clock::tests::sleep(Duration::from_secs(601));
+        core.poll().unwrap();
+        assert_eq!(core.lock().state, STATE_DESTROYING);
     }
 
     #[test]

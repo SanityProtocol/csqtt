@@ -582,6 +582,8 @@ pub struct Dispatcher {
     next_frag_id: std::sync::atomic::AtomicU16,
     termination: Arc<OnceLock<Termination>>,
     pub(crate) probes: crate::probe::Probes,
+    /// §1.9: a packet from the phone is somebody wanting the tunnel
+    pub(crate) demand: Arc<crate::worker::DemandGate>,
 }
 
 impl Dispatcher {
@@ -606,6 +608,7 @@ impl Dispatcher {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         }
     }
 
@@ -646,6 +649,7 @@ impl Dispatcher {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         });
         let io_dispatcher = dispatcher.clone();
         let task = spawn_critical(
@@ -724,6 +728,7 @@ impl Dispatcher {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         });
         crate::log_error!(
             "[КЛИЕНТ] Профиль очередей для {worker_count} потоков: буфер I/O: {} pkts, квант: {} байт",
@@ -1212,6 +1217,7 @@ impl Dispatcher {
                         if !Self::is_forwardable_packet(packet.as_slice()) {
                             continue;
                         }
+                        self.demand.want("трафик");
                         if self.workers.load().is_empty() {
                             if let Some(diag) = &stats.diag {
                                 diag.no_worker_drops.fetch_add(1, Ordering::Relaxed);
@@ -1295,6 +1301,7 @@ impl Dispatcher {
                         if !Self::is_forwardable_packet(packet.as_slice()) {
                             continue;
                         }
+                        self.demand.want("трафик");
                         let previous = client.load();
                         if previous.as_deref() != Some(&address) {
                             client.store(Some(Arc::new(address)));
@@ -2013,6 +2020,42 @@ mod tests {
         packet
     }
 
+    /// §1.9: a tunnel at rest is wanted again by the first packet the phone sends, and by nothing the phone only
+    /// announces (multicast).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_packet_from_the_phone_ends_the_tunnels_rest() {
+        let (phone, tun) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        tun.set_nonblocking(true).unwrap();
+        let cancel = CancellationToken::new();
+        let dispatcher = Dispatcher::start_test_tun(
+            File::from(std::os::fd::OwnedFd::from(tun)),
+            PacketPool::new(8),
+            Arc::new(Stats::default()),
+            [0; 32],
+            crate::obfs::ObfsMode::Unified,
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        dispatcher.demand.slept(Duration::from_secs(120));
+        let mut announcement = ipv4_packet(17, 5353, 5353, 60);
+        announcement[16..20].copy_from_slice(&[224, 0, 0, 251]);
+        phone.send(&announcement).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!dispatcher.demand.is_wanted(), "multicast took the tunnel out of its rest");
+        phone.send(&ipv4_packet(6, 49152, 443, 60)).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dispatcher.demand.is_wanted() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a packet from the phone left the tunnel at rest");
+        cancel.cancel();
+        dispatcher.shutdown().await;
+    }
+
     #[test]
     fn flow_key_parses_ipv4_and_separates_flows() {
         let a = ipv4_packet(6, 49152, 80, 60);
@@ -2159,6 +2202,7 @@ mod tests {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         };
 
         let mut p1 = pool.acquire();
@@ -2405,6 +2449,7 @@ mod tests {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         };
         let packet = || {
             let mut p = pool.acquire();
@@ -2446,6 +2491,7 @@ mod tests {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         };
 
         let p_empty = pool.acquire();
@@ -2519,6 +2565,7 @@ mod tests {
             next_frag_id: std::sync::atomic::AtomicU16::new(1),
             termination: Arc::new(OnceLock::new()),
             probes: crate::probe::Probes::default(),
+            demand: Arc::new(crate::worker::DemandGate::new()),
         };
 
         let src: SocketAddr = "10.66.67.2:54321".parse().unwrap();

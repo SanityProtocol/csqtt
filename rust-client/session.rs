@@ -1518,6 +1518,7 @@ async fn writer_loop(
         activity,
     } = runtime;
     let keepalive_interval = Duration::from_secs(10);
+    let mut sleeps = crate::clock::sleeps();
     loop {
         let command = tokio::select! {
             biased;
@@ -1529,6 +1530,11 @@ async fn writer_loop(
                 Some(command)
             }
             _ = tokio::time::sleep(keepalive_interval) => {
+                None
+            }
+            // the phone slept (§1.9): the server hears from this stream as soon as it wakes, not after the rest of a
+            // timer that stood still meanwhile
+            _ = sleeps.changed() => {
                 None
             }
         };

@@ -20,7 +20,9 @@ object TunnelEventParser {
         data class Stats(
             val active: Int,
             val bytesUp: Long,
-            val bytesDown: Long
+            val bytesDown: Long,
+            /** P3 §1.9: the phone slept and nothing has wanted the tunnel since (an older core never says so). */
+            val dormant: Boolean = false,
         ) : Event()
 
         data class Error(
@@ -108,7 +110,8 @@ object TunnelEventParser {
             "STATS" -> Event.Stats(
                 active = payload.optInt("active", 0).coerceAtLeast(0),
                 bytesUp = payload.optLong("bytes_up", 0L).coerceAtLeast(0L),
-                bytesDown = payload.optLong("bytes_down", 0L).coerceAtLeast(0L)
+                bytesDown = payload.optLong("bytes_down", 0L).coerceAtLeast(0L),
+                dormant = payload.optBoolean("dormant", false),
             )
             "ERROR" -> Event.Error(
                 code = payload.optString("code", ""),

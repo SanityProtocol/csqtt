@@ -101,12 +101,15 @@ impl Events {
         );
     }
 
-    pub fn stats(&self, active: i32, bytes_up: i64, bytes_down: i64) {
+    /// `dormant` (§1.9): the phone slept and nothing has wanted the tunnel since. The app then takes a stream count
+    /// of zero for a tunnel at rest, which repairs itself when it is needed, and restarts nothing.
+    pub fn stats(&self, active: i32, bytes_up: i64, bytes_down: i64, dormant: bool) {
         self.emit("STATS", || {
             serde_json::json!({
                 "active": active,
                 "bytes_up": bytes_up,
-                "bytes_down": bytes_down
+                "bytes_down": bytes_down,
+                "dormant": dormant
             })
         });
     }

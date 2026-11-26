@@ -4965,11 +4965,12 @@ fn choose_device_ip(
     }
 }
 
-/// B6b: a device keeps its slot against a newcomer while its client sends anything: a running client sends a keepalive
-/// every 10 s, so 180 s without a packet means it is gone (a stop without DISCONNECT, a killed app, a phone off) or
-/// asleep (a phone whose battery saver holds no wake lock with the screen off): the plan's accepted risk, such a phone
-/// meets the limit when it wakes.
-const DEVICE_LIVE_SECS: u64 = 180;
+/// B6b: a device keeps its slot against a newcomer while its client sends anything. A 2.6 phone sleeps with its screen
+/// off (P3 §1.9: the app holds no wake lock for an idle tunnel) and its keepalives come when it wakes, minutes apart,
+/// so the 180 s of the 2.5 app, which was awake to send one every 10 s, would call every sleeping phone gone. 600 s is
+/// the relay allocation's lifetime: a phone silent that long has no path through the relay left and reconnects when it
+/// is used again, where it meets the limit like any other device.
+const DEVICE_LIVE_SECS: u64 = 600;
 
 /// B6b: what a GETCONF of a device meets at its password's limit.
 #[derive(Debug, PartialEq, Eq)]
@@ -6748,20 +6749,22 @@ mod tests {
         assert_eq!(admit(d, 3, &[live(a), live(b), live(c)]), Admission::Refuse);
         // a device that holds a slot keeps it, also over a limit lowered since
         assert_eq!(admit(a, 1, &[live(a), live(b), live(c)]), Admission::Admit);
-        // 180 s without a packet: silent; the stalest gives way first, and only as many as make room
-        assert_eq!(admit(d, 3, &[live(a), silent(b, 200), silent(c, 400)]), Admission::Evict(vec![c]));
-        assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 179)]), Admission::Refuse);
-        assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 180)]), Admission::Evict(vec![c]));
+        // 600 s without a packet: silent (a phone asleep for a few minutes is not, P3 §1.9); the stalest gives way
+        // first, and only as many as make room
+        assert_eq!(DEVICE_LIVE_SECS, 600);
+        assert_eq!(admit(d, 3, &[live(a), silent(b, 700), silent(c, 900)]), Admission::Evict(vec![c]));
+        assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 599)]), Admission::Refuse);
+        assert_eq!(admit(d, 3, &[live(a), live(b), silent(c, 600)]), Admission::Evict(vec![c]));
         // the legacy device (an old app): never refused, past the limit too; it takes no slot and never gives way, so a
         // limit of 3 is three new-app devices and an old app, whichever came first (review F1)
         assert_eq!(admit(L, 1, &[live(a), live(b)]), Admission::Admit);
         assert_eq!(admit(c, 3, &[live(a), live(L), live(b)]), Admission::Admit);
         assert_eq!(admit(d, 3, &[live(a), live(b), live(c), live(L)]), Admission::Refuse);
-        assert_eq!(admit(d, 3, &[live(a), silent(b, 300), live(c), live(L)]), Admission::Evict(vec![b]));
+        assert_eq!(admit(d, 3, &[live(a), silent(b, 700), live(c), live(L)]), Admission::Evict(vec![b]));
         assert_eq!(admit(d, 3, &[live(a), live(b), live(c), silent(L, 600)]), Admission::Refuse);
         // a limit lowered below the devices holding a slot: the silent ones give way if they make room, or nobody does
-        assert_eq!(admit(d, 2, &[silent(a, 300), silent(b, 500), live(c)]), Admission::Evict(vec![b, a]));
-        assert_eq!(admit(d, 1, &[silent(a, 300), silent(b, 500), live(c)]), Admission::Refuse);
+        assert_eq!(admit(d, 2, &[silent(a, 700), silent(b, 900), live(c)]), Admission::Evict(vec![b, a]));
+        assert_eq!(admit(d, 1, &[silent(a, 700), silent(b, 900), live(c)]), Admission::Refuse);
     }
 
     #[test]

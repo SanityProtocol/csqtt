@@ -3,6 +3,7 @@
 mod auth;
 mod captcha;
 mod captcha_slider;
+mod clock;
 mod cpu_task;
 pub mod direct_relay;
 mod diag;
@@ -70,8 +71,8 @@ use tokio_util::sync::CancellationToken;
 use turn_endpoint::TurnTransportMode;
 use turn_ip_pool::{TurnIpPool, parse_custom_turn_ips};
 use worker::{
-    GROUPS_PER_CREDENTIAL, GroupContext, PauseGate, RuntimeParams, WORKER_START_INTERVAL,
-    WORKERS_PER_GROUP, WorkerStartPacer, parse_hashes, run_groups,
+    DemandGate, GROUPS_PER_CREDENTIAL, GroupContext, PauseGate, RuntimeParams,
+    WORKER_START_INTERVAL, WORKERS_PER_GROUP, WorkerStartPacer, parse_hashes, run_groups,
 };
 use wrap::derive_wrap_key;
 
@@ -385,9 +386,15 @@ async fn run(arguments: Arguments) -> Result<i32> {
             return Err(error);
         }
     };
+    let demand = dispatcher.demand.clone();
+    let sleep_task = tokio::spawn(clock::watch_sleep({
+        let demand = demand.clone();
+        move |gap| demand.slept(gap)
+    }));
     let control_task = start_control_input(
         cancel.clone(),
         paused.clone(),
+        demand.clone(),
         captcha,
         events.clone(),
         finish_js_calls.clone(),
@@ -436,7 +443,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
         &local_port,
     );
     let repair = RepairState::new(MAX_WORKERS);
-    let stats_task = tokio::spawn(stats.clone().run(events.clone(), cancel.clone()));
+    let stats_task = tokio::spawn(stats.clone().run(events.clone(), demand.clone(), cancel.clone()));
     let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<String>(32);
     let config_events = events.clone();
     let config_task = tokio::spawn(async move {
@@ -471,6 +478,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
         stats,
         events: events.clone(),
         paused,
+        demand,
         config_tx,
         start_pacer: Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
         credential_pacer: Arc::new(tokio::sync::Mutex::new(())),
@@ -525,6 +533,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
     config_task.abort();
     control_task.abort();
     parent_task.abort();
+    sleep_task.abort();
     let _ = stats_task.await;
     let _ = config_task.await;
     let _ = control_task.await;
@@ -812,6 +821,7 @@ async fn resolve_peer(peer: &str) -> Result<SocketAddr> {
 fn start_control_input(
     cancel: CancellationToken,
     paused: Arc<PauseGate>,
+    demand: Arc<DemandGate>,
     captcha: Arc<CaptchaSolver>,
     events: Events,
     finish_js_calls: Arc<AtomicBool>,
@@ -848,7 +858,13 @@ fn start_control_input(
             }
             match line {
                 "PAUSE" => paused.set_paused(true),
-                "RESUME" => paused.set_paused(false),
+                "RESUME" => {
+                    paused.set_paused(false);
+                    demand.want("сеть");
+                }
+                // §1.9: the screen came on. Streams that did not survive the phone's sleep are made again now, not at
+                // the first packet the user's tap sends
+                "WAKE" => demand.want("экран"),
                 "FINISH_VK_CALLS" => finish_js_calls.store(true, Ordering::Release),
                 "STOP" => {
                     crate::log_error!("[КЛИЕНТ] Получена команда STOP");

@@ -34,10 +34,10 @@ class StoreBackupTest {
                         "peer_5": "192.0.2.10", "subscription_url_5": "https://sub.example.invalid/s",
                         "connection_password_local_5": "sub-pass",
                         "deploy_ip_9": "198.51.100.9", "deploy_server_name_9": "Запас",
-                        "theme_mode": "dark", "battery_saver_mode": "below", "subscription_meta_v1": "{}",
+                        "theme_mode": "dark", "subscription_meta_v1": "{}",
                         "update_latest_version": "2.6.0", "client_id_check_results": "{}"},
             "ints": {"server_peer_port": 46100, "server_web_port": 46102, "vps_ref": 0, "vps_ref_9": 9,
-                     "workers_per_hash_3": 30, "vpn_mtu_3": 1280, "active_profile": 3, "battery_saver_percent": 30, "store_schema_version": 2},
+                     "workers_per_hash_3": 30, "vpn_mtu_3": 1280, "active_profile": 3, "update_check_interval_hours": 12, "store_schema_version": 2},
             "booleans": {"manual_ports_enabled": true, "csqtt_link_mode_3": true, "auto_pause_on_wifi": true,
                          "default_role_decided": true},
             "longs": {"deploy_last_inspection_at": 1761000000000, "connection_generation": 7}}""",
@@ -71,8 +71,8 @@ class StoreBackupTest {
         for (name in listOf("peer", "vk_hashes", "deploy_ip", "deploy_login", "deploy_server_name", "server_peer_port",
             "server_web_port", "vps_ref", "manual_ports_enabled", "deploy_last_inspection_at", "csqtt_link_3",
             "profile_name_3", "workers_per_hash_3", "vpn_mtu_3", "csqtt_link_mode_3", "peer_5", "subscription_url_5",
-            "connection_password_local_5", "deploy_ip_9", "vps_ref_9", "theme_mode", "battery_saver_mode",
-            "battery_saver_percent", "auto_pause_on_wifi", "active_profile", "subscription_meta_v1")) {
+            "connection_password_local_5", "deploy_ip_9", "vps_ref_9", "theme_mode", "update_check_interval_hours",
+            "auto_pause_on_wifi", "active_profile", "subscription_meta_v1")) {
             assertEquals(name, sourceMap[name], restored[name])
         }
         // secrets come back encrypted with this phone's key; the connection password as a local value
@@ -122,13 +122,17 @@ class StoreBackupTest {
         owner.put("unknown_key", "x")
         owner.put("connection_password_local", "bad|pass") // breaks the password rule
         owner.put("vps_ref", 17)                           // no record 17 in the file
-        root.getJSONObject("settings").put("battery_saver_percent", true)
+        root.getJSONObject("settings").put("update_check_interval_hours", true)
+        // P3 B0s: a backup an earlier build made still names «Экономия батареи»: it is not a setting any more
+        root.getJSONObject("settings").put("battery_saver_mode", "below").put("battery_saver_percent", 30)
         val target = otherPhone()
         StoreBackup.restore(target, root.toString(), encrypt, decrypt)
         assertNull(target[intPreferencesKey("server_peer_port")])
         assertNull(target[stringPreferencesKey("unknown_key")])
         assertNull(target[stringPreferencesKey("connection_password_local")])
         assertNull(target[intPreferencesKey("vps_ref")])
+        assertNull(target[intPreferencesKey("update_check_interval_hours")])
+        assertNull(target[stringPreferencesKey("battery_saver_mode")])
         assertNull(target[intPreferencesKey("battery_saver_percent")])
         assertEquals("203.0.113.5", target[stringPreferencesKey("peer")])
         assertEquals(1761000000000L, target[longPreferencesKey("deploy_last_inspection_at")])

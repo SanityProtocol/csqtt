@@ -22,6 +22,14 @@ sealed class ConnectionState {
     val powerIsOn: Boolean
         get() = this !is Idle && this !is Failed && this !is Stopping
 
+    /**
+     * P3 §1.9: the app is at work for the tunnel, a start or a repair, which the phone's sleep must not cut short
+     * (TunnelLockPolicy). Waiting for a network, for a captcha's answer or for a Wi-Fi pause to end is not work.
+     */
+    val isWork: Boolean
+        get() = this is Preparing || this is Connecting || this is Reconnecting || this is ServerNotResponding ||
+            this is Stopping
+
     /** The short label of the tile, the widget and classic Home. */
     val label: String
         get() = when (this) {
@@ -59,6 +67,11 @@ internal data class ConnectionInputs(
     val everConnected: Boolean = false,
     /** A stream is ready but the server never answered GETCONF (M-2). */
     val serverSilent: Boolean = false,
+    /**
+     * P3 §1.9: the core is at rest. The phone slept and nothing has wanted the tunnel since, so streams the relay
+     * dropped meanwhile are made again only when the phone sends a packet or the screen comes on.
+     */
+    val dormant: Boolean = false,
     /** The first fatal cause of the last run, until the next start. */
     val failure: String? = null,
 )
@@ -70,6 +83,8 @@ internal fun deriveConnectionState(input: ConnectionInputs): ConnectionState = w
         !running && !starting -> failure?.let { ConnectionState.Failed(it) } ?: ConnectionState.Idle
         waitingForNetwork -> ConnectionState.WaitingForNetwork
         running && tunconf && vpnReady && activeWorkers > 0 -> ConnectionState.Connected(activeWorkers)
+        // a tunnel at rest repairs itself when it is needed: it is a working tunnel, whatever its stream count (§1.9)
+        running && tunconf && vpnReady && dormant && everConnected -> ConnectionState.Connected(activeWorkers)
         // a silent server is not hidden by a captcha that cannot help it (review F4)
         serverSilent -> ConnectionState.ServerNotResponding
         // after «Подключено»: a captcha asked for more workers does not hide a working tunnel (B5h2)
@@ -130,9 +145,9 @@ internal class VpnIntentGate {
     }
 }
 
-/** The tunnel notification's title (M-89): the state, and the live stream count once connected. */
+/** The tunnel notification's title (M-89): the state, and the live stream count once connected (none at rest, §1.9). */
 internal fun tunnelNotificationTitle(state: ConnectionState): String = when (state) {
-    is ConnectionState.Connected -> "Подключено • Потоков: ${state.workers}"
+    is ConnectionState.Connected -> if (state.workers > 0) "Подключено • Потоков: ${state.workers}" else state.label
     else -> state.label
 }
 

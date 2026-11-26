@@ -128,6 +128,7 @@ pub struct GroupContext {
     pub stats: Arc<Stats>,
     pub events: Events,
     pub paused: Arc<PauseGate>,
+    pub demand: Arc<DemandGate>,
     pub config_tx: mpsc::Sender<String>,
     pub start_pacer: Arc<WorkerStartPacer>,
     pub credential_pacer: Arc<tokio::sync::Mutex<()>>,
@@ -179,6 +180,92 @@ impl PauseGate {
             }
         }
         true
+    }
+}
+
+/// §1.9: whether anybody wants the tunnel now. A sleep of the phone ends the wish: what woke it may need no tunnel at
+/// all. Until a packet from the phone, or the app's WAKE (the screen) or RESUME (a network), says otherwise, a worker
+/// whose path through the relay did not survive the sleep makes no new allocation and fetches no credential: VK counts
+/// both, and a phone on a table must not spend them at every wake of a night. A phone that never sleeps never comes
+/// here: the wish it starts with stays.
+pub struct DemandGate {
+    wanted: AtomicBool,
+    /// workers waiting for the wish
+    parked: AtomicUsize,
+    changed: Notify,
+}
+
+impl DemandGate {
+    pub fn new() -> Self {
+        Self {
+            wanted: AtomicBool::new(true),
+            parked: AtomicUsize::new(0),
+            changed: Notify::new(),
+        }
+    }
+
+    pub fn is_wanted(&self) -> bool {
+        self.wanted.load(Ordering::Acquire)
+    }
+
+    /// The phone slept for `gap`. The long sleeps are logged to the second: they are the ones a relay does not survive.
+    pub fn slept(&self, gap: Duration) {
+        if gap >= Duration::from_secs(300) {
+            crate::log_error!("[СОН] Телефон спал {} мин {} с", gap.as_secs() / 60, gap.as_secs() % 60);
+        } else {
+            crate::log_error!("[СОН] Телефон спал меньше 5 минут");
+        }
+        if self.wanted.swap(false, Ordering::AcqRel) {
+            self.changed.notify_waiters();
+        }
+    }
+
+    /// Somebody wants the tunnel; `cause` goes to the log when that is news. Called for every packet the phone sends.
+    #[inline]
+    pub fn want(&self, cause: &str) {
+        if self.wanted.load(Ordering::Relaxed) {
+            return;
+        }
+        if !self.wanted.swap(true, Ordering::AcqRel) {
+            if self.parked.load(Ordering::Acquire) != 0 {
+                crate::log_error!("[СОН] Туннель нужен ({cause}): потоки восстанавливаются");
+            }
+            self.changed.notify_waiters();
+        }
+    }
+
+    /// Resolves once the wish is there; false if `cancel` came first.
+    async fn wait(&self, cancel: &CancellationToken) -> bool {
+        if self.is_wanted() {
+            return true;
+        }
+        struct Parked<'a>(&'a AtomicUsize);
+        impl Drop for Parked<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        if self.parked.fetch_add(1, Ordering::AcqRel) == 0 {
+            crate::log_error!("[СОН] Потоки ждут, пока туннель понадобится");
+        }
+        let _parked = Parked(&self.parked);
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_wanted() {
+                return true;
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return false,
+                _ = notified.as_mut() => {},
+            }
+        }
+    }
+
+    /// Resolves when the wish comes or goes: STATS says so at once.
+    pub async fn changed(&self) {
+        self.changed.notified().await;
     }
 }
 
@@ -797,6 +884,10 @@ async fn worker_loop(
             if group_creds.is_unavailable() || group_creds.is_exhausted() {
                 return;
             }
+            // §1.9: after a sleep, no credential and no allocation until somebody wants the tunnel
+            if !context.demand.wait(&worker_cancel).await {
+                return;
+            }
             if let Some(lease) = group_creds.get().await {
                 break lease;
             }
@@ -926,6 +1017,10 @@ async fn worker_loop(
         if was_ready {
             attempt = 0;
             fatal_streak = 0;
+            // the night's record (§1.9): why a stream that worked before the sleep is gone after it
+            if let (Err(error), false) = (&result, context.demand.is_wanted()) {
+                crate::log_error!("[СОН] Поток не пережил сон: {error:#}");
+            }
         }
         drop(config_guard);
         if worker_cancel.is_cancelled()
@@ -1349,6 +1444,150 @@ mod tests {
         assert!(!wait.is_finished());
         gate.set_paused(false);
         assert!(wait.await.unwrap());
+    }
+
+    /// §1.9: after a sleep a worker starts nothing (no credential, no allocation) until the tunnel is wanted.
+    #[tokio::test]
+    async fn dormant_waits_for_traffic() {
+        let gate = Arc::new(DemandGate::new());
+        let cancel = CancellationToken::new();
+        assert!(gate.wait(&cancel).await, "a phone that never slept waits for nothing");
+
+        gate.slept(Duration::from_secs(90));
+        assert!(!gate.is_wanted());
+        let mut waiting = Box::pin(gate.wait(&cancel));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting).await.is_err(),
+            "a worker went on with nobody wanting the tunnel"
+        );
+        gate.want("трафик");
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut waiting).await.unwrap());
+        assert!(gate.is_wanted());
+        assert_eq!(gate.parked.load(Ordering::Acquire), 0);
+
+        // a second sleep ends the wish again; a stop ends the wait
+        gate.slept(Duration::from_secs(400));
+        let stopped = CancellationToken::new();
+        let waiting = tokio::spawn({
+            let (gate, stopped) = (gate.clone(), stopped.clone());
+            async move { gate.wait(&stopped).await }
+        });
+        tokio::task::yield_now().await;
+        stopped.cancel();
+        assert!(!waiting.await.unwrap());
+    }
+
+    /// §1.9: a worker of a tunnel at rest spends nothing of VK's: it asks for no credential and makes no allocation
+    /// until the tunnel is wanted. (The credential pacer is held here, so a worker that got past the gate would wait
+    /// behind it instead of calling VK from a test.)
+    #[tokio::test]
+    async fn dormant_allocates_nothing() {
+        let cancel = CancellationToken::new();
+        let events = Events::new(false);
+        let pool = PacketPool::new(8);
+        let dispatcher = Arc::new(Dispatcher::for_test(pool.clone(), 8));
+        let (config_tx, _config_rx) = mpsc::channel(1);
+        let context = Arc::new(GroupContext {
+            params: Arc::new(RuntimeParams {
+                peer: "127.0.0.1:9".parse().unwrap(),
+                turn_host: None,
+                turn_port: None,
+                turn_ip_pool: Arc::new(crate::turn_ip_pool::TurnIpPool::new(Vec::new(), 1)),
+                turn_transport: TurnTransportMode::Udp,
+                dpi_split: crate::dpi_split::DpiSplit::OFF,
+                srtp_mode: SrtpMode::parse("auto").unwrap(),
+                hashes: Arc::from(vec!["h".repeat(20)]),
+                wrap_key: [0; 32],
+                client_wrap_key: [0; 32],
+                mode: ObfsMode::Unified,
+                generation: 1,
+                salt: Arc::from("salt"),
+                local_port: Arc::from("9000"),
+                password: Arc::from("password"),
+                device_id: None,
+                workers: Arc::new(AtomicUsize::new(1)),
+                configured_workers: 1,
+            }),
+            auth: Arc::new(VkAuth::new(
+                "vkcalls",
+                crate::profiles::random_profile("firefox"),
+                &[],
+                crate::captcha::CaptchaSolver::new("auto", cancel.clone()),
+                None,
+                events.clone(),
+            )),
+            demand: dispatcher.demand.clone(),
+            dispatcher,
+            pool,
+            stats: Arc::new(Stats::default()),
+            events,
+            paused: Arc::new(PauseGate::new()),
+            config_tx,
+            start_pacer: Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
+            credential_pacer: Arc::new(tokio::sync::Mutex::new(())),
+            ready_credential_tx: None,
+            config_sent: Arc::new(AtomicBool::new(false)),
+            config_in_flight: Arc::new(AtomicBool::new(false)),
+            server_stream_repair: Arc::new(AtomicBool::new(false)),
+            repair: RepairState::new(1),
+            shutdown: Arc::new(ShutdownCoordinator::new()),
+            cancel: cancel.clone(),
+            scale_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        let credentials = Arc::new(GroupCredentials {
+            credential_id: 1,
+            hash: context.params.hashes[0].clone(),
+            context: context.clone(),
+            state: tokio::sync::Mutex::new(CredentialCache::default()),
+            fetch_gate: tokio::sync::Mutex::new(()),
+            failures: AtomicUsize::new(0),
+            availability: Arc::new(HashAvailability::new(&cancel)),
+            exhausted: AtomicBool::new(false),
+        });
+        let _no_fetch = context.credential_pacer.clone().lock_owned().await;
+
+        // the phone slept before the worker's turn came
+        context.demand.slept(Duration::from_secs(120));
+        let worker = tokio::spawn(worker_loop(
+            1,
+            context.clone(),
+            credentials.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(context.demand.parked.load(Ordering::Acquire), 1, "the worker is not waiting at the gate");
+        assert!(credentials.fetch_gate.try_lock().is_ok(), "a credential was being asked for with nobody wanting the tunnel");
+        assert_eq!(credentials.state.lock().await.next_generation, 0);
+
+        // the tunnel is wanted: the worker goes for its credential (and waits behind the pacer held above)
+        context.demand.want("трафик");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while credentials.fetch_gate.try_lock().is_ok() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the worker did not go on once the tunnel was wanted");
+        assert_eq!(context.demand.parked.load(Ordering::Acquire), 0);
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), worker).await.unwrap().unwrap();
+    }
+
+    /// §1.9: the app hears of the rest and of its end at once (STATS), not at the next tick.
+    #[tokio::test]
+    async fn dormant_changes_are_announced() {
+        let gate = Arc::new(DemandGate::new());
+        let mut changed = Box::pin(gate.changed());
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut changed).await.is_err());
+        gate.slept(Duration::from_secs(30));
+        tokio::time::timeout(Duration::from_secs(1), &mut changed).await.unwrap();
+        let mut changed = Box::pin(gate.changed());
+        // a second sleep with the wish already gone is no news
+        gate.slept(Duration::from_secs(30));
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut changed).await.is_err());
+        gate.want("экран");
+        tokio::time::timeout(Duration::from_secs(1), &mut changed).await.unwrap();
     }
 
     #[test]

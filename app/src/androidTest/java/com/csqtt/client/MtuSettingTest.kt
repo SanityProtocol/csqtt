@@ -86,8 +86,6 @@ class MtuSettingTest {
     @Test
     fun aPresetIsStoredAsPickedAndACustomValueOnlyInsideTheRange() {
         runBlocking {
-            // a fresh install's first-run explainer would cover the tab
-            store.markPermissionIntroShown()
             store.clearProfile(OTHER)
             store.clearProfile(THIRD)
             store.clearProfile(SLOT)

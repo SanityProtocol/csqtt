@@ -41,7 +41,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
-import com.csqtt.client.BatterySaver
 import com.csqtt.client.ui.legacy.dialogs.ImportExportDialog
 import com.csqtt.client.ui.legacy.dialogs.QrScannerDialog
 import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
@@ -80,13 +79,6 @@ fun FloatingToolbar(
     var scannedLink by rememberSaveable { mutableStateOf<String?>(null) }
     var showImportExportDialog by rememberSaveable { mutableStateOf(false) }
     var showAutoPauseInfo by rememberSaveable { mutableStateOf(false) }
-    var showBatterySaverInfo by rememberSaveable { mutableStateOf(false) }
-    val batterySaverMode by settingsStore.batterySaverMode.collectAsStateWithLifecycle(
-        initialValue = BatterySaver.DEFAULT_MODE,
-    )
-    val batterySaverPercent by settingsStore.batterySaverPercent.collectAsStateWithLifecycle(
-        initialValue = BatterySaver.DEFAULT_PERCENT,
-    )
     var showTurnSubnetsDialog by rememberSaveable { mutableStateOf(false) }
     val profileList by settingsStore.profileList.collectAsStateWithLifecycle(initialValue = emptyList())
     var editingProfileIndex by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -302,29 +294,6 @@ fun FloatingToolbar(
                     // B5f2: where the pause acts, and the networks of the two list rules
                     if (autoPauseOnWifi) WifiRuleControls(settingsStore)
 
-                    CompactDropdownSetting(
-                        title = BatterySaver.TITLE,
-                        selectedKey = batterySaverMode,
-                        options = BatterySaver.MODES,
-                        enabled = true,
-                        onSelected = { mode -> scope.launch { settingsStore.saveBatterySaverMode(mode) } },
-                        onTitleInfo = { showBatterySaverInfo = true },
-                    )
-
-                    // the level counts only in «Свой уровень»; «Авто» follows the phone's battery saver, so it is shown greyed
-                    if (batterySaverMode != BatterySaver.MODE_OFF) {
-                        CompactDropdownSetting(
-                            title = BatterySaver.LEVEL_TITLE,
-                            selectedKey = batterySaverPercent.toString(),
-                            options = (BatterySaver.PERCENT_CHOICES + batterySaverPercent).distinct().sorted()
-                                .map { percent -> percent.toString() to "≤ $percent %" },
-                            enabled = batterySaverMode == BatterySaver.MODE_LEVEL,
-                            onSelected = { key ->
-                                key.toIntOrNull()?.let { percent -> scope.launch { settingsStore.saveBatterySaverPercent(percent) } }
-                            },
-                        )
-                    }
-
                     if (!csqttLinkMode) {
                         SheetAction("Выбор TURN подсетей", onClick = { showTurnSubnetsDialog = true })
                     }
@@ -351,10 +320,6 @@ fun FloatingToolbar(
                 }
             }
         }
-    }
-
-    if (showBatterySaverInfo) {
-        BatterySaverInfoDialog(onDismiss = { showBatterySaverInfo = false })
     }
 
     if (showAutoPauseInfo) {
