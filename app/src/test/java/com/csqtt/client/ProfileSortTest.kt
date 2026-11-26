@@ -29,8 +29,12 @@ class ProfileSortTest {
         assertEquals(listOf(3, 1, 0, 2), order(ProfileSort.Custom, custom = listOf(3, 1)))
         // the quickest first; no answer and never pinged last
         assertEquals(listOf(0, 1, 2, 3), order(ProfileSort.Ping))
-        // by name as Russian orders it, capitals and small letters together: ams-1, msk-1, Дом, Хельсинки
-        assertEquals(listOf(3, 2, 1, 0), order(ProfileSort.Name))
+        // by name as Russian orders it, capitals and small letters together
+        val named = listOf(ProfileEntry(0, "Хельсинки"), ProfileEntry(1, "дача"), ProfileEntry(2, "Дом"), ProfileEntry(3, "Амстердам"))
+        assertEquals(listOf(3, 1, 2, 0), order(ProfileSort.Name, named))
+        // (which of two scripts comes first is the platform's: Android puts the phone's own first)
+        assertEquals(listOf(3, 2), order(ProfileSort.Name).filter { it in setOf(2, 3) })
+        assertEquals(listOf(1, 0), order(ProfileSort.Name).filter { it in setOf(0, 1) })
         // the last connected first; one never connected last
         assertEquals(listOf(1, 0, 3, 2), order(ProfileSort.Recent))
         // the newest first; one added before the date was kept last
@@ -49,7 +53,7 @@ class ProfileSortTest {
     fun pinnedOnesComeFirstInTheSameOrder() {
         val pinned = listOf(hel, dom.copy(pinned = true), msk, ams.copy(pinned = true))
         assertEquals(listOf(1, 3, 0, 2), order(ProfileSort.Custom, pinned))
-        assertEquals(listOf(3, 1, 2, 0), order(ProfileSort.Name, pinned))
+        assertEquals(setOf(1, 3), order(ProfileSort.Name, pinned).take(2).toSet())
         assertEquals(listOf(1, 3, 0, 2), order(ProfileSort.Recent, pinned))
     }
 
@@ -64,13 +68,13 @@ class ProfileSortTest {
 
     @Test
     fun theOwnOrderAfterAMove() {
-        val shown = ProfileOrder.shown(all, ProfileSort.Name, emptyList())           // 3, 2, 1, 0
-        // «Хельсинки» dragged to the top of the list as it stands
-        val moved = ProfileOrder.moved(shown, custom = emptyList(), moved = 0, position = 0)
-        assertEquals(listOf(0, 3, 2, 1), moved)
+        val shown = ProfileOrder.shown(all, ProfileSort.Recent, emptyList())         // 1, 0, 3, 2
+        // «msk-1» dragged to the top of the list as it stands
+        val moved = ProfileOrder.moved(shown, custom = emptyList(), moved = 2, position = 0)
+        assertEquals(listOf(2, 1, 0, 3), moved)
         assertEquals(moved, order(ProfileSort.Custom, custom = moved))
         // past the end is the end
-        assertEquals(listOf(2, 1, 0, 3), ProfileOrder.moved(shown, emptyList(), moved = 3, position = 99))
+        assertEquals(listOf(0, 3, 2, 1), ProfileOrder.moved(shown, emptyList(), moved = 1, position = 99))
         // a profile the list does not show (a hidden one) keeps a place after the rows
         val withHidden = ProfileOrder.shown(listOf(hel, dom.copy(hidden = true), msk), ProfileSort.Custom, listOf(1, 2, 0))
         assertEquals(listOf(0, 2, 1), ProfileOrder.moved(withHidden, custom = listOf(1, 2, 0), moved = 0, position = 0))

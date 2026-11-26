@@ -1,6 +1,5 @@
 package com.csqtt.client.ui.shell
 
-import android.content.Intent
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -23,13 +22,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.CSQTTTypography
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DeploySettingsSnapshot
-import com.csqtt.client.ProfileSwitch
+import com.csqtt.client.HomeLayout
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
-import com.csqtt.client.TunnelService
+import com.csqtt.client.pickProfile
 import com.csqtt.client.ui.design.Csq
-import com.csqtt.client.ui.legacy.ConnectionTab
+import com.csqtt.client.ui.home.HomeTab
 import com.csqtt.client.ui.legacy.DeployTab
 import com.csqtt.client.ui.legacy.ExceptionsTab
 import com.csqtt.client.ui.legacy.FloatingToolbar
@@ -65,7 +64,7 @@ internal fun LegacyFrame(content: @Composable () -> Unit) {
 
 /** A tab's classic screen. A form's saved state is keyed on its profile, so one profile's draft never reaches another. */
 @Composable
-internal fun LegacyTab(tab: Tab, onVkAuthRequested: () -> Unit) {
+internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout, onVkAuthRequested: () -> Unit) {
     val store = LocalStore.current
     val nav = LocalNav.current
     val forms = rememberSaveableStateHolder()
@@ -75,22 +74,29 @@ internal fun LegacyTab(tab: Tab, onVkAuthRequested: () -> Unit) {
     val epoch by store.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
 
+    if (tab == Tab.Home) {
+        // «Главная» is the new design's (B1): outside classic's frame, with the system's font scale
+        if (auth.isLoaded) {
+            // a start asked for before Android's VPN question belongs to the profile it was asked for
+            forms.SaveableStateProvider("home:${auth.profile}:$epoch") {
+                HomeTab(
+                    auth = auth,
+                    layout = homeLayout,
+                    onInvalidConfiguration = {
+                        nav.select(Tab.Tunnel)
+                        tunnelValidationRequest += 1
+                    },
+                    onVkAuthRequested = onVkAuthRequested,
+                )
+            }
+        } else {
+            Spacer(Modifier.fillMaxSize())
+        }
+        return
+    }
     LegacyFrame {
         when (tab) {
-            Tab.Home -> if (auth.isLoaded) {
-                forms.SaveableStateProvider("connection:${auth.profile}:$epoch") {
-                    ConnectionTab(
-                        settingsStore = store,
-                        tunnelAuthSettings = auth,
-                        onInvalidConfiguration = {
-                            nav.select(Tab.Tunnel)
-                            tunnelValidationRequest += 1
-                        },
-                    )
-                }
-            } else {
-                Spacer(Modifier.fillMaxSize())
-            }
+            Tab.Home -> Unit
             Tab.Tunnel -> if (auth.isLoaded) {
                 forms.SaveableStateProvider("tunnel:${auth.profile}:$epoch") {
                     SettingsTab(
@@ -169,31 +175,7 @@ internal fun LegacyHeaderActions(themeMode: String, onOpenServer: (() -> Unit)?)
             settingsStore = store,
             csqttLinkMode = auth.csqttLinkMode,
             activeProfile = activeProfile,
-            onActiveProfileChange = { profile ->
-                scope.launch {
-                    if (profile != activeProfile) store.saveActiveProfile(profile)
-                    // the operator (2026-11-21): a pick of a profile the run is not on reconnects onto it; a run
-                    // paused on Wi-Fi takes it at its resume
-                    val runOn = ProfileSwitch.runIsOn(
-                        TunnelManager.running.value, TunnelManager.starting.value,
-                        TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
-                    )
-                    // against where the run is going: a switch still pending counts as done (verify N1)
-                    if (ProfileSwitch.pickReconnects(runOn, profile, TunnelManager.runTargetProfile())) {
-                        TunnelManager.switchTarget = profile
-                        runCatching {
-                            context.startService(
-                                Intent(context, TunnelService::class.java)
-                                    .setAction(CsqttConstants.General.ACTION_SWITCH_PROFILE),
-                            )
-                        }
-                    } else if (TunnelManager.autoPausedForWifi.value) {
-                        // a run paused on Wi-Fi resumes on the pick (its run_profile)
-                        TunnelManager.sourceProfile = profile
-                        store.saveRunProfile(profile)
-                    }
-                }
-            },
+            onActiveProfileChange = { profile -> scope.launch { pickProfile(context, store, profile, activeProfile) } },
             currentTheme = themeMode,
             onThemeChange = { mode -> scope.launch { store.saveThemeMode(mode) } },
             activeFingerprint = fingerprint,

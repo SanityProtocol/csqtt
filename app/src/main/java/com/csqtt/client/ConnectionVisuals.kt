@@ -68,10 +68,13 @@ internal fun connectionVisuals(
 internal object StreamsLine {
     const val HOLD_MS = 2_000L
 
-    /** The states in which streams are being made or carry traffic. */
+    /**
+     * The states in which streams are being made or carry traffic. Not while a captcha is waited for: no stream can
+     * come before it is solved, and the state says why.
+     */
     fun applies(state: ConnectionState): Boolean = when (state) {
         ConnectionState.Preparing, ConnectionState.Connecting, is ConnectionState.Connected, ConnectionState.Reconnecting,
-        ConnectionState.ServerNotResponding, ConnectionState.CaptchaNeeded -> true
+        ConnectionState.ServerNotResponding -> true
         else -> false
     }
 

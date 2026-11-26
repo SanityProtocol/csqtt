@@ -31,6 +31,7 @@ import com.csqtt.client.ui.design.systemBars
 import com.csqtt.client.ui.legacy.AppUpdateDialog
 import com.csqtt.client.ui.legacy.dialogs.VkAuthDialog
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
+import com.csqtt.client.ui.home.HomeLayoutSwitch
 import com.csqtt.client.ui.shell.FirstFrame
 import com.csqtt.client.ui.shell.LegacyEffects
 import com.csqtt.client.ui.shell.LegacyFrame
@@ -166,11 +167,16 @@ class MainActivity : ComponentActivity() {
             val storedHasServer: Boolean? by appSettingsStore.hasServer.collectAsStateWithLifecycle(
                 initialValue = SettingsStore.cachedHasServer,
             )
+            val storedLayout: HomeLayout? by appSettingsStore.homeLayout.collectAsStateWithLifecycle(
+                initialValue = SettingsStore.cachedHomeLayout,
+            )
             val themeMode = storedTheme ?: firstFrame.themeMode
             val hasServer = storedHasServer ?: firstFrame.hasServer
-            LaunchedEffect(storedTheme, storedHasServer) {
+            // Home's layout is right in the first frame too (P3-PLAN §1.3a)
+            val homeLayout = storedLayout ?: firstFrame.homeLayout
+            LaunchedEffect(storedTheme, storedHasServer, storedLayout) {
                 val theme = storedTheme ?: return@LaunchedEffect
-                firstFrame.keep(theme, storedHasServer ?: return@LaunchedEffect)
+                firstFrame.keep(theme, storedHasServer ?: return@LaunchedEffect, storedLayout ?: return@LaunchedEffect)
             }
             val dark = isDarkMode(themeMode, isSystemInDarkTheme())
             LaunchedEffect(dark) { systemBars(dark) }
@@ -180,9 +186,10 @@ class MainActivity : ComponentActivity() {
                     Shell(
                         hasServer = hasServer,
                         headerActions = {
+                            if (nav.tab == Tab.Home) HomeLayoutSwitch(homeLayout)
                             LegacyHeaderActions(themeMode, onOpenServer = if (hasServer) null else ({ nav.select(Tab.Server) }))
                         },
-                        tabContent = { tab -> LegacyTab(tab, onVkAuthRequested = ::requestVkAuth) },
+                        tabContent = { tab -> LegacyTab(tab, homeLayout, onVkAuthRequested = ::requestVkAuth) },
                     )
                     LegacyFrame { LegacyDialogs() }
                     LegacyEffects()

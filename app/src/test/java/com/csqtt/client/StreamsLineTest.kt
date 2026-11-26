@@ -49,7 +49,8 @@ class StreamsLineTest {
         assertFalse(StreamsLine.shown(ConnectionState.Connected(0), dormant = true, active = 0, running = 10, fullSince = null, nowMs = 0))
         for (state in listOf(
             ConnectionState.Idle, ConnectionState.Failed("x"), ConnectionState.Stopping, ConnectionState.PausedOnWifi,
-            ConnectionState.WaitingForNetwork,
+            // no stream can come before the captcha is solved, and the state says so
+            ConnectionState.WaitingForNetwork, ConnectionState.CaptchaNeeded,
         )) {
             assertFalse("$state", StreamsLine.shown(state, false, active = 0, running = 10, fullSince = null, nowMs = 0))
         }

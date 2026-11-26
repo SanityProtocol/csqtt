@@ -55,6 +55,27 @@ internal object Icons {
         "M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61", "m2 2 20 20",
     )
     val more by stroke(circle(12f, 5f, 1f), circle(12f, 12f, 1f), circle(12f, 19f, 1f))
+    // «Главная» (B1): the layout's switch, the profiles' order, a pin, and the marks of its cards
+    val viewList by stroke("M4 6h.01", "M4 12h.01", "M4 18h.01", "M9 6h11", "M9 12h11", "M9 18h11")
+    val viewOne by stroke(
+        "M8.5 4h7a4.5 4.5 0 0 1 4.5 4.5v7a4.5 4.5 0 0 1-4.5 4.5h-7A4.5 4.5 0 0 1 4 15.5v-7A4.5 4.5 0 0 1 8.5 4z",
+        "M10.4 9.7 12.5 8.3v7.4",
+    )
+    val sort by stroke("m3 16 4 4 4-4", "M7 20V4", "M11 4h10", "M11 8h7", "M11 12h4")
+    val pin by stroke(
+        "M12 17v5",
+        "M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z",
+    )
+    val bellOff by stroke(
+        "M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5", "M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7",
+        "M10.3 21a1.94 1.94 0 0 0 3.4 0", "m2 2 20 20",
+    )
+    val wifi by stroke("M12 20h.01", "M2 8.82a15 15 0 0 1 20 0", "M5 12.859a10 10 0 0 1 14 0", "M8.5 16.429a5 5 0 0 1 7 0")
+    val alert by stroke(circle(12f, 12f, 10f), "M12 8v4", "M12 16h.01")
+    val shield by stroke(
+        "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+        "m9 12 2 2 4-4",
+    )
 
     /** The C of the wordmark on the launcher icon's 108 grid: the app's own glyph everywhere, coloured by state. */
     val c: ImageVector by lazy {
@@ -66,7 +87,10 @@ internal object Icons {
     }
 
     val all: List<ImageVector>
-        get() = listOf(key, cloud, terminal, list, arrowLeft, close, check, loader, warning, info, chevronRight, eye, eyeOff, more, c)
+        get() = listOf(
+            key, cloud, terminal, list, arrowLeft, close, check, loader, warning, info, chevronRight, eye, eyeOff, more,
+            viewList, viewOne, sort, pin, bellOff, wifi, alert, shield, c,
+        )
 }
 
 @Composable

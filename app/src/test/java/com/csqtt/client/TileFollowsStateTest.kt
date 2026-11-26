@@ -1,7 +1,6 @@
 package com.csqtt.client
 
 import android.service.quicksettings.Tile
-import com.csqtt.client.ui.legacy.workersLine
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -26,11 +25,5 @@ class TileFollowsStateTest {
         assertEquals("Подключено", ConnectionState.Connected(3).label)
         assertEquals("Подключение…", ConnectionState.Connecting.label)
         assertEquals("Отключено", ConnectionState.Idle.label)
-    }
-
-    @Test
-    fun homeWorkersLine() {
-        assertEquals("Потоки: 18 / 20 · сервер: 30", workersLine(18, 20, 30))
-        assertEquals("Потоки: 0 / 20", workersLine(0, 20, null))
     }
 }

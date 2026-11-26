@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.HomeLayout
 import com.csqtt.client.LogBook
 import com.csqtt.client.QuestionPlace
 import com.csqtt.client.R
@@ -55,8 +56,8 @@ import com.csqtt.client.ui.design.pluralText
 import kotlin.math.abs
 
 /**
- * What the first frame needs before the store has answered (M-94): the theme mode and whether «Сервер» is in the bar, as
- * last shown. The settings are in DataStore, whose first read is asynchronous; drawing its defaults until it came was
+ * What the first frame needs before the store has answered (M-94): the theme mode, whether «Сервер» is in the bar and
+ * Home's layout (P3-PLAN §1.3a), as last shown. The settings are in DataStore, whose first read is asynchronous; drawing its defaults until it came was
  * the flash of the wrong theme. A missing mirror (the first start after the update) gives the defaults, once.
  */
 internal class FirstFrame(context: Context) {
@@ -64,15 +65,17 @@ internal class FirstFrame(context: Context) {
 
     val themeMode: String get() = prefs.getString(THEME, null) ?: CsqttConstants.Theme.MODE_SYSTEM
     val hasServer: Boolean get() = prefs.getBoolean(SERVER, false)
+    val homeLayout: HomeLayout get() = HomeLayout.fromStored(prefs.getString(LAYOUT, null))
 
-    fun keep(themeMode: String, hasServer: Boolean) {
-        if (themeMode == this.themeMode && hasServer == this.hasServer) return
-        prefs.edit().putString(THEME, themeMode).putBoolean(SERVER, hasServer).apply()
+    fun keep(themeMode: String, hasServer: Boolean, homeLayout: HomeLayout) {
+        if (themeMode == this.themeMode && hasServer == this.hasServer && homeLayout == this.homeLayout) return
+        prefs.edit().putString(THEME, themeMode).putBoolean(SERVER, hasServer).putString(LAYOUT, homeLayout.stored).apply()
     }
 
     private companion object {
         const val THEME = "theme_mode"
         const val SERVER = "has_server"
+        const val LAYOUT = "home_layout"
     }
 }
 
