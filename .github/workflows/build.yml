@@ -167,9 +167,10 @@ jobs:
         # The client's #[ignore] end-to-end cases against the amd64 core this run built, started in its own network
         # namespace (ci/e2e-server.sh). The throughput case runs at its fixed 128 Mbit/s target with its floors halved: a
         # hosted runner carries the client, the relay and the server at once. Skipped on manual `ref` runs: an older tree
-        # (2.5.3) carries the cases before their 2.6.0 fixes.
+        # (2.5.3) carries the cases before their 2.6.0 fixes. The silent-device case alone waits 610 s (a device's slot
+        # is kept for 600 s, P3 §1.9): the step takes about 17 minutes.
         if: ${{ !inputs.ref }}
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           sudo recipe/ci/e2e-server.sh up out/cores/csqtt-linux-amd64 "$RUNNER_TEMP/e2e"
           set -a; . "$RUNNER_TEMP/e2e/env"; set +a
