@@ -10,10 +10,17 @@ internal data class SubscriptionRefreshOutcome(
     val title: String = "",
     val nodes: Int = 0,
     val skipped: Int = 0,
+    /** The nodes that went into a profile, new or its own. */
+    val written: Int = 0,
+    /** The certificate the fetch turned away, when that is why it failed (P3 B2). */
+    val refused: SubscriptionCertRecord? = null,
 )
 
 /** Manual and scheduled subscription refreshes share one lock per URL. */
 internal object SubscriptionSync {
+    /** How often a subscription added in the app refreshes until the user picks another interval (the canvas, F-SubEdit). */
+    const val NEW_AUTO_UPDATE_MINUTES = 60
+
     private val locks = mutableMapOf<String, Mutex>()
 
     private fun lockFor(url: String): Mutex = synchronized(locks) {
@@ -69,48 +76,97 @@ internal object SubscriptionSync {
         }
     }
 
+    /**
+     * How [url]'s server is trusted, and the URL as it is kept. Marked by the user ([allowHttp]: V2's «Скачивать по
+     * HTTP», or an http:// URL they typed), it is fetched over HTTPS all the same and trusted by its pinned certificate
+     * (M-171).
+     */
+    private fun trustOf(meta: SubscriptionMeta?, url: String, allowHttp: Boolean): Pair<String, SubscriptionTrust> {
+        val pinned = allowHttp || meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
+        return normalizeSubscriptionUrl(url, pinned) to SubscriptionTrust(pinned, meta?.trusted)
+    }
+
+    /**
+     * The import sheet's «Загрузить» (P3 B2): what the subscription holds, for the user to see before anything is
+     * written. Nothing is stored. The URL the result belongs to comes back with it: [importPreviewed] takes that one.
+     */
+    suspend fun preview(store: SettingsStore, rawUrl: String, allowHttp: Boolean): Pair<String, SubscriptionFetchResult> {
+        val (url, trust) = trustOf(store.subscriptionMeta.first()[rawUrl.trim()], rawUrl.trim(), allowHttp)
+        return url to SubscriptionImporter.fetch(url, trust)
+    }
+
+    /**
+     * The import sheet's «Импортировать»: what [preview] showed is written, under the lock a refresh of the same URL
+     * takes. A subscription that is new refreshes by itself from then on, once an hour, until the user says otherwise.
+     */
+    suspend fun importPreviewed(
+        store: SettingsStore,
+        url: String,
+        preview: SubscriptionPreview,
+        cert: SubscriptionCertRecord?,
+        allowHttp: Boolean,
+    ): SubscriptionRefreshOutcome = lockFor(url).withLock {
+        val known = store.subscriptionMeta.first()[url]
+        val pinned = allowHttp || known?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
+        val outcome = written(store, url, known, preview, cert, pinned)
+        if (known == null) {
+            // nothing of it went into a profile (every node's server is a profile already, or none is free): there is
+            // no subscription to keep, and nothing for a refresh to come back to
+            if (outcome.written == 0) {
+                store.deleteSubscriptionMeta(url)
+                return@withLock outcome
+            }
+            store.saveSubscriptionAutoUpdate(url, NEW_AUTO_UPDATE_MINUTES)
+        }
+        recordOutcome(store, url, outcome.title, outcome)
+        outcome
+    }
+
+    /**
+     * «Доверять новому» (P3 B2): the certificate the last refresh turned away, which the user was shown as [sha256],
+     * becomes the trusted one, and the subscription is refreshed with it. Null when that certificate is no longer the
+     * one waiting (another refresh came between): nothing is trusted.
+     */
+    suspend fun trustAndRefresh(store: SettingsStore, url: String, sha256: String): SubscriptionRefreshOutcome? =
+        lockFor(url).withLock {
+            if (store.trustRefusedCertificate(url, sha256)) performRefresh(store, url) else null
+        }
+
     private suspend fun performRefresh(
         store: SettingsStore,
         url: String,
     ): SubscriptionRefreshOutcome {
         val meta = store.subscriptionMeta.first()[url]
-        // marked by the user (V2's «Скачивать по HTTP», or an http:// URL they typed): fetched over HTTPS all the same,
-        // its server trusted by its pinned certificate (M-171)
-        val pinned = meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
-        val normalized = normalizeSubscriptionUrl(url, pinned)
+        val (normalized, trust) = trustOf(meta, url, allowHttp = false)
         store.markSubscriptionAttempt(normalized)
-        val record = meta?.certSha256?.takeIf { it.isNotBlank() }
-            ?.let {
-                SubscriptionCertRecord(
-                    sha256 = it,
-                    notAfterMs = meta.certNotAfter,
-                    kind = CertKind.fromStored(meta.certKind),
-                    names = meta.certNames.split(',').map(String::trim).filter(String::isNotEmpty).toSet(),
-                )
-            }
-        val outcome = when (val result = SubscriptionImporter.fetch(normalized, SubscriptionTrust(pinned, record))) {
-            is SubscriptionFetchResult.Success -> {
-                result.cert?.let { store.recordSubscriptionCertificate(normalized, it) }
-                val summary = SubscriptionImporter.importNodes(
-                    store = store,
-                    rawUrl = normalized,
-                    preview = result.preview,
-                    allowHttp = pinned,
-                )
-                store.markSubscriptionUpdated(normalized, title = result.preview.title)
-                SubscriptionRefreshOutcome(
-                    success = true,
-                    message = summary.message(),
-                    title = meta?.title?.takeIf { it.isNotBlank() } ?: result.preview.title,
-                    nodes = result.preview.nodes.size,
-                    skipped = summary.skipped,
-                )
-            }
-            is SubscriptionFetchResult.Failure ->
-                SubscriptionRefreshOutcome(false, result.message)
+        val outcome = when (val result = SubscriptionImporter.fetch(normalized, trust)) {
+            is SubscriptionFetchResult.Success -> written(store, normalized, meta, result.preview, result.cert, trust.pinned)
+            is SubscriptionFetchResult.Failure -> SubscriptionRefreshOutcome(false, result.message, refused = result.refused)
         }
         recordOutcome(store, normalized, meta?.title.orEmpty(), outcome)
         return outcome
+    }
+
+    /** A fetched subscription into the store: its certificate recorded, its nodes into their profiles, its time marked. */
+    private suspend fun written(
+        store: SettingsStore,
+        url: String,
+        meta: SubscriptionMeta?,
+        preview: SubscriptionPreview,
+        cert: SubscriptionCertRecord?,
+        pinned: Boolean,
+    ): SubscriptionRefreshOutcome {
+        cert?.let { store.recordSubscriptionCertificate(url, it) }
+        val summary = SubscriptionImporter.importNodes(store = store, rawUrl = url, preview = preview, allowHttp = pinned)
+        store.markSubscriptionUpdated(url, title = preview.title)
+        return SubscriptionRefreshOutcome(
+            success = true,
+            message = summary.message(),
+            title = meta?.title?.takeIf { it.isNotBlank() } ?: preview.title,
+            nodes = preview.nodes.size,
+            skipped = summary.skipped,
+            written = summary.total,
+        )
     }
 
     /**
@@ -123,7 +179,7 @@ internal object SubscriptionSync {
         val id = CsqttConstants.Notifications.SUBSCRIPTION_NOTIFICATION_ID
         // one notice per subscription; its URL may carry an access token, so the tag is a hash of it
         val tag = "subscription:${url.hashCode()}"
-        if (store.recordSubscriptionOutcome(url, error, skipped)) {
+        if (store.recordSubscriptionOutcome(url, error, skipped, outcome.refused)) {
             BackgroundNotice.post(context, id, "Подписка «${title.ifBlank { "Подписка" }}» не обновилась", error, tag)
         } else if (outcome.success) {
             BackgroundNotice.cancel(context, id, tag)

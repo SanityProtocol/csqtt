@@ -1,49 +1,44 @@
 package com.csqtt.client
 
-/** What the store says about the profiles a link could go into (read in one pass). */
+/** What the store says about where a link could go (read in one pass). */
 internal data class LinkImportState(
-    val activeName: String,
-    /** The active profile has no server and no link yet. */
-    val activeEmpty: Boolean,
-    /** host:port the active profile connects to, lower-cased; null when it has none. */
-    val activeEndpoint: String?,
+    /** The profile that already connects to the link's server, the open one before another; null when none does. */
+    val same: Int?,
+    val sameName: String,
+    /** The open profile while it holds nothing yet: the link fills it and takes no second slot. */
+    val emptyOpen: Int?,
     val freeProfile: Boolean,
-    val tunnelRunning: Boolean,
+    /** The profile the tunnel is on while it runs, starts, stops or is paused for Wi-Fi; null when it is off. */
+    val runProfile: Int?,
+    val runName: String,
 )
 
-/** The choices one import offers (M-70): an import never writes anywhere the user did not pick. */
+/**
+ * The choices one import offers (M-70; the canvas, I15): an import never writes a profile the user did not pick, never
+ * the one the tunnel is on, and a new profile is never made the open one by itself.
+ */
 internal data class LinkImportPlan(
-    /** «Заменить профиль «X»» / «В этот профиль» — writes the active profile. */
-    val intoActive: Boolean,
-    /** The active profile is empty or already this server: writing it replaces nothing else. */
-    val activeIsSameOrEmpty: Boolean,
-    /** «В новый профиль». */
-    val intoNew: Boolean,
-    /** Why a choice is missing, shown in the dialog; null when both are offered. */
-    val note: String?,
+    /** The profile already on the link's server, which «Обновить «…»» would write; null when there is none. */
+    val same: Int?,
+    /** «Обновить» can be taken: not while the tunnel is on that profile (the write would land mid-session). */
+    val update: Boolean,
+    /** A profile can be added: a slot is free, or the open profile is empty and takes the link. */
+    val add: Boolean,
+    /** The profile «Добавить» writes: the open one while it is empty, else null for a new one. */
+    val addInto: Int?,
 )
 
 internal object LinkImport {
-    /** The tunnel is running, starting, stopping or paused for Wi-Fi: the active profile is not written (M-70). */
+    /** The tunnel is running, starting, stopping or paused for Wi-Fi: its profile is not written (M-70). */
     fun tunnelBusy(): Boolean = TunnelManager.running.value || TunnelManager.starting.value ||
         TunnelManager.stopping.value || TunnelManager.autoPausedForWifi.value
 
     fun endpoint(host: String, port: Int): String = "${host.trim().trim('[', ']').lowercase()}:$port"
 
-    /**
-     * M-70: the active profile is offered unless the tunnel runs (a write there would land at the next recovery restart,
-     * mid-session); a new profile is offered when one is free. The dialog always asks, and names the profile it replaces.
-     */
-    fun plan(linkEndpoint: String, state: LinkImportState): LinkImportPlan {
-        val sameOrEmpty = state.activeEmpty || state.activeEndpoint == linkEndpoint
-        val intoActive = !state.tunnelRunning
-        val intoNew = state.freeProfile
-        val note = when {
-            !intoActive && !intoNew -> "Отключите туннель или удалите ненужный профиль: все 32 профиля заняты"
-            !intoActive -> "Туннель работает: ссылка добавится в новый профиль"
-            !intoNew -> "Все 32 профиля заняты"
-            else -> null
-        }
-        return LinkImportPlan(intoActive = intoActive, activeIsSameOrEmpty = sameOrEmpty, intoNew = intoNew, note = note)
-    }
+    fun plan(state: LinkImportState): LinkImportPlan = LinkImportPlan(
+        same = state.same,
+        update = state.same != null && state.same != state.runProfile,
+        add = state.emptyOpen != null || state.freeProfile,
+        addInto = state.emptyOpen,
+    )
 }

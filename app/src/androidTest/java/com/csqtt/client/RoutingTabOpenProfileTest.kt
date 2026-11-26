@@ -49,8 +49,8 @@ class RoutingTabOpenProfileTest {
         TunnelManager.serverRoutingActive.value = false
         TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(-1, null, emptyList()))
         store.saveActiveProfile(0)
-        store.deleteProfileFromClassic(RUN)
-        store.deleteProfileFromClassic(OTHER)
+        store.deleteProfile(RUN)
+        store.deleteProfile(OTHER)
     }
 
     private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()

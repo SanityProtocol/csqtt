@@ -77,6 +77,32 @@ internal object Icons {
         "m9 12 2 2 4-4",
     )
 
+    private fun rect(x: Float, y: Float, w: Float, h: Float, r: Float) =
+        "M${x + r} ${y}h${w - 2 * r}a$r $r 0 0 1 $r ${r}v${h - 2 * r}a$r $r 0 0 1 ${-r} ${r}h${-(w - 2 * r)}a$r $r 0 0 1 ${-r} ${-r}v${-(h - 2 * r)}a$r $r 0 0 1 $r ${-r}z"
+
+    // P3 B2: the profiles sheet, the ways to add a profile, the subscription's sheets
+    val pencil by stroke(
+        "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
+        "m15 5 4 4",
+    )
+    val trash by stroke("M3 6h18", "M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6", "M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2")
+    val plus by stroke("M5 12h14", "M12 5v14")
+    val qr by stroke(
+        rect(3f, 3f, 5f, 5f, 1f), rect(16f, 3f, 5f, 5f, 1f), rect(3f, 16f, 5f, 5f, 1f), "M21 16h-3a2 2 0 0 0-2 2v3", "M21 21v.01",
+        "M12 7v3a2 2 0 0 1-2 2H7", "M3 12h.01", "M12 3h.01", "M12 16v.01", "M16 12h1", "M21 12v.01", "M12 21v-1",
+    )
+    val clipboard by stroke(rect(8f, 2f, 8f, 4f, 1f), "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2")
+    val server by stroke(rect(2f, 2f, 20f, 8f, 2f), rect(2f, 14f, 20f, 8f, 2f), "M6 6h.01", "M6 18h.01")
+    val image by stroke(rect(3f, 3f, 18f, 18f, 2f), circle(9f, 9f, 2f), "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21")
+    val refresh by stroke(
+        "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "M21 3v5h-5",
+        "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16", "M8 16H3v5",
+    )
+    val copy by stroke(rect(8f, 8f, 14f, 14f, 2f), "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2")
+    val chevronUp by stroke("m18 15-6-6-6 6")
+    val chevronDown by stroke("m6 9 6 6 6-6")
+    val lock by stroke(rect(3f, 11f, 18f, 11f, 2f), "M7 11V7a5 5 0 0 1 10 0v4")
+
     /** The C of the wordmark on the launcher icon's 108 grid: the app's own glyph everywhere, coloured by state. */
     val c: ImageVector by lazy {
         ImageVector.Builder(defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 108f, viewportHeight = 108f)
@@ -90,6 +116,7 @@ internal object Icons {
         get() = listOf(
             key, cloud, terminal, list, arrowLeft, close, check, loader, warning, info, chevronRight, eye, eyeOff, more,
             viewList, viewOne, sort, pin, bellOff, wifi, alert, shield, c,
+            pencil, trash, plus, qr, clipboard, server, image, refresh, copy, chevronUp, chevronDown, lock,
         )
 }
 

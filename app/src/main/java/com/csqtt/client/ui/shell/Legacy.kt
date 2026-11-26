@@ -38,7 +38,6 @@ import com.csqtt.client.ui.legacy.design.CsqttDarkExtendedColors
 import com.csqtt.client.ui.legacy.design.CsqttLightExtendedColors
 import com.csqtt.client.ui.legacy.design.CsqttMaterialShapes
 import com.csqtt.client.ui.legacy.design.LocalCsqttExtendedColors
-import com.csqtt.client.ui.legacy.dialogs.LinkImportDialog
 import kotlinx.coroutines.launch
 
 /*
@@ -164,6 +163,7 @@ internal fun LegacyEffects() {
 @Composable
 internal fun LegacyHeaderActions(themeMode: String, onOpenServer: (() -> Unit)?) {
     val store = LocalStore.current
+    val nav = LocalNav.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val auth by store.tunnelAuthSnapshot.collectAsStateWithLifecycle(initialValue = TunnelAuthSnapshot())
@@ -183,13 +183,7 @@ internal fun LegacyHeaderActions(themeMode: String, onOpenServer: (() -> Unit)?)
             autoPauseOnWifi = autoPauseOnWifi,
             onAutoPauseOnWifiChange = { enabled -> scope.launch { store.saveAutoPauseOnWifi(enabled) } },
             onOpenServer = onOpenServer,
+            onAddProfile = { nav.open(Routes.addProfile()) },
         )
     }
-}
-
-/** The csqtt:// link question (M-70): classic's dialog on the shell's route until B2 draws the new one. */
-@Composable
-internal fun LegacyLinkImport(raw: String, close: () -> Unit) {
-    val store = LocalStore.current
-    LegacyFrame { LinkImportDialog(settingsStore = store, raw = raw, onDone = close) }
 }

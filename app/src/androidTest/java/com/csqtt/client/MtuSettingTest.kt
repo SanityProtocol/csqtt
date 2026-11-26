@@ -55,9 +55,9 @@ class MtuSettingTest {
 
     @After
     fun restore() = runBlocking {
-        store.deleteProfileFromClassic(SLOT)
-        store.deleteProfileFromClassic(OTHER)
-        store.deleteProfileFromClassic(THIRD)
+        store.deleteProfile(SLOT)
+        store.deleteProfile(OTHER)
+        store.deleteProfile(THIRD)
     }
 
     private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()

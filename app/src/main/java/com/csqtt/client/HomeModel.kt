@@ -35,9 +35,11 @@ internal enum class ProfileSort(val stored: String) {
 internal enum class ProfileKind { OwnServer, Link, Subscription }
 
 /**
- * One profile as a list shows it. [peer], [link] and [subscriptionTitle] are what its second line is made of, by [kind].
- * [pingMs] is its last on-demand ping, which nothing stores. [lastConnectedAt] and [addedAt] are wall-clock milliseconds,
- * 0 when not known: a profile from before these were kept.
+ * One profile as a list shows it. [peer] with [port], [link] and [subscriptionTitle] are what its second line is made
+ * of, by [kind]; [workers] is the streams it is set to. [subscriptionUrl] tells one subscription's nodes from another's.
+ * [originalName] is the name it came with, which a rename can be taken back to. [pingMs] is its last on-demand ping,
+ * which nothing stores. [lastConnectedAt] and [addedAt] are wall-clock milliseconds, 0 when not known: a profile from
+ * before these were kept.
  */
 internal data class ProfileEntry(
     val index: Int,
@@ -46,12 +48,37 @@ internal data class ProfileEntry(
     val peer: String = "",
     val link: String = "",
     val subscriptionTitle: String = "",
+    val subscriptionUrl: String = "",
+    val originalName: String = name,
+    val port: Int = 0,
+    val workers: Int = 0,
     val pinned: Boolean = false,
     val hidden: Boolean = false,
     val pingMs: Int? = null,
     val lastConnectedAt: Long = 0L,
     val addedAt: Long = 0L,
 )
+
+/** What a profile's row can do, as its swipe and its ⋮ menu offer it (the canvas, F-ProfileActions, F-NodeActions). */
+internal enum class ProfileAction { Show, Rename, Pin, Unpin, Hide, OpenTunnel, Delete }
+
+internal object ProfileMenu {
+    /**
+     * A row's actions, in the order they are drawn. A subscription's node has no delete: it is hidden, and its
+     * subscription is deleted whole (the operator, 2026-11-26). The [selected] profile cannot be hidden, so it is not
+     * offered. A hidden one is shown first; pinning and opening wait until it is.
+     */
+    fun items(entry: ProfileEntry, selected: Boolean = false): List<ProfileAction> = buildList {
+        if (entry.hidden) add(ProfileAction.Show)
+        add(ProfileAction.Rename)
+        if (!entry.hidden) {
+            add(if (entry.pinned) ProfileAction.Unpin else ProfileAction.Pin)
+            if (!selected) add(ProfileAction.Hide)
+            add(ProfileAction.OpenTunnel)
+        }
+        if (entry.kind != ProfileKind.Subscription) add(ProfileAction.Delete)
+    }
+}
 
 internal object ProfileOrder {
     /**
@@ -78,6 +105,19 @@ internal object ProfileOrder {
         return entries.filterNot { it.hidden }.sortedWith(compareByDescending<ProfileEntry> { it.pinned }.then(order))
     }
 
+    /** How many rows Home shows before «Все профили и подписки» (the canvas, F-Home). */
+    const val HOME_ROWS = 3
+
+    /**
+     * Home's rows out of the [shown] ones: the first [HOME_ROWS] of the order. The [selected] profile is always among
+     * them, so the selection is never out of sight: when the order puts it further down it takes the last place.
+     */
+    fun homeRows(shown: List<ProfileEntry>, selected: Int): List<ProfileEntry> {
+        val top = shown.take(HOME_ROWS)
+        val chosen = shown.firstOrNull { it.index == selected }
+        return if (chosen == null || chosen in top) top else top.dropLast(1) + chosen
+    }
+
     /**
      * The user's own order after the profile [moved] is put at [position] among the [shown] ones (a drag): the rows as
      * they stand with that one moved, then the profiles the list does not show, in the order they had in [custom].
@@ -86,6 +126,19 @@ internal object ProfileOrder {
         val rows = shown.map { it.index }.filter { it != moved }.toMutableList()
         rows.add(position.coerceIn(0, rows.size), moved)
         return rows + custom.filter { it !in rows }
+    }
+
+    /**
+     * The user's own order after [moved] is put at [position] among its [group] — one card of the profiles sheet, its
+     * rows in the order shown. It goes before the row that follows it there, or after the group's last one; the other
+     * groups' rows keep their places around it. Null when the group holds nothing else: nothing moves.
+     */
+    fun movedInGroup(shown: List<ProfileEntry>, custom: List<Int>, group: List<Int>, moved: Int, position: Int): List<Int>? {
+        val others = group.filter { it != moved }
+        if (others.isEmpty()) return null
+        val flat = shown.map { it.index }.filter { it != moved }
+        val at = others.getOrNull(position.coerceAtLeast(0))?.let(flat::indexOf) ?: (flat.indexOf(others.last()) + 1)
+        return moved(shown, custom, moved, at)
     }
 
     fun encode(order: List<Int>): String = order.joinToString(",")

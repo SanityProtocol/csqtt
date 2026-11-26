@@ -151,6 +151,7 @@ internal fun HomeOne(view: HomeView) {
                     )
                     HomeNotice.NeedLink -> {
                         NoteLine(stringResource(R.string.home_need_link_title), colors.warn)
+                        TextBtn(stringResource(R.string.home_add_link), view.actions.addProfile)
                         TextBtn(stringResource(R.string.home_open_tunnel), view.actions.openTunnel)
                     }
                     // these two close the card, after the figures
@@ -171,14 +172,18 @@ internal fun HomeOne(view: HomeView) {
                         modifier = Modifier.clickable(role = Role.Button, onClick = view.actions.notificationSettings),
                     )
                     // a failure in the error colour; skipped nodes of a refresh that worked as a warning
-                    is HomeNotice.Outcome -> NoteLine(
-                        notice.text,
-                        when {
-                            notice.bad -> colors.danger
-                            notice.warn -> colors.warn
-                            else -> colors.muted
-                        },
-                    )
+                    is HomeNotice.Outcome -> {
+                        NoteLine(
+                            notice.text,
+                            when {
+                                notice.bad -> colors.danger
+                                notice.warn -> colors.warn
+                                else -> colors.muted
+                            },
+                        )
+                        // the certificate changed: the question about it is one tap from where it is said
+                        notice.certOf?.let { url -> TextBtn(stringResource(R.string.sub_cert_review), { view.actions.reviewCertificate(url) }) }
+                    }
                     is HomeNotice.PausedOn, HomeNotice.WifiNameUnknown, is HomeNotice.WifiOffer, is HomeNotice.Stopped,
                     HomeNotice.Captcha, HomeNotice.NeedLink -> Unit
                 }

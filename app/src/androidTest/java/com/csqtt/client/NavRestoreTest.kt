@@ -3,7 +3,6 @@ package com.csqtt.client
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasSetTextAction
-import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -47,7 +46,8 @@ class NavRestoreTest {
 
     private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
 
-    private fun field(label: String) = compose.onNode(hasSetTextAction() and hasContentDescription(label))
+    // a field's label is its own text, beside what is typed in it
+    private fun field(label: String) = compose.onNode(hasSetTextAction() and hasText(label))
 
     /** What the password field draws is its mask, and it is marked as a password for TalkBack. */
     private fun passwordIsMasked(): Boolean {

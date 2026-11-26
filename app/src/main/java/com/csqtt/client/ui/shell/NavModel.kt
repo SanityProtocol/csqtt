@@ -74,6 +74,11 @@ internal class NavModel(private val saved: SavedStateHandle) : ViewModel() {
 
     fun close(dest: Dest) = put(stack - dest)
 
+    /** Closes whatever is open on [routes]: a flow that is done takes the sheets it came through with it. */
+    fun closeRoutes(vararg routes: String) {
+        if (stack.any { it.route in routes }) put(stack.filter { it.route !in routes })
+    }
+
     /** Whether Back has something to do here; when not, it leaves the app. */
     val canGoBack: Boolean get() = stack.isNotEmpty() || tab != Tab.Home
 

@@ -56,6 +56,7 @@ import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import com.csqtt.client.ui.shell.LocalNav
 import com.csqtt.client.ui.shell.LocalOwners
 import com.csqtt.client.ui.shell.LocalStore
+import com.csqtt.client.ui.shell.Routes
 import com.csqtt.client.ui.shell.Tab
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -78,6 +79,8 @@ internal class HomeActions(
     val openCaptcha: () -> Unit,
     val openLogs: () -> Unit,
     val openTunnel: () -> Unit,
+    val addProfile: () -> Unit,
+    val reviewCertificate: (String) -> Unit,
     val vkSignIn: () -> Unit,
     val appSettings: () -> Unit,
     val notificationSettings: () -> Unit,
@@ -120,6 +123,8 @@ internal fun HomeTab(
             openCaptcha = { openCaptcha(context) },
             openLogs = { nav.select(Tab.Logs) },
             openTunnel = { nav.select(Tab.Tunnel) },
+            addProfile = { nav.open(Routes.addProfile()) },
+            reviewCertificate = { url -> nav.open(Routes.subCert(url)) },
             vkSignIn = onVkAuthRequested,
             appSettings = {
                 runCatching {

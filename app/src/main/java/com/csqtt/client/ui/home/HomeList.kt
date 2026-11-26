@@ -1,13 +1,9 @@
 package com.csqtt.client.ui.home
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,30 +11,26 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -48,14 +40,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -65,15 +53,12 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionState
 import com.csqtt.client.Disc
 import com.csqtt.client.HomeNotice
-import com.csqtt.client.ProfileEntry
-import com.csqtt.client.ProfileKind
 import com.csqtt.client.ProfileOrder
 import com.csqtt.client.ProfileSort
 import com.csqtt.client.R
@@ -81,27 +66,23 @@ import com.csqtt.client.Tap
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.WifiCopy
 import com.csqtt.client.formatBytes
-import com.csqtt.client.pickProfile
 import com.csqtt.client.showsTraffic
 import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
 import com.csqtt.client.ui.components.Card
-import com.csqtt.client.ui.components.Cell
-import com.csqtt.client.ui.components.IconBtn
 import com.csqtt.client.ui.components.TextBtn
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.design.Icons
 import com.csqtt.client.ui.design.Shape
 import com.csqtt.client.ui.design.Type
 import com.csqtt.client.ui.legacy.rememberWifiNameAccess
-import com.csqtt.client.ui.legacy.utils.parseCsqttLink
+import com.csqtt.client.ui.profiles.ProfileRow
+import com.csqtt.client.ui.profiles.SortMenu
+import com.csqtt.client.ui.profiles.profileActs
+import com.csqtt.client.ui.profiles.profileLine
 import com.csqtt.client.ui.shell.LocalNav
-import com.csqtt.client.ui.shell.LocalOwners
 import com.csqtt.client.ui.shell.LocalStore
-import com.csqtt.client.ui.shell.Tab
-import kotlin.math.roundToInt
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Dispatchers
+import com.csqtt.client.ui.shell.Routes
 import kotlinx.coroutines.launch
 
 private val Activity = Type.buttonSmall.copy(fontWeight = FontWeight.Normal, fontFeatureSettings = "tnum")
@@ -294,6 +275,7 @@ private fun ListNotice(notice: HomeNotice, view: HomeView) {
             Icons.info, colors.warn, stringResource(R.string.home_need_link_title), stringResource(R.string.home_need_link_text),
             ground = colors.warnSoft,
         ) {
+            Btn(stringResource(R.string.home_add_link), actions.addProfile, small = true)
             Btn(stringResource(R.string.home_open_tunnel), actions.openTunnel, kind = BtnKind.Primary, small = true)
         }
         is HomeNotice.Outcome -> {
@@ -302,14 +284,18 @@ private fun ListNotice(notice: HomeNotice, view: HomeView) {
                 notice.warn -> colors.warn
                 else -> colors.line
             }
+            val certOf = notice.certOf
             Row(
                 Modifier.fillMaxWidth().clip(Shape.card).background(colors.surface).border(1.dp, tone, Shape.card)
+                    // the certificate changed: the card opens the question about it (the canvas, F-HomeWifi)
+                    .then(if (certOf != null) Modifier.clickable(role = Role.Button) { actions.reviewCertificate(certOf) } else Modifier)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(if (notice.bad || notice.warn) Icons.alert else Icons.check, contentDescription = null, modifier = Modifier.size(22.dp),
                     tint = if (notice.bad || notice.warn) tone else colors.ok)
                 Text(notice.text, style = Type.fact, color = colors.text, modifier = Modifier.weight(1f))
+                if (certOf != null) Icon(Icons.chevronRight, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.faint)
             }
         }
         // drawn in the state's own block: the button under the status, the network in the timer's place
@@ -349,164 +335,64 @@ private fun NoticeCard(
     }
 }
 
-/** «Профили»: how they are ordered, and the profiles in that order; a tap picks one, a swipe left shows its actions. */
+/**
+ * «Профили»: how they are ordered, the first of them in that order, and the way to all of them. A tap picks one, a swipe
+ * left shows its actions; «+» adds one.
+ */
 @Composable
 private fun Profiles() {
     val store = LocalStore.current
     val nav = LocalNav.current
-    val context = LocalContext.current.applicationContext
-    val scope = rememberCoroutineScope()
-    val messages = LocalOwners.current.messages
+    val colors = Csq.colors
     val entries by store.profileEntries.collectAsStateWithLifecycle(initialValue = emptyList())
     val sort by store.profileSort.collectAsStateWithLifecycle(initialValue = ProfileSort.Custom)
     val order by store.profileOrder.collectAsStateWithLifecycle(initialValue = emptyList())
     val active by store.activeProfile.collectAsStateWithLifecycle(initialValue = -1)
-    val rows = remember(entries, sort, order) { ProfileOrder.shown(entries, sort, order) }
+    val shown = remember(entries, sort, order) { ProfileOrder.shown(entries, sort, order) }
+    val rows = remember(shown, active) { ProfileOrder.homeRows(shown, active) }
     if (rows.isEmpty()) return
+    val acts = profileActs(entries, active)
+    val hidden = entries.count { it.hidden }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.padding(start = 4.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(stringResource(R.string.home_profiles), style = Type.section, color = Csq.colors.muted)
-            SortMenu(sort) { picked -> scope.launch { store.saveProfileSort(picked) } }
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.home_profiles), style = Type.section, color = colors.muted)
+            SortMenu(sort) { picked -> TunnelManager.scope.launch { store.saveProfileSort(picked) } }
+            Spacer(Modifier.weight(1f))
+            // the one filled control of the section (the operator, 2026-11-25): it adds a profile
+            val add = stringResource(R.string.profiles_add)
+            Box(
+                Modifier.minimumInteractiveComponentSize().size(36.dp).clip(CircleShape).background(colors.accent)
+                    .clickable(role = Role.Button) { nav.open(Routes.addProfile()) }
+                    .semantics { contentDescription = add },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.plus, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.onAccent)
+            }
         }
         Card(flush = true) {
             rows.forEachIndexed { index, entry ->
-                ProfileRow(
-                    entry = entry,
-                    selected = entry.index == active,
-                    divided = index > 0,
-                    // on the app's scope: the reconnect a pick asks for goes out whatever becomes of this screen
-                    onPick = { TunnelManager.scope.launch(Dispatchers.Main) { pickProfile(context, store, entry.index, active) } },
-                    onPin = { scope.launch { store.setProfilePinned(entry.index, !entry.pinned) } },
-                    onOpenTunnel = {
-                        // the run stays where it is, and says so: opening a profile's settings is not a pick
-                        val runOn = TunnelManager.connectionState.value.powerIsOn
-                        val runProfile = TunnelManager.runTargetProfile()
-                        if (runOn && runProfile != entry.index) {
-                            rows.firstOrNull { it.index == runProfile }?.let { messages.show(context.getString(R.string.home_run_stays, it.name)) }
-                        }
-                        TunnelManager.scope.launch(Dispatchers.Main) {
-                            if (entry.index != active) store.saveActiveProfile(entry.index)
-                            nav.select(Tab.Tunnel)
-                        }
-                    },
-                )
-            }
-        }
-    }
-}
-
-// «По пингу» comes with the profiles' own ping (B9): before it no profile has one to be ordered by
-private val SortChoices = listOf(
-    ProfileSort.Custom to R.string.home_sort_custom, ProfileSort.Name to R.string.home_sort_name,
-    ProfileSort.Recent to R.string.home_sort_recent, ProfileSort.Added to R.string.home_sort_added,
-)
-
-@Composable
-private fun SortMenu(sort: ProfileSort, onPick: (ProfileSort) -> Unit) {
-    var open by rememberSaveable { mutableStateOf(false) }
-    Box {
-        IconBtn(Icons.sort, stringResource(R.string.home_sort), { open = true }, small = true, tint = Csq.colors.muted)
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            for ((choice, label) in SortChoices) {
-                DropdownMenuItem(
-                    // TalkBack says which order is the chosen one: the check mark alone is a picture
-                    modifier = Modifier.semantics { selected = choice == sort },
-                    text = { Text(stringResource(label), style = Type.body) },
-                    leadingIcon = {
-                        if (choice == sort) Icon(Icons.check, contentDescription = null, modifier = Modifier.size(18.dp), tint = Csq.colors.muted)
-                        else Spacer(Modifier.size(18.dp))
-                    },
-                    onClick = {
-                        open = false
-                        onPick(choice)
-                    },
-                )
-            }
-        }
-    }
-}
-
-private val ActionWidth = 44.dp
-
-/**
- * A profile's row. A swipe left slides it and shows its actions in its place (the operator, 2026-11-25); TalkBack has
- * them as the row's own actions.
- */
-@Composable
-private fun ProfileRow(
-    entry: ProfileEntry,
-    selected: Boolean,
-    divided: Boolean,
-    onPick: () -> Unit,
-    onPin: () -> Unit,
-    onOpenTunnel: () -> Unit,
-) {
-    val colors = Csq.colors
-    val scope = rememberCoroutineScope()
-    val open = with(LocalDensity.current) { -(ActionWidth * 2).toPx() }
-    val slide = remember { Animatable(0f) }
-    val close = { scope.launch { slide.animateTo(0f) } }
-    val pinLabel = stringResource(if (entry.pinned) R.string.profile_unpin else R.string.profile_pin)
-    val tunnelLabel = stringResource(R.string.profile_open_tunnel)
-    val pinnedLabel = stringResource(R.string.profile_pinned)
-
-    Box(
-        Modifier.fillMaxWidth().draggable(
-            orientation = Orientation.Horizontal,
-            // at once, not queued: a delta that ran after the lift's settle would cancel it and leave the row half open
-            state = rememberDraggableState { delta ->
-                scope.launch(start = CoroutineStart.UNDISPATCHED) { slide.snapTo((slide.value + delta).coerceIn(open, 0f)) }
-            },
-            onDragStopped = { slide.animateTo(if (slide.value < open / 2) open else 0f) },
-        ),
-    ) {
-        Cell(
-            title = entry.name,
-            sub = profileLine(entry),
-            selected = selected,
-            divided = divided,
-            onClick = { if (slide.value < 0f) close() else onPick() },
-            modifier = Modifier.semantics {
-                customActions = listOf(
-                    CustomAccessibilityAction(pinLabel) { onPin(); true },
-                    CustomAccessibilityAction(tunnelLabel) { onOpenTunnel(); true },
-                )
-            },
-            trailing = {
-                if (entry.pinned) {
-                    Icon(Icons.pin, contentDescription = pinnedLabel, modifier = Modifier.size(16.dp), tint = colors.accentText)
+                key(entry.index) {
+                    ProfileRow(entry = entry, line = profileLine(entry), selected = entry.index == active, divided = index > 0, acts = acts)
                 }
-            },
-        )
-        // the row keeps its place and its name; the actions come in from the right, over the end of it
-        if (slide.value < 0f) {
-            Box(
-                Modifier.matchParentSize().offset { IntOffset((slide.value - open).roundToInt(), 0) },
-                contentAlignment = Alignment.CenterEnd,
-            ) {
+            }
+            // every profile and subscription is in the sheet; with one profile it would hold nothing more than this
+            if (entries.size > 1) {
                 Row(
-                    Modifier.fillMaxHeight().shadow(4.dp).background(colors.raised),
-                    verticalAlignment = Alignment.CenterVertically,
+                    Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp)
+                        .drawBehind { drawLine(colors.lineSoft, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
+                        .clickable(role = Role.Button) { nav.open(Routes.profiles()) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconBtn(Icons.pin, pinLabel, { close(); onPin() })
-                    IconBtn(Icons.key, tunnelLabel, { close(); onOpenTunnel() })
+                    Text(
+                        stringResource(R.string.home_all_profiles, shown.size), style = Type.button, color = colors.accentText,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (hidden > 0) Text(stringResource(R.string.profiles_hidden_count, hidden), style = Type.sub, color = colors.muted)
+                    Icon(Icons.chevronRight, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.faint)
                 }
             }
         }
     }
-}
-
-/** Where a profile connects: its own server, a link's server, or a subscription. */
-@Composable
-private fun profileLine(entry: ProfileEntry): String = when (entry.kind) {
-    ProfileKind.OwnServer ->
-        if (entry.peer.isEmpty()) stringResource(R.string.profile_own_server) else stringResource(R.string.profile_own_server_at, entry.peer)
-    ProfileKind.Link -> {
-        val host = remember(entry.link) { parseCsqttLink(entry.link)?.host }
-        if (host.isNullOrEmpty()) stringResource(R.string.profile_link_missing) else stringResource(R.string.profile_link, host)
-    }
-    ProfileKind.Subscription ->
-        if (entry.subscriptionTitle.isEmpty()) stringResource(R.string.profile_subscription)
-        else stringResource(R.string.profile_subscription_named, entry.subscriptionTitle)
 }

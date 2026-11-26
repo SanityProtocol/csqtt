@@ -59,10 +59,12 @@ class ShellStartTest {
             compose.onNodeWithContentDescription("CSQTT").assertExists()
             assertTrue(compose.onAllNodes(hasText("by amurcanov", substring = true)).fetchSemanticsNodes().isEmpty())
             assertTrue(compose.onAllNodes(hasContentDescription("Поддержать разработчика")).fetchSemanticsNodes().isEmpty())
-            // classic's header buttons, once, in the shell's header
+            // classic's header buttons that are left, once, in the shell's header; the QR button went with the
+            // scanner's move into «Добавить профиль» (B2)
             compose.waitUntil(10_000) {
-                compose.onAllNodes(hasContentDescription("Сканировать QR-код")).fetchSemanticsNodes().size == 1
+                compose.onAllNodes(hasContentDescription("Быстрые настройки")).fetchSemanticsNodes().size == 1
             }
+            assertTrue(compose.onAllNodes(hasContentDescription("Сканировать QR-код")).fetchSemanticsNodes().isEmpty())
         }
     }
 
@@ -82,6 +84,18 @@ class ShellStartTest {
             compose.waitUntil(5_000) { shown("Сервер") && !shown("Установить свой сервер") }
             compose.onNodeWithText("Сервер").assertIsSelected()
             // left with no server made: the tab leaves the bar
+            compose.onNodeWithText("Логи").performClick()
+            compose.waitUntil(5_000) { !shown("Сервер") }
+
+            // the one design's way in (B2): «Добавить профиль» → «Установить свой сервер», from a profile that waits
+            // for its link
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { shown("QR-код или буфер") }
+            compose.onNodeWithText("QR-код или буфер").performClick()
+            compose.waitUntil(5_000) { shown("Установить свой сервер") }
+            compose.onNodeWithText("Установить свой сервер").performClick()
+            compose.waitUntil(5_000) { shown("Сервер") && !shown("Установить свой сервер") }
+            compose.onNodeWithText("Сервер").assertIsSelected()
             compose.onNodeWithText("Логи").performClick()
             compose.waitUntil(5_000) { !shown("Сервер") }
 

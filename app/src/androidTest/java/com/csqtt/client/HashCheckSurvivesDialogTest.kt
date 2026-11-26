@@ -55,8 +55,8 @@ class HashCheckSurvivesDialogTest {
         release.complete(Unit)
         VkHashCheck.validator = realValidator
         runBlocking {
-            store.deleteProfileFromClassic(SLOT)
-            store.deleteProfileFromClassic(OTHER)
+            store.deleteProfile(SLOT)
+            store.deleteProfile(OTHER)
         }
     }
 

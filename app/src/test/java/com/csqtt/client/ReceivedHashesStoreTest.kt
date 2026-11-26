@@ -58,7 +58,7 @@ class ReceivedHashesStoreTest {
         assertEquals(listOf(linkHashA), ReceivedHashes.ownerSet(listOf(linkHashA), emptyList()))
         val prefs = load(Store253Snapshots.participant)
         SettingsStore.receivedHashesKeys(prefs, 3, fresh, Store253Snapshots.participantLink)
-        SettingsStore.importParticipantLinkKeys(prefs, Store253Snapshots.participantLink, intoNew = false, activate = true)
+        SettingsStore.importLinkKeys(prefs, Store253Snapshots.participantLink, target = 3)
         assertNull(prefs[stringPreferencesKey("received_hashes_3")])
     }
 

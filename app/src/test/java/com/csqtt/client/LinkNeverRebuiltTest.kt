@@ -11,7 +11,7 @@ class LinkNeverRebuiltTest {
         // parameters out of order, an unknown one, and upper case in the scheme: a rebuild would change every one
         val given = "CSQTT://connect?peer=46000&v=2&x-extra=1&host=198.51.100.9&hashes=${"A".repeat(20)}"
         val prefs = load(Store253Snapshots.participant)
-        SettingsStore.importParticipantLinkKeys(prefs, given, intoNew = false, activate = true)
+        SettingsStore.importLinkKeys(prefs, given, target = 3)
         assertEquals(given, prefs[stringPreferencesKey("csqtt_link_3")])
     }
 }

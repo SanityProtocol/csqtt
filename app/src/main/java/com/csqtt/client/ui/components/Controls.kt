@@ -33,7 +33,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -108,7 +107,6 @@ internal fun Field(
 ) {
     val colors = Csq.colors
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, style = Type.label, color = colors.muted, modifier = Modifier.padding(start = 2.dp))
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
@@ -117,23 +115,25 @@ internal fun Field(
             cursorBrush = SolidColor(colors.accent),
             keyboardOptions = keyboard,
             visualTransformation = visual,
-            modifier = Modifier.fillMaxWidth().semantics {
-                contentDescription = label
-                if (error != null) error(error)
-            },
+            modifier = Modifier.fillMaxWidth().semantics { if (error != null) error(error) },
+            // the label is drawn inside the field's own node: TalkBack reads it beside what was typed, where a
+            // description on the field was read in place of it
             decorationBox = { text ->
-                Row(
-                    Modifier.fillMaxWidth().defaultMinSize(minHeight = 46.dp).clip(Shape.field).background(colors.raised)
-                        .border(1.dp, if (error != null) colors.danger else colors.line, Shape.field)
-                        .padding(start = 14.dp, end = if (trailing != null) 4.dp else 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.weight(1f)) {
-                        if (value.isEmpty()) Text(placeholder, style = Type.body, color = colors.faint, maxLines = 1)
-                        text()
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(label, style = Type.label, color = colors.muted, modifier = Modifier.padding(start = 2.dp))
+                    Row(
+                        Modifier.fillMaxWidth().defaultMinSize(minHeight = 46.dp).clip(Shape.field).background(colors.raised)
+                            .border(1.dp, if (error != null) colors.danger else colors.line, Shape.field)
+                            .padding(start = 14.dp, end = if (trailing != null) 4.dp else 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            if (value.isEmpty()) Text(placeholder, style = Type.body, color = colors.faint, maxLines = 1)
+                            text()
+                        }
+                        trailing?.invoke()
                     }
-                    trailing?.invoke()
                 }
             },
         )

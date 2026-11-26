@@ -41,6 +41,7 @@ import com.csqtt.client.ui.shell.LocalNav
 import com.csqtt.client.ui.shell.LocalOwners
 import com.csqtt.client.ui.shell.LocalStore
 import com.csqtt.client.ui.shell.NavModel
+import com.csqtt.client.ui.shell.PendingLink
 import com.csqtt.client.ui.shell.Routes
 import com.csqtt.client.ui.shell.Shell
 import com.csqtt.client.ui.shell.Tab
@@ -141,7 +142,12 @@ class MainActivity : ComponentActivity() {
 
         // M-71: the launching intent's link is read once. A recreate (theme, locale, process death) finds the link still
         // waiting for its answer in the restored navigation instead of reading the intent again, which asked twice.
-        if (savedInstanceState == null || discardStaleUiState) importCsqttLink(intent)
+        if (savedInstanceState == null || discardStaleUiState) {
+            // nothing is restored, so no question stands: a link kept for one that was never answered (the app swiped
+            // away with the dialog open) is not left lying in storage
+            PendingLink.drop(this)
+            importCsqttLink(intent)
+        }
 
         TunnelManager.initObservers(this)
 
@@ -294,6 +300,10 @@ class MainActivity : ComponentActivity() {
         if (intent?.action != Intent.ACTION_VIEW) return
         val raw = intent.dataString ?: return
         // the link is a question (M-70): it stays in the navigation until the user answers it, a newer link in its place
-        if (parseCsqttLink(raw) == null) showRaisedToast(getString(R.string.link_invalid), Toast.LENGTH_SHORT) else nav.open(Routes.linkImport(raw))
+        if (parseCsqttLink(raw) == null) {
+            showRaisedToast(getString(R.string.link_invalid), Toast.LENGTH_SHORT)
+        } else {
+            nav.open(Routes.linkImport(PendingLink.put(this, raw.trim())))
+        }
     }
 }

@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -155,6 +156,34 @@ internal fun Facts(items: List<Pair<FactKind, String>>, modifier: Modifier = Mod
                 Text(text, style = Type.fact, color = colors.text)
             }
         }
+    }
+}
+
+/** A box of what a thing is, line by line: «Сервер … home.example.net:56000». Its lines are [ValueRow]s. */
+@Composable
+internal fun ValueBox(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    val colors = Csq.colors
+    Column(
+        modifier.fillMaxWidth().clip(Shape.context).background(colors.raised).border(1.dp, colors.lineSoft, Shape.context),
+        content = content,
+    )
+}
+
+/** One line of a [ValueBox]: what it is on the left, its value on the right. [divided] draws the hairline to the line above. */
+@Composable
+internal fun ValueRow(label: String, value: String, mono: Boolean = false, divided: Boolean = true, danger: Boolean = false) {
+    val colors = Csq.colors
+    Row(
+        Modifier.fillMaxWidth().defaultMinSize(minHeight = 40.dp)
+            .drawBehind { if (divided) drawLine(colors.lineSoft, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = Type.fact, color = colors.muted)
+        Text(
+            value, style = if (mono) Type.mono else Type.fact, color = if (danger) colors.danger else colors.text,
+            textAlign = TextAlign.End, modifier = Modifier.weight(1f),
+        )
     }
 }
 

@@ -2,6 +2,7 @@ package com.csqtt.client
 
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.csqtt.client.Store253Snapshots.asMap
 import com.csqtt.client.Store253Snapshots.load
@@ -103,17 +104,21 @@ class ProfileModeFollowsContentTest {
     }
 
     @Test
-    fun `a new profile waits for a server when the user has one, else for a link`() {
-        val owner = load("""{"strings": {"peer": "192.0.2.1"}}""")
-        assertFalse(mode(owner, SettingsStore.newProfileKeys(owner)!!))
-        val withRecord = load(
-            """{"strings": {"csqtt_link": "${Store253Snapshots.participantLink}", "deploy_ip_4": "203.0.113.40"},
-                "booleans": {"csqtt_link_mode": true}}""",
-        )
-        assertFalse(mode(withRecord, SettingsStore.newProfileKeys(withRecord)!!))
+    fun `a profile added by hand waits for the user's own server, and an empty open one is that profile`() {
+        // a participant's profile holds a link: the manual one is a new profile, opened for editing
         val participant = load(
             """{"strings": {"csqtt_link": "${Store253Snapshots.participantLink}"}, "booleans": {"csqtt_link_mode": true}}""",
         )
-        assertTrue(mode(participant, SettingsStore.newProfileKeys(participant)!!))
+        val added = SettingsStore.manualProfileKeys(participant)!!
+        assertEquals(1, added)
+        assertFalse(mode(participant, added))
+        assertEquals(1, participant[intPreferencesKey("active_profile")])
+        // a first start's profile waits for a link and holds nothing: it is the one that waits for a server now
+        val first = load("""{"booleans": {"csqtt_link_mode": true}}""")
+        assertEquals(0, SettingsStore.manualProfileKeys(first))
+        assertFalse(mode(first, 0))
+        assertEquals(setOf(0), SettingsStore.profileList(first).map { it.first }.toSet())
+        // nothing free: nothing is written
+        assertNull(SettingsStore.manualProfileKeys(load(Store253Snapshots.allSlots)))
     }
 }

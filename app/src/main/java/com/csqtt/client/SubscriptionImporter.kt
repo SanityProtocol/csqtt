@@ -37,7 +37,8 @@ internal data class SubscriptionPreview(
 internal sealed interface SubscriptionFetchResult {
     /** [cert]: the leaf a marked subscription's own server was trusted with on this fetch, to be recorded (M-171). */
     data class Success(val preview: SubscriptionPreview, val cert: SubscriptionCertRecord? = null) : SubscriptionFetchResult
-    data class Failure(val message: String) : SubscriptionFetchResult
+    /** [refused]: the leaf the pin rule turned away, when that is why the fetch failed: the user may trust it (P3 B2). */
+    data class Failure(val message: String, val refused: SubscriptionCertRecord? = null) : SubscriptionFetchResult
 }
 
 internal data class SubscriptionProfileWrite(
@@ -179,15 +180,17 @@ internal class SubscriptionCertPin(
     var byPin: Boolean = false
         private set
 
-    /** A certificate was refused by the pin rule: the fetch failed because the certificate changed. */
+    /** The leaf the pin rule refused: the fetch failed because the certificate changed. */
     @Volatile
-    var refusedByPin: Boolean = false
+    var refused: SubscriptionCertRecord? = null
         private set
+
+    val refusedByPin: Boolean get() = refused != null
 
     private fun pinOrRefuse(leaf: java.security.cert.X509Certificate, kind: CertKind): Boolean {
         val candidate = certRecordOf(leaf, kind)
         if (!certAccepts(record, candidate, nowMs)) {
-            refusedByPin = true
+            refused = candidate
             return false
         }
         byPin = true
@@ -280,8 +283,8 @@ internal object SubscriptionImporter {
 
     private const val HTTP_ONLY_MESSAGE =
         "Подписка только по HTTP не поддерживается: она передаёт пароль подключения открытым текстом. Нужен HTTPS"
-    private const val PIN_MISMATCH_MESSAGE =
-        "Сертификат сервера подписки не совпадает с принятым ранее: обновление отклонено"
+    internal const val PIN_MISMATCH_MESSAGE =
+        "Сертификат сервера подписки изменился: обновление отклонено"
 
     private sealed interface ParseResult {
         data class Success(val preview: SubscriptionPreview) : ParseResult
@@ -319,7 +322,8 @@ internal object SubscriptionImporter {
                 }
             }
         }
-        SubscriptionFetchResult.Failure(rejectedError ?: lastError)
+        val message = rejectedError ?: lastError
+        SubscriptionFetchResult.Failure(message, pin?.refused.takeIf { message == PIN_MISMATCH_MESSAGE })
     }
 
     suspend fun importNodes(

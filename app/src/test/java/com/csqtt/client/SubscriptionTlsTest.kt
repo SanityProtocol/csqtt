@@ -55,7 +55,7 @@ class SubscriptionTlsTest {
 
         val changed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(future)))
         assertTrue(changed is SubscriptionFetchResult.Failure)
-        assertTrue((changed as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки не совпадает"))
+        assertTrue((changed as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки изменился"))
 
         // the panels the app deploys replace an expired certificate (a 365-day fallback, a lapsed Let's Encrypt one)
         val renewed = SubscriptionImporter.fetch(url, SubscriptionTrust(true, other(past)))
@@ -69,7 +69,7 @@ class SubscriptionTlsTest {
         val caRecord = SubscriptionCertRecord("ab".repeat(32), past, CertKind.CA)
         val result = SubscriptionImporter.fetch("https://127.0.0.1:$port/sub", SubscriptionTrust(true, caRecord))
         assertTrue(result is SubscriptionFetchResult.Failure)
-        assertTrue((result as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки не совпадает"))
+        assertTrue((result as SubscriptionFetchResult.Failure).message.startsWith("Сертификат сервера подписки изменился"))
     }
 
     @Test

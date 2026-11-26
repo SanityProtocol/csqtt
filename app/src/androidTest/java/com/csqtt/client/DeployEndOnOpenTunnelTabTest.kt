@@ -64,6 +64,6 @@ class DeployEndOnOpenTunnelTabTest {
             assertFalse(shown("Подключиться по ссылке csqtt://"))
             assertEquals(host, runBlocking { store.peer.first() })
         }
-        runBlocking { store.deleteProfileFromClassic(slot) }
+        runBlocking { store.deleteProfile(slot) }
     }
 }

@@ -169,7 +169,25 @@ internal data class SubscriptionMeta(
     val lastError: String = "",
     /** B5h2 (U3): what the last successful refresh skipped, and why, masked; "" when nothing was. */
     val lastSkipped: String = "",
+    /**
+     * P3 B2: the leaf the last refresh turned away because it is not the trusted one ("" when it failed for another
+     * reason, or worked). «Доверять новому» makes it the trusted one.
+     */
+    val refusedSha256: String = "",
+    val refusedNotAfter: Long = 0L,
+    val refusedKind: String = "",
+    val refusedNames: String = "",
 ) {
+    /** The leaf [certSha256] names, as the pin rule reads it; null when none is recorded. */
+    val trusted: SubscriptionCertRecord? get() = certRecord(certSha256, certNotAfter, certKind, certNames)
+
+    val refused: SubscriptionCertRecord? get() = certRecord(refusedSha256, refusedNotAfter, refusedKind, refusedNames)
+
+    private fun certRecord(sha256: String, notAfter: Long, kind: String, names: String): SubscriptionCertRecord? =
+        sha256.takeIf { it.isNotBlank() }?.let {
+            SubscriptionCertRecord(it, notAfter, CertKind.fromStored(kind), names.split(',').map(String::trim).filter(String::isNotEmpty).toSet())
+        }
+
     fun needsUpdate(now: Long): Boolean {
         if (autoUpdateMinutes <= 0 || url.isBlank()) return false
         val last = maxOf(lastUpdatedAt, lastAttemptAt)
@@ -202,6 +220,10 @@ private fun decodeSubscriptionMeta(raw: String?): Map<String, SubscriptionMeta> 
             certNames = entry.optString("certNames").trim(),
             lastError = entry.optString("lastError").trim(),
             lastSkipped = entry.optString("lastSkipped").trim(),
+            refusedSha256 = entry.optString("refusedSha256").trim(),
+            refusedNotAfter = entry.optLong("refusedNotAfter", 0L).coerceAtLeast(0L),
+            refusedKind = entry.optString("refusedKind").trim(),
+            refusedNames = entry.optString("refusedNames").trim(),
         )
     }
     return result
@@ -228,6 +250,12 @@ private fun encodeSubscriptionMeta(meta: Map<String, SubscriptionMeta>): String 
                 }
                 if (value.lastError.isNotEmpty()) put("lastError", value.lastError)
                 if (value.lastSkipped.isNotEmpty()) put("lastSkipped", value.lastSkipped)
+                if (value.refusedSha256.isNotBlank()) {
+                    put("refusedSha256", value.refusedSha256)
+                    put("refusedNotAfter", value.refusedNotAfter)
+                    put("refusedKind", value.refusedKind)
+                    put("refusedNames", value.refusedNames)
+                }
             },
         )
     }
@@ -327,6 +355,9 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val TURN_SUBNET_IP_LIMIT = profileString("turn_subnet_ip_limit")
 
         private val PROFILE_NAME = profileString("profile_name")
+        // P3 B2: the name the user gave in «Переименовать», shown instead of the one the profile came with; «Вернуть
+        // исходное имя» removes it. A subscription's refresh writes PROFILE_NAME and never this, so a rename outlives it
+        private val PROFILE_NAME_OVERRIDE = profileString("profile_name_override")
 
         private val DEPLOY_IP = profileString("deploy_ip", VPS)
         private val DEPLOY_SERVER_NAME = profileString("deploy_server_name", VPS)
@@ -853,7 +884,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
         /** A profile the user has: a peer, a link, a subscription, a VPS record or a name they gave it (M-39). */
         internal fun profileInUse(prefs: Preferences, profile: Int): Boolean =
-            listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, PROFILE_NAME).any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
+            listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, PROFILE_NAME, PROFILE_NAME_OVERRIDE)
+                .any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
                 linkedVps(prefs, profile) != null || prefs[getProfileKey(PROFILE_ADDED, profile)] == true
 
         /** A slot's profile was replaced: saved form state of the old one must not reach it (see PROFILE_EPOCH). */
@@ -873,9 +905,16 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             bumpProfileEpoch(prefs)
             // a run whose profile is deleted (allowed while paused on Wi-Fi) follows the open profile from now on
             if (prefs[RUN_PROFILE] == profile) prefs.remove(RUN_PROFILE)
+            // the user's own order forgets the slot: the next profile to take it is a new one, after those it names
+            prefs[PROFILE_ORDER]?.let { stored ->
+                val order = ProfileOrder.decode(stored)
+                if (profile in order) prefs[PROFILE_ORDER] = ProfileOrder.encode(order - profile)
+            }
             if ((prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX) == profile) {
-                val next = profileIndices.firstOrNull { it != profile && profileInUse(prefs, it) } ?: profile
-                prefs[ACTIVE_PROFILE] = next
+                // a shown profile before a hidden one; a hidden one that becomes the open one is shown again
+                val others = profileIndices.filter { it != profile && profileInUse(prefs, it) }
+                val next = others.firstOrNull { prefs[getProfileKey(PROFILE_HIDDEN, it)] != true } ?: others.firstOrNull() ?: profile
+                openProfileKeys(prefs, next)
                 if (next == profile && linkMode != null) prefs[getProfileKey(CSQTT_LINK_MODE, profile)] = linkMode
             }
             if (subscription.isNotEmpty() &&
@@ -1161,15 +1200,65 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             return HandOverResult.decode(prefs[getProfileKey(DEPLOY_VK_POOL_HANDOVER, vps)])
         }
 
-        /** B5h2 (U3): the last refresh's outcome of [url]; a success clears the failure. True for a new failure. */
-        internal fun writeSubscriptionOutcome(prefs: MutablePreferences, url: String, error: String, skipped: String): Boolean {
+        /**
+         * B5h2 (U3): the last refresh's outcome of [url]; a success clears the failure. [refused] is the certificate
+         * the refresh turned away, when that is why it failed (P3 B2): kept for the question, gone with any other
+         * outcome. True for a new failure.
+         */
+        internal fun writeSubscriptionOutcome(
+            prefs: MutablePreferences,
+            url: String,
+            error: String,
+            skipped: String,
+            refused: SubscriptionCertRecord? = null,
+        ): Boolean {
             val key = url.trim()
             if (key.isEmpty()) return false
             val meta = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META]).toMutableMap()
             val current = meta[key] ?: SubscriptionMeta(url = key)
-            meta[key] = current.copy(lastError = error.trim(), lastSkipped = skipped.trim())
+            meta[key] = current.copy(
+                lastError = error.trim(), lastSkipped = skipped.trim(),
+                refusedSha256 = refused?.sha256.orEmpty(), refusedNotAfter = refused?.notAfterMs ?: 0L,
+                refusedKind = refused?.kind?.stored.orEmpty(), refusedNames = refused?.names.orEmpty().sorted().joinToString(","),
+            )
             prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
             return error.isNotBlank() && failureKey(error) != failureKey(current.lastError)
+        }
+
+        internal fun subscriptionMetaOf(prefs: Preferences): Map<String, SubscriptionMeta> = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])
+
+        /** The leaf [url]'s server was trusted with on a fetch: the one a later fetch is judged against (M-171). */
+        internal fun writeSubscriptionCertificate(prefs: MutablePreferences, url: String, cert: SubscriptionCertRecord) {
+            val key = url.trim()
+            if (key.isEmpty() || cert.sha256.isBlank()) return
+            val meta = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META]).toMutableMap()
+            val current = meta[key] ?: SubscriptionMeta(url = key)
+            val next = current.copy(
+                certSha256 = cert.sha256, certNotAfter = cert.notAfterMs,
+                certKind = cert.kind.stored, certNames = cert.names.sorted().joinToString(","),
+            )
+            if (next != current || key !in meta) {
+                meta[key] = next
+                prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
+            }
+        }
+
+        /**
+         * «Доверять новому» (P3 B2): the certificate the last refresh of [url] turned away becomes the trusted one. Only
+         * while it is still [sha256], the one the user was shown; false when it is not, and nothing is written.
+         */
+        internal fun trustRefusedCertificateKeys(prefs: MutablePreferences, url: String, sha256: String): Boolean {
+            val key = url.trim()
+            val meta = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META]).toMutableMap()
+            val current = meta[key] ?: return false
+            if (current.refusedSha256.isBlank() || !current.refusedSha256.equals(sha256, ignoreCase = true)) return false
+            meta[key] = current.copy(
+                certSha256 = current.refusedSha256, certNotAfter = current.refusedNotAfter,
+                certKind = current.refusedKind, certNames = current.refusedNames,
+                refusedSha256 = "", refusedNotAfter = 0L, refusedKind = "", refusedNames = "",
+            )
+            prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(meta)
+            return true
         }
 
         /**
@@ -1184,46 +1273,70 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             return all.values.firstOrNull { it.lastError.isNotEmpty() && it.url in inUse }
         }
 
-        /** M-70: what an import can write into, read in one pass. */
-        internal fun linkImportState(prefs: Preferences, tunnelRunning: Boolean): LinkImportState {
-            val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
-            val endpoint = if (prefs[getProfileKey(CSQTT_LINK_MODE, active)] == true) {
-                parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, active)].orEmpty())?.let { LinkImport.endpoint(it.host, it.port) }
+        /** host:port [profile] connects to, lower-cased: its link's server, or its own; null when it has neither. */
+        private fun endpointOf(prefs: Preferences, profile: Int): String? =
+            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) {
+                parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty())?.let { LinkImport.endpoint(it.host, it.port) }
             } else {
-                prefs[getProfileKey(PEER, active)]?.takeIf { it.isNotBlank() }?.let { peer ->
+                prefs[getProfileKey(PEER, profile)]?.takeIf { it.isNotBlank() }?.let { peer ->
                     LinkImport.endpoint(
                         peer,
-                        prefs[getProfileKey(SERVER_PEER_PORT, active)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
+                        prefs[getProfileKey(SERVER_PEER_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
                     )
                 }
             }
+
+        /**
+         * M-70, I15: where a link to [linkEndpoint] could go, read in one pass. [runProfile] is the profile the tunnel is
+         * on while it is on, else null. A subscription's node is never the profile "already on this server": it is its
+         * subscription's, and a link written into it would take it out of there.
+         */
+        internal fun linkImportState(prefs: Preferences, linkEndpoint: String, runProfile: Int?): LinkImportState {
+            val open = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            // the open profile before another on the same server
+            val same = (listOf(open) + profileIndices.filter { it != open && profileInUse(prefs, it) }).firstOrNull {
+                prefs[getProfileKey(SUBSCRIPTION_URL, it)].isNullOrBlank() && endpointOf(prefs, it) == linkEndpoint
+            }
             return LinkImportState(
-                activeName = profileDisplayName(prefs, active),
-                activeEmpty = listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL).all { prefs[getProfileKey(it, active)].isNullOrBlank() },
-                activeEndpoint = endpoint,
-                freeProfile = profileIndices.any { it != active && !profileInUse(prefs, it) },
-                tunnelRunning = tunnelRunning,
+                same = same,
+                sameName = same?.let { profileDisplayName(prefs, it) }.orEmpty(),
+                emptyOpen = open.takeIf { listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL).all { key -> prefs[getProfileKey(key, open)].isNullOrBlank() } },
+                freeProfile = profileIndices.any { it != open && !profileInUse(prefs, it) },
+                runProfile = runProfile,
+                runName = runProfile?.let { profileDisplayName(prefs, it) }.orEmpty(),
             )
         }
 
         /**
-         * M-70: [link] into the active profile or a new one (made active only when [activate]: never while the tunnel
-         * runs). One store path for the deep link, the QR scan and the config dialog: a former owner profile's own
-         * fields go, the link starts with all its hashes in use, and the profile leaves any subscription it came from
-         * (whose next refresh would otherwise put its own node back). The profile written, or null with none free.
+         * M-70, I15: [link] into [target], a profile the user picked (the one already on this server, or the open one
+         * while it holds nothing), or with null into a new one, which is never made the open one by itself. One store
+         * path for the deep link, the QR scan and the clipboard: a former owner profile's own fields go, the link starts
+         * with all its hashes in use, the profile leaves any subscription it came from (whose next refresh would
+         * otherwise put its own node back), and one that was hidden is shown again. [name], when given, is the name the
+         * profile takes: for a new one; a profile that is updated keeps its own. The profile written, or null with none free.
          */
-        internal fun importParticipantLinkKeys(prefs: MutablePreferences, link: String, intoNew: Boolean, activate: Boolean): Int? {
-            val previousActive = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
-            val target = if (intoNew) addProfileKeys(prefs, linkMode = true) ?: return null else previousActive
-            if (intoNew && !activate) prefs[ACTIVE_PROFILE] = previousActive
-            useParticipantLink(prefs, target, link)
-            prefs.remove(getProfileKey(LINK_HASHES_REMOVED, target))
-            prefs.remove(getProfileKey(RECEIVED_HASHES, target))   // a new link brings its own set
+        internal fun importLinkKeys(
+            prefs: MutablePreferences,
+            link: String,
+            target: Int?,
+            name: String = "",
+            now: Long = System.currentTimeMillis(),
+        ): Int? {
+            val open = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            val profile = target ?: (addProfileKeys(prefs, linkMode = true, now) ?: return null).also { prefs[ACTIVE_PROFILE] = open }
+            // a profile that held nothing until now is added now
+            if (!profileInUse(prefs, profile)) stampAdded(prefs, profile, now)
+            useParticipantLink(prefs, profile, link)
+            prefs.remove(getProfileKey(LINK_HASHES_REMOVED, profile))
+            prefs.remove(getProfileKey(RECEIVED_HASHES, profile))   // a new link brings its own set
             listOf(SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE).forEach {
-                prefs.remove(getProfileKey(it, target))
+                prefs.remove(getProfileKey(it, profile))
             }
-            prefs.remove(getProfileKey(SUBSCRIPTION_POWER, target))
-            return target
+            prefs.remove(getProfileKey(SUBSCRIPTION_POWER, profile))
+            prefs.remove(getProfileKey(PROFILE_HIDDEN, profile))
+            val given = name.trim()
+            if (given.isNotEmpty() && given != defaultProfileName(profile)) prefs[getProfileKey(PROFILE_NAME, profile)] = given
+            return profile
         }
 
         /** «Добавить профиль»: the first free slot but the active one, cleared, in [linkMode], made active; null if none. */
@@ -1239,9 +1352,63 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             return free
         }
 
-        /** «Добавить профиль» (the roles batch): the new profile waits for a server when the user has one, else for a link. */
-        internal fun newProfileKeys(prefs: MutablePreferences): Int? =
-            addProfileKeys(prefs, linkMode = !userHasServer(prefs))
+        /**
+         * «Вручную» of «Добавить профиль»: a profile that waits for the user's own server, opened for editing — the open
+         * one while it holds nothing yet, else a new one. Null when none is free.
+         */
+        internal fun manualProfileKeys(prefs: MutablePreferences): Int? {
+            val open = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            if (!profileModeSwitchable(prefs, open)) return addProfileKeys(prefs, linkMode = false)
+            prefs[getProfileKey(CSQTT_LINK_MODE, open)] = false
+            return open
+        }
+
+        /** [profile] becomes the open one. One that was hidden is shown again: the selection is never out of sight. */
+        internal fun openProfileKeys(prefs: MutablePreferences, profile: Int) {
+            prefs[ACTIVE_PROFILE] = profile
+            prefs.remove(getProfileKey(PROFILE_HIDDEN, profile))
+        }
+
+        /** «Скрыть» / «Показать» (P3 B2). The open profile is never hidden: false, and nothing is written. */
+        internal fun setProfileHiddenKeys(prefs: MutablePreferences, profile: Int, hidden: Boolean): Boolean {
+            if (hidden && profile == (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)) return false
+            val key = getProfileKey(PROFILE_HIDDEN, profile)
+            if (hidden) prefs[key] = true else prefs.remove(key)
+            return true
+        }
+
+        /** [profile]'s node name while it is a subscription's node, else null. */
+        private fun nodeNameOf(prefs: Preferences, profile: Int): String? =
+            prefs[getProfileKey(SUBSCRIPTION_NODE, profile)]?.trim()
+                ?.takeIf { it.isNotEmpty() && !prefs[getProfileKey(SUBSCRIPTION_URL, profile)].isNullOrBlank() }
+
+        /** The name [profile] came with, which «Вернуть исходное имя» gives back: its node's in a subscription, else its stored one. */
+        internal fun profileOriginalName(prefs: Preferences, profile: Int): String =
+            nodeNameOf(prefs, profile) ?: storedProfileName(prefs, profile)
+
+        /** «Переименовать» (P3 B2): [name] is shown from now on; blank, or the name the profile came with, gives that one back. */
+        internal fun renameProfileKeys(prefs: MutablePreferences, profile: Int, name: String) {
+            val given = name.trim()
+            if (given.isEmpty() || given == profileOriginalName(prefs, profile)) {
+                revertProfileNameKeys(prefs, profile)
+            } else {
+                prefs[getProfileKey(PROFILE_NAME_OVERRIDE, profile)] = given
+            }
+        }
+
+        /**
+         * «Вернуть исходное имя»: the rename goes. A node renamed by 2.5.3, which kept the rename in the node's own name
+         * key, takes its node's name there again, as its subscription's refresh would write it.
+         */
+        internal fun revertProfileNameKeys(prefs: MutablePreferences, profile: Int) {
+            prefs.remove(getProfileKey(PROFILE_NAME_OVERRIDE, profile))
+            val node = nodeNameOf(prefs, profile) ?: return
+            if (node == defaultProfileName(profile)) {
+                prefs.remove(getProfileKey(PROFILE_NAME, profile))
+            } else {
+                prefs[getProfileKey(PROFILE_NAME, profile)] = node
+            }
+        }
 
         /**
          * The roles batch: a profile's mode follows what it holds. While it holds nothing for its mode (no link in link
@@ -1298,6 +1465,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     peer = prefs[getProfileKey(PEER, profile)]?.trim().orEmpty(),
                     link = prefs[getProfileKey(CSQTT_LINK, profile)]?.trim().orEmpty(),
                     subscriptionTitle = prefs[getProfileKey(SUBSCRIPTION_TITLE, profile)]?.trim().orEmpty(),
+                    subscriptionUrl = subscription,
+                    originalName = profileOriginalName(prefs, profile),
+                    port = prefs[getProfileKey(SERVER_PEER_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
+                    workers = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS,
                     pinned = prefs[getProfileKey(PROFILE_PINNED, profile)] == true,
                     hidden = prefs[getProfileKey(PROFILE_HIDDEN, profile)] == true,
                     lastConnectedAt = prefs[getProfileKey(PROFILE_LAST_CONNECTED, profile)] ?: 0L,
@@ -1315,8 +1486,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             if (prefs[key] == null) prefs[key] = now
         }
 
-        /** The name the user gave, else the linked server's (a deploy-only slot's name, #54), else «Профиль N». */
+        /** The name the user gave in «Переименовать» (P3 B2), else the one the profile has without it. */
         internal fun profileDisplayName(prefs: Preferences, profile: Int): String =
+            prefs[getProfileKey(PROFILE_NAME_OVERRIDE, profile)]?.takeIf { it.isNotBlank() } ?: storedProfileName(prefs, profile)
+
+        /** The profile's stored name, else the linked server's (a deploy-only slot's name, #54), else «Профиль N». */
+        private fun storedProfileName(prefs: Preferences, profile: Int): String =
             prefs[getProfileKey(PROFILE_NAME, profile)]?.takeIf { it.isNotBlank() }
                 ?: linkedVps(prefs, profile)?.let { prefs[getProfileKey(DEPLOY_SERVER_NAME, it)] }?.takeIf { it.isNotBlank() }
                 ?: defaultProfileName(profile)
@@ -1759,6 +1934,27 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { it[PROFILE_ORDER] = ProfileOrder.encode(order) }
     }
 
+    /**
+     * A row was moved (P3 B2): [order] is the user's own order from now on, and the lists follow it whatever order they
+     * were in. What was stored before comes back, for «Отменить»: [restoreProfileOrder] takes it.
+     */
+    internal suspend fun saveProfileMove(order: List<Int>): Pair<String?, String?> {
+        var before: Pair<String?, String?> = null to null
+        dataStore.edit { prefs ->
+            before = prefs[PROFILE_SORT] to prefs[PROFILE_ORDER]
+            prefs[PROFILE_SORT] = ProfileSort.Custom.stored
+            prefs[PROFILE_ORDER] = ProfileOrder.encode(order)
+        }
+        return before
+    }
+
+    internal suspend fun restoreProfileOrder(before: Pair<String?, String?>) {
+        dataStore.edit { prefs ->
+            before.first?.let { prefs[PROFILE_SORT] = it } ?: prefs.remove(PROFILE_SORT)
+            before.second?.let { prefs[PROFILE_ORDER] = it } ?: prefs.remove(PROFILE_ORDER)
+        }
+    }
+
     internal suspend fun setProfilePinned(profile: Int, pinned: Boolean) {
         dataStore.edit { prefs ->
             val key = getProfileKey(PROFILE_PINNED, profile)
@@ -1798,15 +1994,19 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])
     }
 
-    suspend fun saveProfileName(profile: Int, name: String) {
-        dataStore.edit { prefs ->
-            val trimmed = name.trim()
-            if (trimmed.isEmpty() || trimmed == defaultProfileName(profile)) {
-                prefs.remove(getProfileKey(PROFILE_NAME, profile))
-            } else {
-                prefs[getProfileKey(PROFILE_NAME, profile)] = trimmed
-            }
-        }
+    internal suspend fun renameProfile(profile: Int, name: String) {
+        dataStore.edit { renameProfileKeys(it, profile, name) }
+    }
+
+    internal suspend fun revertProfileName(profile: Int) {
+        dataStore.edit { revertProfileNameKeys(it, profile) }
+    }
+
+    /** «Скрыть» / «Показать»; false when [profile] is the open one, which is never hidden. */
+    internal suspend fun setProfileHidden(profile: Int, hidden: Boolean): Boolean {
+        var done = false
+        dataStore.edit { done = setProfileHiddenKeys(it, profile, hidden) }
+        return done
     }
 
     internal suspend fun readProfileConnectionSettings(profile: Int): ProfileConnectionSnapshot =
@@ -1894,10 +2094,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     }
 
     /**
-     * Classic's «Удалить профиль»: the profile, and its VPS record when no other profile links it — classic has no VPS list
-     * to reach it from. The server itself is not touched.
+     * «Удалить профиль»: the profile, and its VPS record when no other profile links it — until «Сервер» lists the
+     * records (P3 B4a) there is nowhere to reach a record without a profile from. The server itself is not touched.
      */
-    suspend fun deleteProfileFromClassic(profile: Int) {
+    suspend fun deleteProfile(profile: Int) {
         dataStore.edit { prefs -> deleteProfileWithLoneVps(prefs, profile) }
     }
 
@@ -1905,10 +2105,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     internal suspend fun profileHoldsOnlyLinkToVps(profile: Int): Boolean =
         dataStore.data.map { prefs -> isOnlyLinkToVps(prefs, profile) }.first()
 
-    /** «Добавить профиль»: a free slot, cleared and made active (newProfileKeys); null when all 32 are in use. */
-    suspend fun addProfile(): Int? {
+    /** «Вручную» of «Добавить профиль» (manualProfileKeys): the profile opened for editing; null when all 32 are in use. */
+    internal suspend fun addManualProfile(): Int? {
         var added: Int? = null
-        dataStore.edit { prefs -> added = newProfileKeys(prefs) }
+        dataStore.edit { prefs -> added = manualProfileKeys(prefs) }
         return added
     }
 
@@ -1954,17 +2154,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     /** The leaf a marked subscription's server was last trusted with, whichever way (M-171; review F2, F3). */
     internal suspend fun recordSubscriptionCertificate(url: String, cert: SubscriptionCertRecord) {
         if (cert.sha256.isBlank()) return
-        updateSubscriptionMeta(url) { meta ->
-            val kind = cert.kind.stored
-            val names = cert.names.sorted().joinToString(",")
-            if (meta.certSha256 == cert.sha256 && meta.certNotAfter == cert.notAfterMs && meta.certKind == kind &&
-                meta.certNames == names
-            ) {
-                meta
-            } else {
-                meta.copy(certSha256 = cert.sha256, certNotAfter = cert.notAfterMs, certKind = kind, certNames = names)
-            }
-        }
+        dataStore.edit { writeSubscriptionCertificate(it, url, cert) }
     }
 
     internal suspend fun markSubscriptionAttempt(
@@ -2109,9 +2299,20 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.data.map { prefs -> handOverNoticeOf(prefs, selectedProfile(prefs)) }.distinctUntilChanged()
 
     /** B5h2 (U3): the last refresh's outcome of [url]; true for a new failure. */
-    internal suspend fun recordSubscriptionOutcome(url: String, error: String, skipped: String): Boolean {
+    internal suspend fun trustRefusedCertificate(url: String, sha256: String): Boolean {
+        var trusted = false
+        dataStore.edit { trusted = trustRefusedCertificateKeys(it, url, sha256) }
+        return trusted
+    }
+
+    internal suspend fun recordSubscriptionOutcome(
+        url: String,
+        error: String,
+        skipped: String,
+        refused: SubscriptionCertRecord? = null,
+    ): Boolean {
         var newFailure = false
-        dataStore.edit { prefs -> newFailure = writeSubscriptionOutcome(prefs, url, error, skipped) }
+        dataStore.edit { prefs -> newFailure = writeSubscriptionOutcome(prefs, url, error, skipped, refused) }
         return newFailure
     }
 
@@ -2436,10 +2637,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
     suspend fun saveActiveProfile(profile: Int) {
         dataStore.edit { prefs ->
-            prefs[ACTIVE_PROFILE] = profile.coerceIn(
-                CsqttConstants.Profiles.MIN_INDEX,
-                CsqttConstants.Profiles.MAX_INDEX,
-            )
+            openProfileKeys(prefs, profile.coerceIn(CsqttConstants.Profiles.MIN_INDEX, CsqttConstants.Profiles.MAX_INDEX))
         }
     }
 
@@ -2476,17 +2674,17 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     }
 
     suspend fun saveCsqttParticipantLink(link: String) {
-        dataStore.edit { prefs -> importParticipantLinkKeys(prefs, link, intoNew = false, activate = true) }
+        dataStore.edit { prefs -> importLinkKeys(prefs, link, target = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX) }
     }
 
-    internal suspend fun linkImportState(tunnelRunning: Boolean): LinkImportState =
-        linkImportState(dataStore.data.first(), tunnelRunning)
+    internal suspend fun linkImportState(linkEndpoint: String, runProfile: Int?): LinkImportState =
+        linkImportState(dataStore.data.first(), linkEndpoint, runProfile)
 
-    /** M-70: the profile [link] was written to and its name, or null when no profile was free. */
-    internal suspend fun importParticipantLink(link: String, intoNew: Boolean, activate: Boolean): Pair<Int, String>? {
+    /** M-70 (importLinkKeys): the profile [link] was written to and its name, or null when no profile was free. */
+    internal suspend fun importLink(link: String, target: Int?, name: String = ""): Pair<Int, String>? {
         var written: Pair<Int, String>? = null
         dataStore.edit { prefs ->
-            importParticipantLinkKeys(prefs, link, intoNew, activate)?.let { written = it to profileDisplayName(prefs, it) }
+            importLinkKeys(prefs, link, target, name)?.let { written = it to profileDisplayName(prefs, it) }
         }
         return written
     }

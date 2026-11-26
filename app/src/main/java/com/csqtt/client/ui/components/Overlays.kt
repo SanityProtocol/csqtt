@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -35,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -56,13 +59,18 @@ import com.csqtt.client.ui.design.Shape
 import com.csqtt.client.ui.design.Type
 import kotlinx.coroutines.delay
 
-/** A sheet from the bottom edge: a list to pick from, a form. Back, the scrim, a drag down and ✕ all call [onDismiss]. */
+/**
+ * A sheet from the bottom edge: a list to pick from, a form. Back, the scrim, a drag down and ✕ all call [onDismiss].
+ * A sheet is a window over the activity's, where the app's short messages are drawn: with [messages] given, the sheet
+ * on top shows them itself, at its foot (an «Отменить» must be within reach of the list it undoes).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun Sheet(
     onDismiss: () -> Unit,
     title: String? = null,
     subtitle: String? = null,
+    messages: Messages? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = Csq.colors
@@ -78,35 +86,47 @@ internal fun Sheet(
             Box(Modifier.padding(top = 8.dp, bottom = 4.dp).size(36.dp, 4.dp).background(colors.line, RoundedCornerShape(2.dp)))
         },
     ) {
-        Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (title != null) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(title, style = Type.dialogTitle, color = colors.text, modifier = Modifier.semantics { heading() })
-                        if (subtitle != null) Text(subtitle, style = Type.sub, color = colors.muted)
+        Box(contentAlignment = Alignment.BottomCenter) {
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (title != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(title, style = Type.dialogTitle, color = colors.text, modifier = Modifier.semantics { heading() })
+                            if (subtitle != null) Text(subtitle, style = Type.sub, color = colors.muted)
+                        }
+                        IconBtn(Icons.close, stringResource(R.string.action_close), onDismiss, small = true)
                     }
-                    IconBtn(Icons.close, stringResource(R.string.action_close), onDismiss, small = true)
                 }
+                content()
             }
-            content()
+            if (messages != null) MessageHost(messages, Modifier.padding(bottom = 16.dp))
         }
     }
 }
 
-/** A question in the middle of the screen. Its [actions] end the row on the right: «Отмена», then the one that acts. */
+/**
+ * A question in the middle of the screen. Its [actions] end the row on the right: «Отмена», then the one that acts;
+ * where they do not fit side by side they go one under the other. A question that would be lost with its dialog is not
+ * closed by a tap beside it ([dismissOnOutside] false); Back and «Отмена» still close it.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun DialogFrame(
     title: String,
     onDismiss: () -> Unit,
     subtitle: String? = null,
+    dismissOnOutside: Boolean = true,
     actions: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = Csq.colors
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = dismissOnOutside),
+    ) {
         // the window dims what is behind it by the theme's scrim, not by the platform's default
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
         val dim = colors.scrim.alpha
@@ -129,10 +149,10 @@ internal fun DialogFrame(
             }
             content()
             if (actions != null) {
-                Row(
+                FlowRow(
                     Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
-                    verticalAlignment = Alignment.CenterVertically, content = actions,
-                )
+                    verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically,
+                ) { actions() }
             }
         }
     }
@@ -166,8 +186,11 @@ internal fun MessageHost(messages: Messages, modifier: Modifier = Modifier) {
     val shown = message ?: return
     // the owner's clock: a message raised while no screen drew it has less time left, or none
     val left = remember(shown.id) { messages.remaining(shown) }
+    // someone who asked the system for more time to read and to act gets it
+    val accessibility = LocalAccessibilityManager.current
     LaunchedEffect(shown.id) {
-        delay(left)
+        val asked = accessibility?.calculateRecommendedTimeoutMillis(left, containsText = true, containsControls = shown.action != null) ?: left
+        delay(if (left > 0) maxOf(left, asked) else 0)
         messages.dismiss(shown.id)
     }
     if (left <= 0) return

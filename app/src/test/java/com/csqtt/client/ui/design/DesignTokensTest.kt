@@ -38,7 +38,7 @@ class DesignTokensTest {
     @Test
     fun `every icon builds`() {
         // each is built on first use: a mistyped path would throw when its screen opens
-        assertEquals(23, Icons.all.size)
+        assertEquals(35, Icons.all.size)
         for (icon in Icons.all) assertTrue(icon.root.size > 0)
     }
 

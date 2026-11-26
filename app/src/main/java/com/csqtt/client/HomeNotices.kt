@@ -32,8 +32,12 @@ internal sealed interface HomeNotice {
     /** A profile that waits for its csqtt:// link (D28): nothing to connect to yet. */
     data object NeedLink : HomeNotice
 
-    /** The last outcome of a background operation the user relies on (B5h2): [bad] failed, [warn] skipped something. */
-    data class Outcome(val text: String, val bad: Boolean, val warn: Boolean) : HomeNotice
+    /**
+     * The last outcome of a background operation the user relies on (B5h2): [bad] failed, [warn] skipped something.
+     * [certOf]: the subscription (its URL) whose refresh was turned away because its server's certificate changed —
+     * the notice is then the way to the question about it (P3 B2).
+     */
+    data class Outcome(val text: String, val bad: Boolean, val warn: Boolean, val certOf: String? = null) : HomeNotice
 }
 
 internal fun homeNotices(
@@ -64,7 +68,9 @@ internal fun homeNotices(
     // only while nothing runs: a run on another profile is not this profile's missing link
     if (linkMissing && !state.powerIsOn && state !is ConnectionState.Stopping) add(HomeNotice.NeedLink)
     subscription?.let { meta ->
-        subscriptionNoticeLine(meta)?.let { add(HomeNotice.Outcome(it, bad = meta.lastError.isNotEmpty(), warn = meta.lastError.isEmpty())) }
+        subscriptionNoticeLine(meta)?.let {
+            add(HomeNotice.Outcome(it, bad = meta.lastError.isNotEmpty(), warn = meta.lastError.isEmpty(), certOf = meta.url.takeIf { meta.refused != null }))
+        }
     }
     handOver?.let { add(HomeNotice.Outcome(handOverNoticeLine(it), bad = !it.ok, warn = false)) }
 }
