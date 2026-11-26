@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -114,24 +115,27 @@ internal fun BottomBar(items: List<BarItem>, selected: Int, onSelect: (Int) -> U
                 val ink = if (on) colors.accentText else colors.muted
                 // with a badge the tab is read as «Логи, 2 новые ошибки», not as «Логи 2»
                 val spoken = item.badge?.let { "${item.label}, ${it.description}" }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 3.dp)
-                        .defaultMinSize(minHeight = if (low) 52.dp else 64.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (on) colors.accentSoft else Color.Transparent)
-                        .selectable(selected = on, role = Role.Tab, onClick = { onSelect(index) })
-                        .then(if (spoken != null) Modifier.semantics { contentDescription = spoken } else Modifier)
-                        .padding(vertical = 2.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.size(56.dp, 24.dp), contentAlignment = Alignment.Center) {
-                            Icon(item.icon, contentDescription = null, modifier = Modifier.size(22.dp), tint = ink)
+                // the tab's ground is clipped to its rounded shape; the badge is drawn beside it, not inside, so a wide
+                // pill («99+» on a 360 dp screen) is whole
+                Box(Modifier.weight(1f).padding(horizontal = 3.dp), contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = if (low) 52.dp else 64.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(if (on) colors.accentSoft else Color.Transparent)
+                            .selectable(selected = on, role = Role.Tab, onClick = { onSelect(index) })
+                            .then(if (spoken != null) Modifier.semantics { contentDescription = spoken } else Modifier)
+                            .padding(vertical = 2.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Box(Modifier.size(56.dp, 24.dp), contentAlignment = Alignment.Center) {
+                                Icon(item.icon, contentDescription = null, modifier = Modifier.size(22.dp), tint = ink)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(item.label, style = Type.tab, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Spacer(Modifier.height(4.dp))
-                        Text(item.label, style = Type.tab, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     item.badge?.let { badge ->
                         Text(
@@ -139,11 +143,16 @@ internal fun BottomBar(items: List<BarItem>, selected: Int, onSelect: (Int) -> U
                             textAlign = TextAlign.Center,
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
-                                // its left edge 6 dp right of the tab's middle, over the icon's corner
+                                // its left edge 6 dp right of the tab's middle, over the icon's corner, and its right
+                                // edge never past the tab's own 3 dp of space, so it stays off the next tab
                                 .layout { measurable, constraints ->
                                     val placed = measurable.measure(constraints)
-                                    layout(placed.width, placed.height) { placed.place(placed.width / 2 + 6.dp.roundToPx(), 0) }
+                                    val fromMiddle = placed.width / 2 + 6.dp.roundToPx()
+                                    val toEdge = (constraints.maxWidth - placed.width) / 2 + 3.dp.roundToPx()
+                                    layout(placed.width, placed.height) { placed.place(minOf(fromMiddle, toEdge), 0) }
                                 }
+                                // the tab says it already («Логи, 2 новые ошибки»)
+                                .clearAndSetSemantics {}
                                 .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
                                 .background(if (badge.warn) colors.warn else colors.accent, Shape.pill)
                                 .padding(horizontal = 5.dp),

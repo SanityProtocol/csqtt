@@ -243,7 +243,8 @@ private fun tabBadges(): Map<Tab, TabBadge> {
     val badges = HashMap<Tab, TabBadge>()
     if (unread > 0) {
         val spoken = pluralText(R.plurals.tab_logs_new_errors, unread)
-        // the pill is as wide as the tab's corner lets it be: past 99 it says so, TalkBack still reads the count
+        // three glyphs at most, so the pill stays over its own tab on the narrowest screen: past 99 it says so,
+        // TalkBack still reads the count
         badges[Tab.Logs] = TabBadge(if (unread > 99) MANY else unread.toString(), warn = !running, description = spoken)
     }
     for (question in questions.asReversed()) {

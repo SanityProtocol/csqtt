@@ -106,7 +106,7 @@ class RoleSwitchesMigrationTest {
         assertFalse(
             SettingsStore.userHasServer(
                 load("""{"strings": {"deploy_ip_3": " ", "deploy_login_3": "root"},
-                         "booleans": {"deploy_server_configured_3": false, "deploy_docker_install_3": true}}"""),
+                         "booleans": {"deploy_server_configured_3": false, "docker_install_3": true}}"""),
             ),
         )
         // a 2.5.3 subscription slot its next refresh will make a link: owner mode and an address, but the owner's node
