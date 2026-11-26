@@ -7315,7 +7315,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
                     return;
                 }
                 titleEl.textContent = "Применить VK хеши";
-                msgEl.textContent = `Установить указанные VK хеши для выбранных клиентов (${count} шт.)? Флаг VK токена будет отключен.`;
+                msgEl.textContent = `Установить указанные VK хеши для выбранных клиентов (${count} шт.)? Режим «токен» будет выключен.`;
                 submitBtn.textContent = "Применить хеши";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-hashes') {
@@ -7425,6 +7425,16 @@ const GROUP_ADMIN_HTML: &str = concat!(
             hubSelectedPasswords.clear();
             const selectAll = document.getElementById('hubSelectAll');
             if (selectAll) selectAll.checked = false;
+        });
+
+        // a message outlives the dialog it was shown in: it goes to the dialog now on top, or to the page
+        document.querySelectorAll('dialog').forEach(dlg => {
+            dlg.addEventListener('close', () => {
+                const t = document.getElementById('toast');
+                if (t.parentElement === dlg) {
+                    ((document.elementFromPoint(1, 1) || document.body).closest('dialog[open]') || document.body).appendChild(t);
+                }
+            });
         });
 
         loadData();
@@ -9836,7 +9846,8 @@ const PANEL_HTML: &str = concat!(
                     body: JSON.stringify(body)
                 });
                 if (r.ok) {
-                    // the list is read again below, but a read already under way would bring the old values back
+                    // shown at once; the list is read again below (a read already under way still brings the old values
+                    // back until the next one)
                     const group = (window.groupsData || []).find(g => g.id === groupId);
                     if (group) {
                         group.workers = body.workers || null;
@@ -11057,7 +11068,7 @@ const PANEL_HTML: &str = concat!(
                     return;
                 }
                 titleEl.textContent = "Применить VK хеши";
-                msgEl.textContent = `Установить указанные VK хеши для выбранных клиентов (${count} шт.)? Флаг VK токена будет отключен.`;
+                msgEl.textContent = `Установить указанные VK хеши для выбранных клиентов (${count} шт.)? Режим «токен» будет выключен.`;
                 submitBtn.textContent = "Применить хеши";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-hashes') {
@@ -11424,10 +11435,11 @@ const PANEL_HTML: &str = concat!(
                 }
                 dlg._mouseDownOnBackdrop = false;
             });
+            // a message outlives the dialog it was shown in: it goes to the dialog now on top, or to the page
             dlg.addEventListener('close', () => {
                 const toastBox = document.getElementById('toastContainer');
-                if (toastBox && !document.querySelector('dialog[open]')) {
-                    document.body.appendChild(toastBox);
+                if (toastBox && (toastBox.parentElement === dlg || !document.querySelector('dialog[open]'))) {
+                    ((document.elementFromPoint(1, 1) || document.body).closest('dialog[open]') || document.body).appendChild(toastBox);
                 }
             });
         });
@@ -11686,7 +11698,7 @@ mod tests {
 
     #[test]
     fn participant_cards_contain_ip_info() {
-        assert!(PANEL_HTML.contains("<span>IP</span>") && PANEL_HTML.contains("esc(x.ip || '—')"));
+        assert!(PANEL_HTML.contains("<span>IP</span><span class=\"mono\">${esc(x.ip || '—')}</span>"));
     }
 
     #[test]
@@ -12415,6 +12427,26 @@ mod tests {
         super::apply_group_update(&mut group, update(r#"{"workers":0}"#)).unwrap();
         assert_eq!(group.workers, None, "0 is no limit");
         assert_eq!(super::group_info(&group, 0, (0, 0), 0).workers, None);
+    }
+
+    #[test]
+    fn a_message_outlives_the_dialog_it_was_shown_in() {
+        // A message goes into the dialog on top, where it is seen. Most of them are said by a dialog that closes at once
+        // («Изменения сохранены»): a closed dialog draws nothing, so each page's dialogs hand the message on when they
+        // close, to the dialog now on top or to the page. The group admin's page had no such handler and lost every one.
+        let hands_on = |page: &str, message: &str| {
+            let moved = format!(".closest('dialog[open]') || document.body).appendChild({message});");
+            page.split("dlg.addEventListener('close', () => {").skip(1).any(|after| {
+                let handler = after.split("});").next().unwrap_or_default();
+                handler.contains(&format!("{message}.parentElement === dlg")) && handler.contains(&moved)
+            })
+        };
+        assert!(hands_on(PANEL_HTML, "toastBox"), "the panel");
+        assert!(hands_on(GROUP_ADMIN_HTML, "t"), "the group admin's page");
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML] {
+            // and the handler is put on every dialog of the page, not on one
+            assert!(page.contains("document.querySelectorAll('dialog').forEach(dlg => {"));
+        }
     }
 
     #[test]
