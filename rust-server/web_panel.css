@@ -19,7 +19,7 @@
     --scrim: rgba(0, 0, 0, .6); --shadow: 0 12px 40px rgba(0, 0, 0, .5);
     color-scheme: dark;
 }
-/* the names the API reference, the donation dialog and the script's own inline styles still use */
+/* the names the API reference's inline styles and the scripts' own style writes still use */
 :root, [data-theme="dark"] {
     --bg-color: var(--bg); --surface-hover: var(--raised); --border: var(--line); --text-main: var(--text);
     --text-muted: var(--muted); --text-secondary: var(--muted); --primary: var(--accent-text);
@@ -85,6 +85,8 @@ main.narrow { max-width: 768px; }
 .nb { white-space: nowrap; }
 .g21 { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 0 10px; align-items: start; }
 .btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.btns > .grow { min-width: min-content; }
+.ch > .btns { flex-wrap: nowrap; flex: none; }
 
 /* cards and rows */
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
@@ -92,17 +94,19 @@ main.narrow { max-width: 768px; }
 .ch { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
 .cells { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; display: flex; flex-direction: column; }
 .cells.scroll { max-height: 320px; overflow-y: auto; }
+.cells.scroll > * { flex-shrink: 0; }
 .cell { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 16px; color: inherit; text-decoration: none; width: 100%; text-align: left; border: 0; background: none; }
 .cell + .cell { border-top: 1px solid var(--line-soft); }
 button.cell:hover, .cell.pick:hover { background: var(--raised); }
 .cell.pick { cursor: pointer; user-select: none; }
 .cell.on { background: var(--accent-soft); }
+.cell:focus-visible { outline-offset: -2px; }
 .cell-title { padding: 10px 16px 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .cell-title + .cell { border-top: 0; }
 .cell + .cell-title { border-top: 1px solid var(--line-soft); }
 .cell.dense { min-height: 40px; padding: 4px 16px; }
 .cell > .ic { color: var(--muted); }
-.tags { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; flex: 0 1 auto; max-width: 46%; }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; flex: 0 1 auto; min-width: 0; max-width: 46%; }
 .empty-state, .proxy-empty { text-align: center; padding: 32px 16px; color: var(--muted); font-size: 14px; grid-column: 1 / -1; }
 .hr { height: 1px; background: var(--line-soft); }
 .facts { display: flex; flex-direction: column; gap: 6px; padding: 2px 0; font-size: 14px; line-height: 20px; }
@@ -125,6 +129,8 @@ button.cell:hover, .cell.pick:hover { background: var(--raised); }
 .chip.warn { background: var(--warn-soft); color: var(--warn); }
 .chip.danger { background: var(--danger-soft); color: var(--danger); }
 .chip.acc { background: var(--accent-soft); color: var(--accent-text); }
+.chip.name { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.chip.name > span { overflow: hidden; text-overflow: ellipsis; }
 .chip .dot { width: 8px; height: 8px; border-radius: 4px; background: currentColor; flex: none; }
 
 /* buttons: outlined by default; filled, tonal, text and destructive by class */
@@ -183,7 +189,7 @@ input[type="checkbox"] { width: 20px; height: 20px; flex: none; accent-color: va
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
 .toggle-row label { font-size: 15px; white-space: normal; }
 .seg { display: flex; background: var(--raised); border-radius: 14px; padding: 3px; gap: 3px; border: 1px solid var(--line-soft); }
-.seg > button { flex: 1; min-height: 38px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 13.5px; font-weight: 500; color: var(--muted); text-align: center; padding: 0 6px; border: 0; background: none; white-space: normal; }
+.seg > button { flex: 1; min-height: 38px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 13.5px; font-weight: 500; color: var(--muted); text-align: center; padding: 0 6px; border: 0 !important; background: none; white-space: normal; }
 .seg > button.on, .seg > .btn-primary { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(16, 18, 22, .12); filter: none; }
 
 /* dialogs: a centred card; the ones marked sheet come up from the bottom on a phone */
@@ -231,9 +237,8 @@ dialog p { font-size: 14px; line-height: 20px; color: var(--muted); }
 /* logs */
 .log-path { flex: 1 1 220px; min-width: 0; }
 #logConsole { height: min(60vh, 560px); overflow-y: auto; background: #0E1013; color: #DDE1E8; border-radius: 16px; border: 1px solid var(--line); padding: 12px 14px; font-family: var(--mono); font-size: 12.5px; line-height: 19px; white-space: pre-wrap; word-break: break-all; }
-.log-line { display: flex; gap: 8px; align-items: flex-start; }
-.log-time { color: #9DA3AE; flex: none; }
-.log-lvl { font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 6px; background: #1F2530; color: #AEB7C6; flex: none; font-family: Roboto, system-ui, sans-serif; }
+.log-time { color: #9DA3AE; margin-right: 6px; }
+.log-lvl { font-size: 10.5px; font-weight: 600; padding: 1px 6px; margin-right: 6px; border-radius: 6px; background: #1F2530; color: #AEB7C6; font-family: Roboto, system-ui, sans-serif; }
 .log-lvl.log-err { background: #3A1C1C; color: #FF8A80; }
 
 /* settings */
@@ -310,8 +315,6 @@ dialog p { font-size: 14px; line-height: 20px; color: var(--muted); }
     .wrap-tags { flex-wrap: wrap; }
     .wrap-tags > .tags { order: 9; flex: 1 1 100%; max-width: none; justify-content: flex-start; }
     .hub-row > .tags { padding-left: 32px; }
-    .log-line { display: block; }
-    .log-time, .log-lvl { margin-right: 6px; }
     dialog.sheet { margin: auto 0 0; width: 100%; max-width: 100%; max-height: 92vh; border-radius: 24px 24px 0 0; border-width: 1px 0 0; padding: 18px 16px 24px; }
 }
 @media (max-width: 480px) {
@@ -325,6 +328,12 @@ dialog p { font-size: 14px; line-height: 20px; color: var(--muted); }
     .version-logo { width: 79px; }
     .version-build { font-size: 8px; }
     .btn-api { padding: 0 6px; font-size: 13px; }
+}
+@media (max-width: 380px) {
+    .grid2 { grid-template-columns: minmax(0, 1fr); }
+    .grid2 > .input-group { display: flex; grid-row: auto; }
+    .grid2 > .input-group + .input-group { margin-top: 12px; }
+    .grid2 > .input-group > label { align-self: auto; }
 }
 @media (max-width: 420px) {
     /* the version beside CSQTT needs the room: the API button keeps its word, without the icon */

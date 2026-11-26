@@ -1566,6 +1566,49 @@ fn count_active_sessions(
     count
 }
 
+/// A client's password as an entry of the client list.
+fn entry_client_info(
+    db: &model::Database,
+    host: &str,
+    default_peer_port: u16,
+    active_sessions: usize,
+    password: &str,
+    entry: &PasswordEntry,
+) -> ClientInfo {
+    let peer_port = if entry.dtls_port == 0 {
+        default_peer_port
+    } else {
+        entry.dtls_port
+    };
+    ClientInfo {
+        password: password.to_string(),
+        down: entry.down_bytes,
+        up: entry.up_bytes,
+        expires: entry.expires_at,
+        active: !entry.is_deactivated && !is_expired(entry),
+        active_sessions,
+        vk_hash: entry.vk_hash.clone(),
+        ports: entry.ports.clone(),
+        ip: if entry.ip.is_empty() {
+            crate::swgpanel::subnet_addr(3)
+        } else {
+            entry.ip.clone()
+        },
+        name: entry.name.clone(),
+        vk_hashes: entry.vk_hashes.clone(),
+        vk_token: entry.vk_token_enabled,
+        peer_port,
+        local_port: entry.local_port,
+        group_id: entry.group_id.clone(),
+        routing_rule_id: entry.routing_rule_id.clone(),
+        link: make_entry_link(host, peer_port, password, entry, db),
+        sub_uuid: entry.sub_uuid.clone(),
+        workers: entry.workers,
+        device_limit: Some(entry.device_limit()),
+        is_owner: false,
+    }
+}
+
 /// The owner's main password as an entry of the client list: flagged, without a term and without a device limit.
 fn owner_client_info(
     db: &model::Database,
@@ -1616,44 +1659,14 @@ async fn clients_get(
         .passwords
         .iter()
         .map(|(password, entry)| {
-            let client_peer_port = if entry.dtls_port == 0 {
-                state.app.listen.port()
-            } else {
-                entry.dtls_port
-            };
-            ClientInfo {
-                password: password.clone(),
-                down: entry.down_bytes,
-                up: entry.up_bytes,
-                expires: entry.expires_at,
-                active: !entry.is_deactivated && !is_expired(entry),
-                active_sessions: count_active_sessions(&state.app.sessions, password),
-                vk_hash: entry.vk_hash.clone(),
-                ports: entry.ports.clone(),
-                ip: if entry.ip.is_empty() {
-                    crate::swgpanel::subnet_addr(3)
-                } else {
-                    entry.ip.clone()
-                },
-                name: entry.name.clone(),
-                vk_hashes: entry.vk_hashes.clone(),
-                vk_token: entry.vk_token_enabled,
-                peer_port: client_peer_port,
-                local_port: entry.local_port,
-                group_id: entry.group_id.clone(),
-                routing_rule_id: entry.routing_rule_id.clone(),
-                link: make_entry_link(
-                    &host,
-                    client_peer_port,
-                    password,
-                    entry,
-                    &db,
-                ),
-                sub_uuid: entry.sub_uuid.clone(),
-                workers: entry.workers,
-                device_limit: Some(entry.device_limit()),
-                is_owner: false,
-            }
+            entry_client_info(
+                &db,
+                &host,
+                state.app.listen.port(),
+                count_active_sessions(&state.app.sessions, password),
+                password,
+                entry,
+            )
         })
         .collect();
     if !db.main_password.is_empty() {
@@ -1719,38 +1732,14 @@ async fn group_clients_get(
         .iter()
         .filter(|(_, entry)| entry.group_id == id)
         .map(|(password, entry)| {
-            let client_peer_port = if entry.dtls_port == 0 {
-                state.app.listen.port()
-            } else {
-                entry.dtls_port
-            };
-            ClientInfo {
-                password: password.clone(),
-                down: entry.down_bytes,
-                up: entry.up_bytes,
-                expires: entry.expires_at,
-                active: !entry.is_deactivated && !is_expired(entry),
-                active_sessions: count_active_sessions(&state.app.sessions, password),
-                vk_hash: entry.vk_hash.clone(),
-                ports: entry.ports.clone(),
-                ip: if entry.ip.is_empty() {
-                    crate::swgpanel::subnet_addr(3)
-                } else {
-                    entry.ip.clone()
-                },
-                name: entry.name.clone(),
-                vk_hashes: entry.vk_hashes.clone(),
-                vk_token: entry.vk_token_enabled,
-                peer_port: client_peer_port,
-                local_port: entry.local_port,
-                group_id: entry.group_id.clone(),
-                routing_rule_id: entry.routing_rule_id.clone(),
-                link: make_entry_link(&host, client_peer_port, password, entry, &db),
-                sub_uuid: entry.sub_uuid.clone(),
-                workers: entry.workers,
-                device_limit: Some(entry.device_limit()),
-                is_owner: false,
-            }
+            entry_client_info(
+                &db,
+                &host,
+                state.app.listen.port(),
+                count_active_sessions(&state.app.sessions, password),
+                password,
+                entry,
+            )
         })
         .collect();
     Json(list).into_response()
@@ -2137,45 +2126,14 @@ async fn client_get(
     }
 
     if let Some(entry) = db.passwords.get(&password) {
-        let active_sessions = count_active_sessions(&state.app.sessions, &password);
-        let client_peer_port = if entry.dtls_port == 0 {
-            state.app.listen.port()
-        } else {
-            entry.dtls_port
-        };
-        let info = ClientInfo {
-            password: password.clone(),
-            down: entry.down_bytes,
-            up: entry.up_bytes,
-            expires: entry.expires_at,
-            active: !entry.is_deactivated && !is_expired(entry),
-            active_sessions,
-            vk_hash: entry.vk_hash.clone(),
-            ports: entry.ports.clone(),
-            ip: if entry.ip.is_empty() {
-                crate::swgpanel::subnet_addr(3)
-            } else {
-                entry.ip.clone()
-            },
-            name: entry.name.clone(),
-            vk_hashes: entry.vk_hashes.clone(),
-            vk_token: entry.vk_token_enabled,
-            peer_port: client_peer_port,
-            local_port: entry.local_port,
-            group_id: entry.group_id.clone(),
-            routing_rule_id: entry.routing_rule_id.clone(),
-            link: make_entry_link(
-                &host,
-                client_peer_port,
-                &password,
-                entry,
-                &db,
-            ),
-            sub_uuid: entry.sub_uuid.clone(),
-            workers: entry.workers,
-            device_limit: Some(entry.device_limit()),
-            is_owner: false,
-        };
+        let info = entry_client_info(
+            &db,
+            &host,
+            state.app.listen.port(),
+            count_active_sessions(&state.app.sessions, &password),
+            &password,
+            entry,
+        );
         return Json(info).into_response();
     }
 
@@ -2791,6 +2749,21 @@ struct GroupInfo {
     workers: Option<u32>,
 }
 
+fn group_info(group: &ClientGroup, member_count: usize, (up, down): (i64, i64), active_sessions: usize) -> GroupInfo {
+    GroupInfo {
+        id: group.id.clone(),
+        name: group.name.clone(),
+        routing_rule_id: group.routing_rule_id.clone(),
+        admin_uuid: group.admin_uuid.clone(),
+        sub_uuid: group.sub_uuid.clone(),
+        member_count,
+        up,
+        down,
+        active_sessions,
+        workers: group.workers,
+    }
+}
+
 async fn groups_get(State(state): State<WebState>) -> Response {
     let db = state.app.db.read().await;
     let mut list = Vec::new();
@@ -2807,18 +2780,7 @@ async fn groups_get(State(state): State<WebState>) -> Response {
                 active_sessions += count_active_sessions(&state.app.sessions, _pass);
             }
         }
-        list.push(GroupInfo {
-            id: group.id.clone(),
-            name: group.name.clone(),
-            routing_rule_id: group.routing_rule_id.clone(),
-            admin_uuid: group.admin_uuid.clone(),
-            sub_uuid: group.sub_uuid.clone(),
-            member_count,
-            up,
-            down,
-            active_sessions,
-            workers: group.workers,
-        });
+        list.push(group_info(group, member_count, (up, down), active_sessions));
     }
     Json(list).into_response()
 }
@@ -2866,6 +2828,35 @@ struct UpdateGroupRequest {
     workers: Option<u32>,
 }
 
+/// What a request changes in a group. All of it is checked before any of it is taken: a refused value leaves the group
+/// as it was, where a name taken before a refused limit would have stayed in memory, unsaved, until the restart.
+fn apply_group_update(group: &mut ClientGroup, request: UpdateGroupRequest) -> Result<(), &'static str> {
+    let name = match request.name {
+        Some(name) => {
+            let name = name.trim();
+            if name.is_empty() || name.len() > 64 {
+                return Err("invalid group name");
+            }
+            Some(name.to_string())
+        }
+        None => None,
+    };
+    let workers = match request.workers {
+        Some(workers) => Some(validate_workers(Some(workers))?),
+        None => None,
+    };
+    if let Some(name) = name {
+        group.name = name;
+    }
+    if let Some(routing_rule_id) = request.routing_rule_id {
+        group.routing_rule_id = routing_rule_id;
+    }
+    if let Some(workers) = workers {
+        group.workers = workers;
+    }
+    Ok(())
+}
+
 async fn groups_update(
     State(state): State<WebState>,
     Path(id): Path<String>,
@@ -2876,21 +2867,8 @@ async fn groups_update(
         let Some(group) = db.groups.get_mut(&id) else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        if let Some(name) = request.name {
-            let n = name.trim();
-            if n.is_empty() || n.len() > 64 {
-                return (StatusCode::BAD_REQUEST, "invalid group name").into_response();
-            }
-            group.name = n.to_string();
-        }
-        if let Some(r_id) = request.routing_rule_id {
-            group.routing_rule_id = r_id;
-        }
-        if let Some(workers) = request.workers {
-            match validate_workers(Some(workers)) {
-                Ok(validated) => group.workers = validated,
-                Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
-            }
+        if let Err(message) = apply_group_update(group, request) {
+            return (StatusCode::BAD_REQUEST, message).into_response();
         }
         state.app.db_persistence.submit(db.clone())
     };
@@ -5742,7 +5720,12 @@ const QRCODE_JS: &str = r##"var qrcode=function(){function i(t,r){function a(t,r
 /// binary (`aria_label_once` in main.rs), and that label is the panel header's alone.
 macro_rules! icon_sprite {
     () => {
-        r##"<!-- Icons: Lucide, https://lucide.dev, Copyright (c) Lucide Icons and Contributors, ISC License; some derived from Feather, Copyright (c) 2013-present Cole Bemis, MIT License --><svg width="0" height="0" style="position: absolute" aria-hidden="true"><symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></symbol><symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></symbol><symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></symbol><symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></symbol><symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol><symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></symbol><symbol id="i-list" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M7 12h10"></path><path d="M10 18h4"></path></symbol><symbol id="i-qr" viewBox="0 0 24 24"><rect width="5" height="5" x="3" y="3" rx="1"></rect><rect width="5" height="5" x="16" y="3" rx="1"></rect><rect width="5" height="5" x="3" y="16" rx="1"></rect><path d="M21 16h-3a2 2 0 0 0-2 2v3"></path><path d="M21 21v.01"></path><path d="M12 7v3a2 2 0 0 1-2 2H7"></path><path d="M3 12h.01"></path><path d="M12 3h.01"></path><path d="M12 16v.01"></path><path d="M16 12h1"></path><path d="M21 12v.01"></path><path d="M12 21v-1"></path></symbol><symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></symbol><symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path></symbol><symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol><symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v4"></path><path d="M12 16h.01"></path></symbol><symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></symbol><symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"></path><path d="M18.4 6.6a9 9 0 1 1-12.77.04"></path></symbol><symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></symbol><symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></symbol><symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m7 10 5 5 5-5"></path><path d="M12 15V3"></path></symbol><symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></symbol><symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"></rect><rect width="20" height="8" x="2" y="14" rx="2"></rect><path d="M6 6h.01"></path><path d="M6 18h.01"></path></symbol><symbol id="i-cpu" viewBox="0 0 24 24"><rect width="16" height="16" x="4" y="4" rx="2"></rect><rect width="6" height="6" x="9" y="9"></rect><path d="M15 2v2"></path><path d="M15 20v2"></path><path d="M2 15h2"></path><path d="M2 9h2"></path><path d="M20 15h2"></path><path d="M20 9h2"></path><path d="M9 2v2"></path><path d="M9 20v2"></path></symbol><symbol id="i-drive" viewBox="0 0 24 24"><path d="M22 12H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path><path d="M6 16h.01"></path><path d="M10 16h.01"></path></symbol><symbol id="i-updown" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4"></path><path d="M17 20V4"></path><path d="m3 8 4-4 4 4"></path><path d="M7 4v16"></path></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></symbol><symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"></path><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"></path><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"></path><path d="m2 2 20 20"></path></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9V3Z"></path></symbol><symbol id="i-stop" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect></symbol><symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></symbol><symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6"></path><path d="m8 6-6 6 6 6"></path></symbol><symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></symbol></svg>"##
+        concat!(
+            "<!-- The icons are Lucide's, https://lucide.dev. Their licence:\n\n",
+            include_str!("../app/src/main/assets/licenses/Lucide-LICENSE.txt"),
+            "-->",
+            r##"<svg width="0" height="0" style="position: absolute" aria-hidden="true"><symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></symbol><symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></symbol><symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></symbol><symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></symbol><symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol><symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></symbol><symbol id="i-list" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M7 12h10"></path><path d="M10 18h4"></path></symbol><symbol id="i-qr" viewBox="0 0 24 24"><rect width="5" height="5" x="3" y="3" rx="1"></rect><rect width="5" height="5" x="16" y="3" rx="1"></rect><rect width="5" height="5" x="3" y="16" rx="1"></rect><path d="M21 16h-3a2 2 0 0 0-2 2v3"></path><path d="M21 21v.01"></path><path d="M12 7v3a2 2 0 0 1-2 2H7"></path><path d="M3 12h.01"></path><path d="M12 3h.01"></path><path d="M12 16v.01"></path><path d="M16 12h1"></path><path d="M21 12v.01"></path><path d="M12 21v-1"></path></symbol><symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></symbol><symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path></symbol><symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol><symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v4"></path><path d="M12 16h.01"></path></symbol><symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></symbol><symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"></path><path d="M18.4 6.6a9 9 0 1 1-12.77.04"></path></symbol><symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></symbol><symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></symbol><symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m7 10 5 5 5-5"></path><path d="M12 15V3"></path></symbol><symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></symbol><symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"></rect><rect width="20" height="8" x="2" y="14" rx="2"></rect><path d="M6 6h.01"></path><path d="M6 18h.01"></path></symbol><symbol id="i-cpu" viewBox="0 0 24 24"><rect width="16" height="16" x="4" y="4" rx="2"></rect><rect width="6" height="6" x="9" y="9"></rect><path d="M15 2v2"></path><path d="M15 20v2"></path><path d="M2 15h2"></path><path d="M2 9h2"></path><path d="M20 15h2"></path><path d="M20 9h2"></path><path d="M9 2v2"></path><path d="M9 20v2"></path></symbol><symbol id="i-drive" viewBox="0 0 24 24"><path d="M22 12H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path><path d="M6 16h.01"></path><path d="M10 16h.01"></path></symbol><symbol id="i-updown" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4"></path><path d="M17 20V4"></path><path d="m3 8 4-4 4 4"></path><path d="M7 4v16"></path></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></symbol><symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"></path><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"></path><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"></path><path d="m2 2 20 20"></path></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9V3Z"></path></symbol><symbol id="i-stop" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect></symbol><symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></symbol><symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6"></path><path d="m8 6-6 6 6 6"></path></symbol><symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></symbol></svg>"##
+        )
     };
 }
 macro_rules! brand_logo {
@@ -6571,6 +6554,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
             <button class="btn btn-sm" onclick="executeExtend30()"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>+30 дней</button>
             <button class="btn btn-sm" onclick="executeResetTraffic()">Сбросить трафик</button>
             <button class="btn btn-sm btn-tonal" id="editToggleBtn" onclick="executeToggleClient()">Выключить</button>
+            <button class="btn btn-sm" type="button" onclick="copyClientSubLink(activeClient && activeClient.sub_uuid, this)" title="Скопировать ссылку подписки"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg>Ссылка подписки</button>
         </div>
         <div class="hr"></div>
         <div class="dlg-actions split">
@@ -6618,8 +6602,8 @@ const GROUP_ADMIN_HTML: &str = concat!(
                     <input id="hubVkHashesInput" placeholder="hash1,hash2,...,hash6" onchange="autoSaveHubVkHashes()" onblur="autoSaveHubVkHashes()">
                 </div>
                 <div class="btns">
-                    <button class="btn btn-tonal btn-sm" onclick="applyHubVkHashesDirect()">Применить</button>
-                    <button class="btn btn-sm" onclick="promptBatchAction('clear-hashes')">Очистить</button>
+                    <button class="btn btn-tonal btn-sm" onclick="applyHubVkHashesDirect()">Записать выбранным</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-hashes')">Очистить у выбранных</button>
                 </div>
             </div>
             <div class="card">
@@ -6639,7 +6623,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
             <label class="btns" for="hubSelectAll">
                 <input type="checkbox" id="hubSelectAll" onchange="toggleSelectAllHubClients(this.checked)">
                 <span class="t">Выбрать всех</span>
-                <span class="s" id="hubSelectedCount">(0 выбрано)</span>
+                <span class="s" id="hubSelectedCount">· выбрано 0</span>
             </label>
             <div class="search">
                 <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
@@ -6729,6 +6713,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
 
         function showToast(msg, isError) {
             const t = document.getElementById('toast');
+            ((document.elementFromPoint(1, 1) || document.body).closest('dialog[open]') || document.body).appendChild(t);
             t.textContent = msg;
             t.style.borderColor = isError ? 'var(--danger)' : 'transparent';
             t.style.display = 'block';
@@ -6977,7 +6962,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
             if (!activeClient) return;
             const link = activeClient.link || '';
             if (!link) { showToast('Ссылка клиента недоступна', true); return; }
-            document.getElementById('qrDlgTitle').textContent = 'QR-код: ' + (activeClient.name || 'Клиент');
+            document.getElementById('qrDlgTitle').textContent = 'QR-код · ' + (activeClient.name || 'Клиент');
             document.getElementById('qrDlgLink').value = link;
             const container = document.getElementById('qrCodeContainer');
             container.innerHTML = generateQrSvg(link);
@@ -7255,7 +7240,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
             const visibleCbs = document.querySelectorAll('.hub-client-cb');
             const checkedCount = hubSelectedPasswords.size;
             const countEl = document.getElementById('hubSelectedCount');
-            if (countEl) countEl.textContent = `(${checkedCount} выбрано)`;
+            if (countEl) countEl.textContent = `· выбрано ${checkedCount}`;
             const selectAll = document.getElementById('hubSelectAll');
             if (selectAll) {
                 selectAll.checked = (visibleCbs.length > 0 && Array.from(visibleCbs).every(cb => cb.checked));
@@ -7284,7 +7269,7 @@ const GROUP_ADMIN_HTML: &str = concat!(
             if (!client) return;
             const link = client.link || '';
             if (!link) { showToast('Ссылка клиента недоступна', true); return; }
-            document.getElementById('qrDlgTitle').textContent = 'QR-код: ' + (client.name || 'Клиент');
+            document.getElementById('qrDlgTitle').textContent = 'QR-код · ' + (client.name || 'Клиент');
             document.getElementById('qrDlgLink').value = link;
             const container = document.getElementById('qrCodeContainer');
             container.innerHTML = generateQrSvg(link);
@@ -7315,12 +7300,12 @@ const GROUP_ADMIN_HTML: &str = concat!(
                 }
                 titleEl.textContent = "Выдать хеши владельца";
                 msgEl.textContent = `Выбранные клиенты (${count} шт.) получат VK хеши владельца? Их индивидуальные VK хеши будут очищены.`;
-                submitBtn.textContent = "Применить токен";
+                submitBtn.textContent = "Выдать";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-token') {
-                titleEl.textContent = "Отключить VK токен";
-                msgEl.textContent = `Отключить VK токен для выбранных клиентов (${count} шт.)?`;
-                submitBtn.textContent = "Отключить токен";
+                titleEl.textContent = "Выключить режим «токен»";
+                msgEl.textContent = `Выключить режим «токен» у выбранных клиентов (${count} шт.)?`;
+                submitBtn.textContent = "Выключить";
                 submitBtn.className = "btn btn-danger";
             } else if (action === 'hashes') {
                 const raw = (document.getElementById('hubVkHashesInput')?.value || groupVkHashes || '').trim();
@@ -7345,12 +7330,14 @@ const GROUP_ADMIN_HTML: &str = concat!(
                     return;
                 }
                 titleEl.textContent = "Установить число потоков";
-                msgEl.textContent = `Установить потоки (${w === 0 ? 'без ограничения' : w}) для выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = w === 0
+                    ? `Убрать собственное ограничение потоков у выбранных клиентов (${count} шт.)? Останется ограничение группы.`
+                    : `Установить потоки (${w}) для выбранных клиентов (${count} шт.)?`;
                 submitBtn.textContent = "Установить число потоков";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-workers') {
                 titleEl.textContent = "Сбросить число потоков";
-                msgEl.textContent = `Снять ограничение потоков у выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = `Убрать собственное ограничение потоков у выбранных клиентов (${count} шт.)? Останется ограничение группы.`;
                 submitBtn.textContent = "Сбросить число потоков";
                 submitBtn.className = "btn btn-danger";
             } else if (action === 'clear') {
@@ -7626,7 +7613,7 @@ const PANEL_HTML: &str = concat!(
                         <div class="input-group">
                             <label for="mainpass">Пароль владельца</label>
                             <div class="field-row">
-                                <input id="mainpass" type="password" autocomplete="off" spellcheck="false">
+                                <input id="mainpass" type="password" autocomplete="new-password" spellcheck="false">
                                 <button class="ib sm" type="button" onclick="togglePasswordReveal('mainpass', this)" title="Показать пароль" aria-label="Показать пароль"><svg class="ic" aria-hidden="true"><use href="#i-eye"></use></svg></button>
                             </div>
                         </div>
@@ -7701,7 +7688,7 @@ const PANEL_HTML: &str = concat!(
                                 <svg class="ic" aria-hidden="true"><use href="#i-code"></use></svg><span class="grow"><span class="t">Исходный код на GitHub</span><span class="s">SanityProtocol/csqtt · эта сборка</span></span><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg>
                             </a>
                             <a class="cell" href="https://t.me/swgPanel" target="_blank" rel="noopener noreferrer">
-                                <svg class="ic" aria-hidden="true"><use href="#i-send"></use></svg><span class="grow"><span class="t">Telegram</span><span class="s">t.me/swgPanel</span></span><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg>
+                                <svg class="ic" aria-hidden="true"><use href="#i-send"></use></svg><span class="grow"><span class="t">Telegram-канал</span><span class="s">t.me/swgPanel</span></span><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg>
                             </a>
                         </div>
                     </div>
@@ -7752,7 +7739,7 @@ const PANEL_HTML: &str = concat!(
             <h2 id="profileDlgTitle">Новый профиль</h2>
             <button class="close-btn" onclick="document.getElementById('profileDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-        <div class="input-group"><label for="profileDlgName">Имя</label><input id="profileDlgName" maxlength="64" placeholder="3x-ui VLESS"></div>
+        <div class="input-group"><label for="profileDlgName">Имя</label><input id="profileDlgName" maxlength="64" placeholder="3x-ui VLESS" autofocus></div>
         <div class="g21">
             <div class="input-group"><label for="profileDlgHost">Адрес SOCKS5</label><input id="profileDlgHost" value="127.0.0.1" placeholder="127.0.0.1" inputmode="decimal" autocomplete="off" spellcheck="false"></div>
             <div class="input-group"><label for="profileDlgPort">Порт</label><input type="number" id="profileDlgPort" min="1" max="65535" value="45000" inputmode="numeric"></div>
@@ -7780,7 +7767,7 @@ const PANEL_HTML: &str = concat!(
         <input type="hidden" id="newDlgGroupId" value="">
         <div class="input-group">
             <label for="cname">Имя клиента</label>
-            <input id="cname" maxlength="128" placeholder="Например: Маша">
+            <input id="cname" maxlength="128" placeholder="Например: Маша" autofocus>
         </div>
         <div class="input-group">
             <label for="days">Срок действия, дней</label>
@@ -7818,7 +7805,7 @@ const PANEL_HTML: &str = concat!(
         </div>
         <div class="input-group" id="edit_group_group">
             <label for="edit_group">Группа</label>
-            <select id="edit_group">
+            <select id="edit_group" onchange="nameNoLimit('edit_workers', Boolean(this.value))">
                 <option value="">Без группы</option>
             </select>
         </div>
@@ -7850,6 +7837,9 @@ const PANEL_HTML: &str = concat!(
         <div class="facts">
             <div id="edit_owner_devices" style="display: none;"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg><span>Подключений одновременно: без ограничения</span></div>
             <div><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg><span>IP <span id="edit_ip_info">—</span> · трафик <span id="edit_traffic_info">↑ 0 B / ↓ 0 B</span></span></div>
+        </div>
+        <div class="btns">
+            <button class="btn btn-sm" type="button" onclick="copyClientSubLink(activeClient && activeClient.sub_uuid, this)" title="Скопировать ссылку подписки"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg>Ссылка подписки</button>
         </div>
         <div class="hr"></div>
         <div class="dlg-actions split">
@@ -7904,7 +7894,7 @@ const PANEL_HTML: &str = concat!(
             <input type="text" id="groupSearchInput" placeholder="Поиск в группе" aria-label="Поиск в группе" oninput="handleGroupSearch(this.value)">
             <button class="ib sm" id="groupSearchClearBtn" onclick="clearGroupSearch()" style="display: none;" title="Очистить" aria-label="Очистить"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-        <div id="groupClientsCards" class="cells"></div>
+        <div id="groupClientsCards" class="cells scroll"></div>
         <div class="hr"></div>
         <div class="dlg-actions split">
             <button id="groupDeleteBtn" class="btn btn-ghost danger" onclick="deleteCurrentGroup()">Удалить группу</button>
@@ -7935,9 +7925,9 @@ const PANEL_HTML: &str = concat!(
             <input id="ruleName" maxlength="128" placeholder="Например: Обход блокировок">
         </div>
         <span class="sec">Приложения · через туннель</span>
-        <div class="seg" data-for="ruleMode" role="radiogroup" aria-label="Приложения через туннель">
-            <button type="button" role="radio" data-value="blacklist">Всё, кроме списка</button>
-            <button type="button" role="radio" data-value="whitelist">Только список</button>
+        <div class="seg" data-for="ruleMode" role="group" aria-label="Приложения через туннель">
+            <button type="button" data-value="blacklist">Всё, кроме списка</button>
+            <button type="button" data-value="whitelist">Только список</button>
         </div>
         <select id="ruleMode" onchange="onRuleModeChange()" hidden>
             <option value="blacklist">Всё, кроме списка</option>
@@ -7949,9 +7939,9 @@ const PANEL_HTML: &str = concat!(
             <textarea id="rulePackages" oninput="onRuleModeChange()" rows="3" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
         </div>
         <span class="sec">Домены · через туннель</span>
-        <div class="seg" data-for="ruleDomainsMode" role="radiogroup" aria-label="Домены через туннель">
-            <button type="button" role="radio" data-value="blacklist">Всё, кроме списка</button>
-            <button type="button" role="radio" data-value="whitelist">Только список</button>
+        <div class="seg" data-for="ruleDomainsMode" role="group" aria-label="Домены через туннель">
+            <button type="button" data-value="blacklist">Всё, кроме списка</button>
+            <button type="button" data-value="whitelist">Только список</button>
         </div>
         <select id="ruleDomainsMode" onchange="onRuleDomainsModeChange()" hidden>
             <option value="blacklist">Всё, кроме списка</option>
@@ -7970,9 +7960,9 @@ const PANEL_HTML: &str = concat!(
             </label>
         </div>
         <span class="sec">Адреса · через туннель</span>
-        <div class="seg" data-for="ruleIpMode" role="radiogroup" aria-label="Адреса через туннель">
-            <button type="button" role="radio" data-value="blacklist">Всё, кроме списка</button>
-            <button type="button" role="radio" data-value="whitelist">Только список</button>
+        <div class="seg" data-for="ruleIpMode" role="group" aria-label="Адреса через туннель">
+            <button type="button" data-value="blacklist">Всё, кроме списка</button>
+            <button type="button" data-value="whitelist">Только список</button>
         </div>
         <select id="ruleIpMode" hidden>
             <option value="blacklist">Всё, кроме списка</option>
@@ -8030,12 +8020,12 @@ const PANEL_HTML: &str = concat!(
                     <button class="btn btn-sm" onclick="promptBatchAction('clear-token')">Выключить «токен»</button>
                 </div>
                 <div class="input-group">
-                    <label for="hubVkHashesInput">Хеши VK для выбранных (через запятую)</label>
+                    <label for="hubVkHashesInput">Хеши VK владельца (через запятую)</label>
                     <input id="hubVkHashesInput" placeholder="hash1,hash2,...,hash6" onchange="autoSaveHubVkHashes()" onblur="autoSaveHubVkHashes()">
                 </div>
                 <div class="btns">
-                    <button class="btn btn-tonal btn-sm" onclick="applyHubVkHashesDirect()">Применить</button>
-                    <button class="btn btn-sm" onclick="promptBatchAction('clear-hashes')">Очистить</button>
+                    <button class="btn btn-tonal btn-sm" onclick="applyHubVkHashesDirect()">Записать выбранным</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-hashes')">Очистить у выбранных</button>
                 </div>
             </div>
             <div class="card">
@@ -8055,7 +8045,7 @@ const PANEL_HTML: &str = concat!(
             <label class="btns" for="hubSelectAll">
                 <input type="checkbox" id="hubSelectAll" onchange="toggleSelectAllHubClients(this.checked)">
                 <span class="t">Выбрать всех</span>
-                <span class="s" id="hubSelectedCount">(0 выбрано)</span>
+                <span class="s" id="hubSelectedCount">· выбрано 0</span>
             </label>
             <div class="search">
                 <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
@@ -8234,7 +8224,7 @@ const PANEL_HTML: &str = concat!(
                 </div>
                 <div class="api-card-body">
                     <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 6px;">
-                        Возвращает массив клиентов: расход трафика, статус активности, срок, <code>ip</code>, <code>sub_uuid</code> и <code>link</code>.
+                        Возвращает массив клиентов: расход трафика, статус активности, срок, <code>ip</code>, <code>sub_uuid</code> и <code>link</code>. У главного пароля владельца <code>is_owner</code> равно <code>true</code>.
                     </p>
                     <p style="font-size: 11px; color: var(--primary);">
                         Фильтры (Query): <code>?group_id={id|root}</code>, <code>?active=true|false</code>, <code>?search=текст</code>.
@@ -8451,7 +8441,7 @@ const PANEL_HTML: &str = concat!(
                 </div>
                 <div class="api-card-body">
                     <p style="font-size: 12px; color: var(--text-muted);">
-                        Возвращает все группы: <code>id</code>, <code>name</code>, ограничение скорости <code>rate_limit_mbps</code>, привязанное правило <code>routing_rule_id</code>, постоянный <code>sub_uuid</code> групповой подписки, статус админ-панели и <code>admin_uuid</code>.
+                        Возвращает все группы: <code>id</code>, <code>name</code>, ограничение скорости <code>rate_limit_mbps</code>, привязанное правило <code>routing_rule_id</code>, потоки для ключей группы <code>workers</code> (<code>null</code> — без ограничения), постоянный <code>sub_uuid</code> групповой подписки, статус админ-панели и <code>admin_uuid</code>.
                     </p>
                 </div>
             </div>
@@ -8474,7 +8464,8 @@ const PANEL_HTML: &str = concat!(
                     <span class="api-desc">Редактирование группы</span>
                 </div>
                 <div class="api-card-body">
-                    <pre class="api-code-block"><code>{ "name": "Новое Имя Группы", "routing_rule_id": "rule_id_here" }</code></pre>
+                    <pre class="api-code-block"><code>{ "name": "Новое Имя Группы", "routing_rule_id": "rule_id_here", "workers": 10 }</code></pre>
+                    <p style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">Все поля необязательны. <code>workers</code>: <code>0</code> — без ограничения, <code>3</code>–<code>100</code> — потоки для ключей группы, у которых нет своего значения.</p>
                 </div>
             </div>
 
@@ -8953,6 +8944,10 @@ const PANEL_HTML: &str = concat!(
             select.innerHTML = '<option value="0">Без ограничения</option>'
                 + Array.from({ length: 98 }, (_, i) => `<option value="${i + 3}">${i + 3}</option>`).join('');
         });
+        // a key of a group with no limit of its own takes the group's: the select's first choice says which it is
+        function nameNoLimit(selectId, inGroup) {
+            document.getElementById(selectId).options[0].textContent = inGroup ? 'Как у группы' : 'Без ограничения';
+        }
         function togglePasswordReveal(id, btn) {
             const input = document.getElementById(id);
             const show = input.type === 'password';
@@ -9037,7 +9032,8 @@ const PANEL_HTML: &str = concat!(
         function showToast(text, type = 'success') {
             const container = document.getElementById('toastContainer');
             if (container) {
-                const openDialog = Array.from(document.querySelectorAll('dialog[open]')).pop();
+                const openDialog = (document.elementFromPoint(1, 1) || document.body).closest('dialog[open]')
+                    || Array.from(document.querySelectorAll('dialog[open]')).pop();
                 if (openDialog) {
                     openDialog.appendChild(container);
                 } else if (container.parentElement !== document.body) {
@@ -9546,9 +9542,10 @@ const PANEL_HTML: &str = concat!(
 
             if (!query) {
                 const groupsHtml = (window.groupsData || []).map(g => renderGroupCard(g, groupStats[g.id])).join('');
-                const standaloneHtml = standaloneClients.map(x => renderClientCard(x)).join('');
-                container.innerHTML = groupsHtml + standaloneHtml;
-                if (!groupsHtml && !standaloneHtml) {
+                const ownerHtml = standaloneClients.filter(x => x.is_owner).map(x => renderClientCard(x)).join('');
+                const standaloneHtml = standaloneClients.filter(x => !x.is_owner).map(x => renderClientCard(x)).join('');
+                container.innerHTML = ownerHtml + groupsHtml + standaloneHtml;
+                if (!ownerHtml && !groupsHtml && !standaloneHtml) {
                     container.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">Нет созданных доступов.</div>`;
                 }
                 return;
@@ -9822,17 +9819,32 @@ const PANEL_HTML: &str = concat!(
         async function saveGroupSettings() {
             const groupId = window.currentViewingGroupId;
             if (!groupId) return;
+            const body = { workers: parseInt(document.getElementById('group_workers').value, 10) || 0 };
+            // a name being typed in the title is saved with the rest, not dropped
+            if (isGroupInlineEditing) {
+                body.name = document.getElementById('groupDlgTitleInput').value.trim();
+                if (!body.name) {
+                    showToast("Имя группы не может быть пустым", "error");
+                    return;
+                }
+            }
             const btn = document.getElementById('groupSaveBtn');
             btn.disabled = true;
             try {
-                const workers = parseInt(document.getElementById('group_workers').value, 10) || 0;
                 let r = await api("/api/groups/" + encodeURIComponent(groupId), {
                     method: "PUT",
-                    body: JSON.stringify({ workers })
+                    body: JSON.stringify(body)
                 });
                 if (r.ok) {
+                    // the list is read again below, but a read already under way would bring the old values back
+                    const group = (window.groupsData || []).find(g => g.id === groupId);
+                    if (group) {
+                        group.workers = body.workers || null;
+                        if (body.name) group.name = body.name;
+                    }
                     showToast("Изменения сохранены");
                     document.getElementById('groupDlg').close();
+                    renderMainClientsCards();
                     loadClients();
                 } else {
                     showToast(await r.text(), "error");
@@ -9998,14 +10010,16 @@ const PANEL_HTML: &str = concat!(
                     .concat((rule.target_client_passwords || []).map(p => ((window.clientsData || []).find(c => c.password === p) || {}).name))
                     .filter(Boolean);
                 const chips = names.length
-                    ? names.slice(0, 3).map(n => `<span class="chip sm">${esc(n)}</span>`).join('')
+                    ? names.slice(0, 3).map(n => `<span class="chip sm name"><span>${esc(n)}</span></span>`).join('')
                         + (names.length > 3 ? `<span class="chip sm">+${names.length - 3}</span>` : '')
                     : '<span class="chip sm">никому</span>';
+                const domains = [(rule.domains || []).length ? listText(rule.domains_mode, rule.domains.length) : '',
+                    rule.template_domains ? 'список RU' : ''].filter(Boolean).join(' + ') || '—';
                 return `
                 <button type="button" class="cell wrap-tags" onclick="openEditRoutingRuleDlg('${esc(rule.id)}')">
                     <span class="grow">
                         <span class="t b">${esc(rule.name || 'Без имени')}</span>
-                        <span class="s">Приложения: ${listText(rule.mode, (rule.packages || []).length)} · Домены: ${listText(rule.domains_mode, (rule.domains || []).length)}${rule.template_domains ? ' + список RU' : ''} · Адреса: ${listText(rule.ip_mode, (rule.ips || []).length)}</span>
+                        <span class="s">Приложения: ${listText(rule.mode, (rule.packages || []).length)} · Домены: ${domains} · Адреса: ${listText(rule.ip_mode, (rule.ips || []).length)}</span>
                     </span>
                     <span class="tags">${chips}</span>
                     ${ic('chevron-right')}
@@ -10559,6 +10573,7 @@ const PANEL_HTML: &str = concat!(
             document.getElementById('days').value = '30';
             const workersInput = document.getElementById('new_workers');
             if (workersInput) workersInput.value = '0';
+            nameNoLimit('new_workers', Boolean(groupId));
             document.getElementById('new_device_limit').value = '3';
             const groupNotice = document.getElementById('newDlgGroupNotice');
             const groupNameSpan = document.getElementById('newDlgGroupName');
@@ -10646,6 +10661,7 @@ const PANEL_HTML: &str = concat!(
             if (editWorkers) {
                 editWorkers.value = c.workers || 0;
             }
+            nameNoLimit('edit_workers', Boolean(c.group_id));
             // the owner's main key has no device limit: the list sends it none
             document.getElementById('edit_device_limit').value = c.device_limit || 3;
 
@@ -10978,7 +10994,7 @@ const PANEL_HTML: &str = concat!(
             const visibleCbs = document.querySelectorAll('.hub-client-cb');
             const checkedCount = hubSelectedPasswords.size;
             const countEl = document.getElementById('hubSelectedCount');
-            if (countEl) countEl.textContent = `(${checkedCount} выбрано)`;
+            if (countEl) countEl.textContent = `· выбрано ${checkedCount}`;
             const selectAll = document.getElementById('hubSelectAll');
             if (selectAll) {
                 selectAll.checked = (visibleCbs.length > 0 && Array.from(visibleCbs).every(cb => cb.checked));
@@ -11026,12 +11042,12 @@ const PANEL_HTML: &str = concat!(
                 }
                 titleEl.textContent = "Выдать хеши владельца";
                 msgEl.textContent = `Выбранные клиенты (${count} шт.) получат VK хеши владельца? Их индивидуальные VK хеши будут очищены.`;
-                submitBtn.textContent = "Применить токен";
+                submitBtn.textContent = "Выдать";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-token') {
-                titleEl.textContent = "Отключить VK токен";
-                msgEl.textContent = `Отключить VK токен для выбранных клиентов (${count} шт.)?`;
-                submitBtn.textContent = "Отключить токен";
+                titleEl.textContent = "Выключить режим «токен»";
+                msgEl.textContent = `Выключить режим «токен» у выбранных клиентов (${count} шт.)?`;
+                submitBtn.textContent = "Выключить";
                 submitBtn.className = "btn btn-danger";
             } else if (action === 'hashes') {
                 const raw = (document.getElementById('hubVkHashesInput')?.value || sharedVkHashes || '').trim();
@@ -11056,12 +11072,14 @@ const PANEL_HTML: &str = concat!(
                     return;
                 }
                 titleEl.textContent = "Установить число потоков";
-                msgEl.textContent = `Установить потоки (${w === 0 ? 'без ограничения' : w}) для выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = w === 0
+                    ? `Убрать собственное ограничение потоков у выбранных клиентов (${count} шт.)? У ключей в группе действует ограничение группы.`
+                    : `Установить потоки (${w}) для выбранных клиентов (${count} шт.)?`;
                 submitBtn.textContent = "Установить число потоков";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-workers') {
                 titleEl.textContent = "Сбросить число потоков";
-                msgEl.textContent = `Снять ограничение потоков у выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = `Убрать собственное ограничение потоков у выбранных клиентов (${count} шт.)? У ключей в группе действует ограничение группы.`;
                 submitBtn.textContent = "Сбросить число потоков";
                 submitBtn.className = "btn btn-danger";
             } else if (action === 'clear') {
@@ -11294,7 +11312,7 @@ const PANEL_HTML: &str = concat!(
             if (!button || button.disabled) return;
             const hours = Number(document.getElementById('auto_restart_interval').value);
             if (![0, 12, 24, 48, 72].includes(hours)) {
-                showToast('Выберите допустимый интервал перезагрузки', 'error');
+                showToast('Выберите допустимый интервал перезапуска', 'error');
                 return;
             }
             button.classList.add('saving'); button.disabled = true;
@@ -11314,7 +11332,7 @@ const PANEL_HTML: &str = concat!(
             document.getElementById('rebootDlg').close();
             const response = await api("/api/reboot", {method: "POST"});
             if (!response.ok) {
-                showToast("Не удалось подготовить перезагрузку", "error");
+                showToast("Не удалось подготовить перезапуск", "error");
                 return;
             }
             showToast("Сервер перезапускается...");
@@ -11449,7 +11467,7 @@ const PANEL_HTML: &str = concat!(
             const link = client.link || '';
             if (!link) { showToast('Ссылка клиента недоступна', true); return; }
             const titleEl = document.getElementById('qrDlgTitle');
-            if (titleEl) titleEl.textContent = 'QR-код: ' + (client.name || 'Клиент');
+            if (titleEl) titleEl.textContent = 'QR-код · ' + (client.name || 'Клиент');
             const linkInput = document.getElementById('qrDlgLink');
             if (linkInput) linkInput.value = link;
             const container = document.getElementById('qrCodeContainer');
@@ -11668,7 +11686,7 @@ mod tests {
 
     #[test]
     fn participant_cards_contain_ip_info() {
-        assert!(PANEL_HTML.contains("<span>IP</span><span class=\"mono\">${esc(x.ip || '—')}</span>"));
+        assert!(PANEL_HTML.contains("<span>IP</span>") && PANEL_HTML.contains("esc(x.ip || '—')"));
     }
 
     #[test]
@@ -11878,6 +11896,8 @@ mod tests {
 
     // ---- the panel in the app's design (P3 B10): the look changed, what the pages ask the server for did not
 
+    use std::collections::BTreeSet;
+
     /// What the router serves: the path of every `.route(` in this file.
     fn served_routes() -> Vec<String> {
         let call = [".route", "("].concat();
@@ -11906,9 +11926,9 @@ mod tests {
     /// The paths a page's script asks for: the first argument of every call of `call`, its string literals kept and
     /// whatever is computed between them written `{}`. A call whose path is wholly computed (the helper's own
     /// `fetch(url)`) is left out; a base path in front of the first literal is dropped.
-    fn called_paths(page: &str, call: &str) -> std::collections::BTreeSet<String> {
+    fn called_paths(page: &str, call: &str) -> BTreeSet<String> {
         let script = &page[page.rfind("<script>").expect("a page has a script")..];
-        let mut paths = std::collections::BTreeSet::new();
+        let mut paths = BTreeSet::new();
         let mut rest = script;
         while let Some(at) = rest.find(call) {
             let before = rest[..at].chars().next_back();
@@ -11959,7 +11979,7 @@ mod tests {
         paths
     }
 
-    /// The values of an attribute over a page: `attribute_values(page, "href")`.
+    /// The values of an attribute over a page, the script's own markup strings included: `attribute_values(page, "href")`.
     fn attribute_values<'a>(page: &'a str, attribute: &str) -> Vec<&'a str> {
         let open = format!(" {attribute}=\"");
         page.match_indices(&open)
@@ -11970,11 +11990,30 @@ mod tests {
             .collect()
     }
 
+    /// The functions a page's markup calls from its handlers, by name.
+    fn handler_names(page: &str) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for event in ["onclick", "onchange", "oninput", "onblur"] {
+            for handler in attribute_values(page, event) {
+                // a button on a card that is itself tapped keeps the tap to itself first
+                let handler = handler.strip_prefix("event.stopPropagation(); ").unwrap_or(handler);
+                let name: String = handler.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if !["document", "this"].contains(&name.as_str()) {
+                    names.insert(name);
+                }
+            }
+        }
+        names
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
     fn panel_html_calls_only_served_routes() {
-        let served: std::collections::BTreeSet<String> = served_routes().iter().map(|route| shape(route)).collect();
+        let served: BTreeSet<String> = served_routes().iter().map(|route| shape(route)).collect();
         assert!(served.contains("/api/clients/{}/toggle") && served.contains("/{}/api/data"), "{served:?}");
-        let set = |paths: &[&str]| paths.iter().map(|path| path.to_string()).collect::<std::collections::BTreeSet<_>>();
 
         // every request of the three pages, by name: one that goes away or a new one changes this list
         let panel = called_paths(PANEL_HTML, "api(");
@@ -12028,7 +12067,7 @@ mod tests {
             assert!(served.contains(path), "the router does not serve {path}");
         }
 
-        // what the markup itself points at on this server
+        // what the markup itself points at on this server, and the links the scripts put together to be copied
         for page in [PANEL_HTML, GROUP_ADMIN_HTML, LOGIN_HTML] {
             for local in attribute_values(page, "href")
                 .into_iter()
@@ -12039,8 +12078,23 @@ mod tests {
             }
         }
         assert!(attribute_values(PANEL_HTML, "href").contains(&"/api/logs/download"));
+        for (page, tail) in [
+            (PANEL_HTML, "/sub"),
+            (PANEL_HTML, "/sub-group"),
+            (PANEL_HTML, "/admin"),
+            (PANEL_HTML, "/sw.js"),
+            (GROUP_ADMIN_HTML, "/sub"),
+        ] {
+            assert!(page.contains(&format!("+ '{tail}'")), "the script no longer builds a link ending {tail}");
+            let route = if tail == "/sw.js" { tail.to_string() } else { format!("/{{}}{tail}") };
+            assert!(served.contains(&route), "the router does not serve {route}");
+        }
+    }
 
-        // and elsewhere: «О панели» alone, the author's page and ours; no donation, no support link
+    #[test]
+    fn the_panel_asks_for_no_support() {
+        // The operator, 2026-11-26: no donations, no support. «О панели» credits the author and links this build's
+        // source and channel; nothing else leads out of the pages, and nothing of the old block is left as text.
         let outside = |page: &'static str| {
             attribute_values(page, "href")
                 .into_iter()
@@ -12052,18 +12106,23 @@ mod tests {
             ["https://github.com/amurcanov", "https://github.com/SanityProtocol/csqtt", "https://t.me/swgPanel"]
         );
         assert!(outside(GROUP_ADMIN_HTML).is_empty() && outside(LOGIN_HTML).is_empty());
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML, LOGIN_HTML] {
+            for gone in ["amurcanov_telegram", "Поддержать", "Криптовалют", "ryptoDonate", "UQCsHSj", "TD1oiQiH"] {
+                assert!(!page.contains(gone), "{gone}");
+            }
+        }
     }
 
     #[test]
     fn panel_scripts_find_every_element_and_handler_they_name() {
-        // The pages were redrawn around scripts that look their elements up by id and are called from the markup by
-        // name: an id or a function lost in the redrawing is a button that does nothing.
+        // The pages were redrawn around scripts that look their elements up by id and by class and are called from
+        // the markup by name: one of them lost in a redrawing is a button that does nothing.
         for (page, never_in_the_page) in [(PANEL_HTML, &["groupDlgStatsSummary"][..]), (GROUP_ADMIN_HTML, &[][..])] {
             let script = &page[page.rfind("<script>").unwrap()..];
-            // an id is asked for by getElementById itself, through the two helpers that take one, and by a segmented
+            // an id is asked for by getElementById itself, through the helpers that take one, and by a segmented
             // control naming the select it sets
             let mut asked = 0;
-            for call in ["getElementById(", "show(", "togglePasswordReveal("] {
+            for call in ["getElementById(", "show(", "togglePasswordReveal(", "nameNoLimit("] {
                 let mut rest = page;
                 while let Some(at) = rest.find(call) {
                     rest = &rest[at + call.len()..];
@@ -12077,27 +12136,189 @@ mod tests {
                     assert!(page.contains(&format!(" id=\"{id}\"")), "the script asks for #{id}, which the page lacks");
                 }
             }
-            for id in attribute_values(page, "data-for") {
-                asked += 1;
-                assert!(page.contains(&format!("<select id=\"{id}\"")), "a control sets #{id}, which is no select of the page");
-            }
             assert!(asked > 50, "{asked}");
 
-            let mut called = 0;
-            for event in ["onclick", "onchange", "oninput", "onblur"] {
-                for handler in attribute_values(page, event) {
-                    let name: String = handler.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                    if ["document", "event", "this"].contains(&name.as_str()) {
-                        continue;
+            // a class the script looks elements up by is a class some element of the page has
+            let classes: Vec<&str> = attribute_values(page, "class");
+            let has_class = |class: &str| {
+                classes
+                    .iter()
+                    .any(|value| value.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_')).any(|word| word == class))
+            };
+            let mut looked_up = 0;
+            for call in ["querySelectorAll(", "querySelector(", "closest("] {
+                let mut rest = script;
+                while let Some(at) = rest.find(call) {
+                    rest = &rest[at + call.len()..];
+                    let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else { continue };
+                    let Some(end) = rest[1..].find(quote) else { continue };
+                    for piece in rest[1..1 + end].split('.').skip(1) {
+                        let class: String = piece.chars().take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+                        looked_up += 1;
+                        assert!(has_class(&class), "the script looks for .{class}, which no element of the page has");
                     }
-                    called += 1;
-                    assert!(
-                        script.contains(&format!("function {name}(")),
-                        "{event}=\"{handler}\" calls {name}(), which the script lacks"
-                    );
                 }
             }
-            assert!(called > 15, "{called}");
+            assert!(looked_up >= 3, "{looked_up}");
+
+            for name in handler_names(page) {
+                assert!(script.contains(&format!("function {name}(")), "the markup calls {name}(), which the script lacks");
+            }
+        }
+
+        // a segmented control offers the values of the select it sets, no other and no fewer
+        let controls = attribute_values(PANEL_HTML, "data-for");
+        assert_eq!(controls, ["ruleMode", "ruleDomainsMode", "ruleIpMode"]);
+        for id in controls {
+            let control = &PANEL_HTML[PANEL_HTML.find(&format!(" data-for=\"{id}\"")).unwrap()..];
+            let control = &control[..control.find("</div>").unwrap()];
+            let select = &PANEL_HTML[PANEL_HTML.find(&format!("<select id=\"{id}\"")).unwrap()..];
+            let select = &select[..select.find("</select>").unwrap()];
+            assert_eq!(attribute_values(control, "data-value"), attribute_values(select, "value"), "{id}");
+        }
+    }
+
+    #[test]
+    fn every_action_of_the_pages_is_still_on_them() {
+        // What the owner and a group's admin can do, by the function each button, field and switch calls. A button
+        // dropped in a redrawing leaves its function in the script and every other test green: this list does not.
+        assert_eq!(
+            handler_names(PANEL_HTML),
+            set(&[
+                "activateProxy",
+                "applyHubVkHashesDirect",
+                "applyHubVkTokenDirect",
+                "applyHubWorkersDirect",
+                "autoSaveHubVkHashes",
+                "changeUpdateInterval",
+                "clearGroupSearch",
+                "clearHubSearch",
+                "clearLogs",
+                "clearMainSearch",
+                "copyClientSubLink",
+                "copyGroupAdminLink",
+                "copyGroupSubLink",
+                "copyHubClientLink",
+                "copyPasswordText",
+                "copyQrDlgLink",
+                "copyText",
+                "createClient",
+                "createClientInCurrentGroup",
+                "createGroup",
+                "createOrCopyGroupAdminLink",
+                "deactivateProxy",
+                "deleteCurrentGroup",
+                "deleteCurrentRoutingRule",
+                "deleteGroupAdminLink",
+                "deleteProxy",
+                "executeDelete",
+                "executeExportCopy",
+                "executeExportDownload",
+                "executeImportFromClipboard",
+                "executeReboot",
+                "executeToggle",
+                "filterTemplateDomains",
+                "handleGroupSearch",
+                "handleHubClientCbChange",
+                "handleHubSearch",
+                "handleImportFile",
+                "handleMainSearch",
+                "logout",
+                "nameNoLimit",
+                "onRuleDomainsModeChange",
+                "onRuleModeChange",
+                "openApiDocsDlg",
+                "openEditClientDlgByPassword",
+                "openEditRoutingRuleDlg",
+                "openGroupDlg",
+                "openImportExportDlg",
+                "openLinksAndTokensDlg",
+                "openNewClientDlg",
+                "openNewGroupDlg",
+                "openProfileDlg",
+                "openQrModalForActiveClient",
+                "openQrModalForClient",
+                "openRoutingRulesDlg",
+                "openTemplateDomainsDlg",
+                "promptBatchAction",
+                "saveAutoRestartInterval",
+                "saveClientChanges",
+                "saveDnsSettings",
+                "saveGroupSettings",
+                "saveMainPassword",
+                "saveProfileDlg",
+                "saveRoutingRule",
+                "selectAllRuleTargets",
+                "switchApiDocsTab",
+                "switchImportExportTab",
+                "switchTab",
+                "toggleGroupInlineEdit",
+                "toggleLoggingActive",
+                "togglePasswordReveal",
+                "toggleRuleTargetItem",
+                "toggleSelectAllHubClients",
+                "toggleTheme",
+            ])
+        );
+        assert_eq!(
+            handler_names(GROUP_ADMIN_HTML),
+            set(&[
+                "applyHubVkHashesDirect",
+                "applyHubVkTokenDirect",
+                "applyHubWorkersDirect",
+                "autoSaveHubVkHashes",
+                "clearHubSearch",
+                "copyClientSubLink",
+                "copyHubClientLink",
+                "copyPasswordText",
+                "copyQrLink",
+                "executeDeleteClient",
+                "executeExtend30",
+                "executeResetTraffic",
+                "executeToggleClient",
+                "handleHubClientCbChange",
+                "handleHubSearch",
+                "handleSearch",
+                "openEditModal",
+                "openLinksAndTokensDlg",
+                "openNewClientModal",
+                "openQrModalForActiveClient",
+                "openQrModalForClient",
+                "promptBatchAction",
+                "saveClientChanges",
+                "submitNewClient",
+                "toggleSelectAllHubClients",
+                "toggleTheme",
+            ])
+        );
+        // a key's own subscription link is copied from its dialog, in a group or not (a group's keys are rows)
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML] {
+            assert!(page.contains("onclick=\"copyClientSubLink(activeClient && activeClient.sub_uuid, this)\""));
+        }
+    }
+
+    #[test]
+    fn the_sheet_draws_every_state_the_scripts_set() {
+        // The scripts say a state by a class; the sheet is what shows it. A rule lost from the sheet leaves a banner
+        // that never appears or a sheet that stays a window on a phone, with nothing else to notice it.
+        let sheet = include_str!("web_panel.css");
+        for rule in [
+            ".restart-required-banner.visible {",
+            ".dns-selection.is-custom .dns-manual-input {",
+            ".proxy-profile-card.is-active {",
+            ".btn.save-success {",
+            ".toast.hide {",
+            ".tab-btn.active {",
+            ".seg > button.on,",
+            ".switch input:checked + .slider {",
+            "dialog[open] {",
+            "    dialog.sheet {",
+        ] {
+            assert!(sheet.contains(rule), "the sheet lost `{rule}`");
+        }
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML, LOGIN_HTML] {
+            assert_eq!(page.matches("<style>").count(), 1);
+            assert!(page.contains(sheet), "the three pages share the one sheet");
         }
     }
 
@@ -12116,16 +12337,33 @@ mod tests {
         assert_eq!(json["is_owner"], true);
         assert_eq!(json["password"], "owner-main-password");
 
+        // and no other entry is: every key of the list and of a group's list comes from this one builder
+        let entry = crate::model::PasswordEntry {
+            name: "Маша".into(),
+            workers: Some(5),
+            device_limit: Some(2),
+            dtls_port: 0,
+            ..Default::default()
+        };
+        let key = super::entry_client_info(&db, "203.0.113.5", 46000, 1, "key-password", &entry);
+        assert!(!key.is_owner);
+        assert_eq!(serde_json::to_value(&key).unwrap()["is_owner"], false);
+        assert_eq!((key.device_limit, key.workers, key.peer_port, key.active_sessions), (Some(2), Some(5), 46000, 1));
+        let literal = ["ClientInfo {", "\n        password:"].concat();
+        assert_eq!(include_str!("web_panel.rs").matches(&literal).count(), 2, "the two builders, no third way to an entry");
+
         // the panel goes by the flag, never by the name: «Владелец» in the list and «Главный пароль» alone were two
         // names for it, and the page looked for the one the list did not send
         assert!(PANEL_HTML.contains("const owner = Boolean(c.is_owner);"));
         assert!(!PANEL_HTML.contains("=== \"Главный пароль\""));
-        // the owner's sheet: no name, no group, no term, no device limit; neither «Удалить» nor «Выключить»
+        // the owner's sheet: no name, no group, no term, no device limit; neither «Удалить» nor «Выключить», which
+        // the server answers with 404; «Закрыть» in their place, for the owner alone
         for hidden in ["edit_name_group", "edit_group_group", "edit_days_group", "edit_device_limit_group"] {
             assert!(PANEL_HTML.contains(&format!("show('{hidden}', !owner);")), "{hidden}");
         }
         assert!(PANEL_HTML.contains("show('edit_statusBtn', !owner);"));
         assert!(PANEL_HTML.contains("show('edit_deleteBtn', !owner);"));
+        assert!(PANEL_HTML.contains("show('edit_closeBtn', owner);"));
     }
 
     #[test]
@@ -12139,21 +12377,44 @@ mod tests {
         for refused in [1, 2, 101] {
             assert!(validate_workers(Some(refused)).is_err(), "{refused}");
         }
-        // every place that sets streams is that select, in both pages, filled the same way
+        // every place that sets streams is that select, in both pages, filled the same way by the same line
+        let is_workers_select = |page: &str, id: &str| {
+            page.find(&format!("<select id=\"{id}\""))
+                .is_some_and(|at| page[at..page[at..].find('>').unwrap() + at].contains("class=\"workers-select\""))
+        };
         for id in ["new_workers", "edit_workers", "group_workers", "hubWorkersInput"] {
-            assert!(PANEL_HTML.contains(&format!("<select id=\"{id}\" class=\"workers-select\">")), "{id}");
+            assert!(is_workers_select(PANEL_HTML, id), "{id}");
         }
-        assert!(GROUP_ADMIN_HTML.contains("<select id=\"hubWorkersInput\" class=\"workers-select\">"));
+        assert!(is_workers_select(GROUP_ADMIN_HTML, "hubWorkersInput"));
         for page in [PANEL_HTML, GROUP_ADMIN_HTML] {
+            assert!(page.contains("document.querySelectorAll('select.workers-select').forEach(select => {"));
             assert!(page.contains("'<option value=\"0\">Без ограничения</option>'"));
             assert!(page.contains("Array.from({ length: 98 }, (_, i) => `<option value=\"${i + 3}\">${i + 3}</option>`)"));
             assert!(!page.contains("3-99") && !page.contains("w > 99"), "the group admin's page said 3–99");
         }
-        // the owner sets a group's limit through the group's own request
-        let update = |body: &str| serde_json::from_str::<super::UpdateGroupRequest>(body).unwrap().workers;
-        assert_eq!(update(r#"{"workers":0}"#), Some(0));
-        assert_eq!(update(r#"{"workers":20}"#), Some(20));
-        assert_eq!(update(r#"{"name":"Друзья"}"#), None, "a rename leaves the limit alone");
+    }
+
+    #[test]
+    fn a_groups_stream_limit_is_set_by_its_owner() {
+        // Only the group's admin could set it; the owner's group dialog sends it with the group's own request.
+        let update = |body: &str| serde_json::from_str::<super::UpdateGroupRequest>(body).unwrap();
+        let mut group = crate::model::ClientGroup { id: "grp_1".into(), name: "Друзья".into(), ..Default::default() };
+        super::apply_group_update(&mut group, update(r#"{"workers":20}"#)).unwrap();
+        assert_eq!(group.workers, Some(20));
+        assert_eq!(super::group_info(&group, 3, (1, 2), 4).workers, Some(20), "and the list gives it back");
+        super::apply_group_update(&mut group, update(r#"{"name":" Семья "}"#)).unwrap();
+        assert_eq!((group.name.as_str(), group.workers), ("Семья", Some(20)), "a rename leaves the limit alone");
+        // refused whole: the name and the rule of a request whose limit is refused are not taken either
+        for refused in [1, 2, 101] {
+            let body = format!(r#"{{"name":"Другое","routing_rule_id":"rule","workers":{refused}}}"#);
+            assert!(super::apply_group_update(&mut group, update(&body)).is_err(), "{refused}");
+            assert_eq!((group.name.as_str(), group.routing_rule_id.as_str(), group.workers), ("Семья", "", Some(20)));
+        }
+        assert!(super::apply_group_update(&mut group, update(r#"{"name":"  ","workers":10}"#)).is_err());
+        assert_eq!(group.workers, Some(20));
+        super::apply_group_update(&mut group, update(r#"{"workers":0}"#)).unwrap();
+        assert_eq!(group.workers, None, "0 is no limit");
+        assert_eq!(super::group_info(&group, 0, (0, 0), 0).workers, None);
     }
 
     #[test]
@@ -12162,11 +12423,13 @@ mod tests {
         // shared by the group admin's page, the label is not, so the binary carries it once.
         assert_eq!(PANEL_HTML.matches("by amurcanov\"").count(), 1);
         assert!(!GROUP_ADMIN_HTML.contains("by amurcanov\"") && !LOGIN_HTML.contains("by amurcanov\""));
+        assert_eq!(GROUP_ADMIN_HTML.matches("id=\"versionLogoGradient\"").count(), 1);
+        // the icons' licence goes wherever the icons go, and so into the binary
+        let licence = include_str!("../app/src/main/assets/licenses/Lucide-LICENSE.txt");
         for page in [PANEL_HTML, GROUP_ADMIN_HTML, LOGIN_HTML] {
             assert!(page.contains("сборка SanityProtocol"));
-            assert_eq!(page.matches("<style>").count(), 1);
-            assert!(page.contains("--accent: #1A73E8;"), "the pages share the one stylesheet");
+            assert_eq!(page.contains("<symbol id=\"i-"), page.contains(licence));
         }
-        assert_eq!(GROUP_ADMIN_HTML.matches("id=\"versionLogoGradient\"").count(), 1);
+        assert!(PANEL_HTML.contains(licence) && GROUP_ADMIN_HTML.contains(licence));
     }
 }
