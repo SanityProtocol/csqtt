@@ -864,7 +864,7 @@ fn start_control_input(
                 }
                 // §1.9: the screen came on. Streams that did not survive the phone's sleep are made again now, not at
                 // the first packet the user's tap sends
-                "WAKE" => demand.want("экран"),
+                "WAKE" => demand.screen_on(),
                 "FINISH_VK_CALLS" => finish_js_calls.store(true, Ordering::Release),
                 "STOP" => {
                     crate::log_error!("[КЛИЕНТ] Получена команда STOP");
@@ -1160,6 +1160,40 @@ mod worker_count_tests {
         let bootstrap = read_vk_js_bootstrap(&mut receiver).await.unwrap();
         assert_eq!(bootstrap.token, "t");
         assert_eq!(receiver.recv().await.unwrap().unwrap(), "PAUSE");
+    }
+
+    /// §1.9: the app's WAKE (the screen came on) and RESUME (a network came back) end the tunnel's rest.
+    #[tokio::test]
+    async fn wake_and_resume_make_the_tunnel_wanted() {
+        let cancel = CancellationToken::new();
+        let dispatcher = Arc::new(Dispatcher::for_test(PacketPool::new(4), 4));
+        let demand = dispatcher.demand.clone();
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let task = start_control_input(
+            cancel.clone(),
+            Arc::new(PauseGate::new()),
+            demand.clone(),
+            CaptchaSolver::new("auto", cancel.clone()),
+            Events::new(false),
+            Arc::new(AtomicBool::new(false)),
+            dispatcher,
+            receiver,
+        );
+        // RESUME first: a sleep said within 10 s after a WAKE leaves the tunnel wanted by itself
+        for command in ["RESUME", "WAKE"] {
+            demand.slept(Duration::from_secs(60));
+            assert!(!demand.is_wanted());
+            sender.send(Ok(command.to_owned())).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !demand.is_wanted() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{command} left the tunnel at rest"));
+        }
+        cancel.cancel();
+        task.await.unwrap();
     }
 
     #[test]

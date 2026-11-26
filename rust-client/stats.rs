@@ -86,6 +86,42 @@ impl Stats {
 mod tests {
     use super::*;
 
+    /// §1.9: the app hears that the tunnel went to rest, and that it is wanted again, when it happens: a zero stream
+    /// count that reached it first would start its recovery.
+    #[tokio::test(start_paused = true)]
+    async fn rest_and_its_end_are_said_without_waiting_for_a_tick() {
+        let events = Events::new(true);
+        let demand = Arc::new(crate::worker::DemandGate::new());
+        let cancel = CancellationToken::new();
+        let stats = Arc::new(Stats::default());
+        let task = tokio::spawn(stats.run(events.clone(), demand.clone(), cancel.clone()));
+        // past the first tick's STATS, in the middle of the wait for the next one
+        tokio::time::sleep(TICK + TICK / 2).await;
+        let dormant_said = |events: &Events| {
+            let said = events.captured();
+            let (kind, json) = said.last().unwrap();
+            assert_eq!(kind, "STATS");
+            (said.len(), json.contains("\"dormant\":true"))
+        };
+        let (before, resting) = dormant_said(&events);
+        assert!(!resting);
+
+        let now = tokio::time::Instant::now();
+        demand.slept(std::time::Duration::from_secs(60));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(dormant_said(&events), (before + 1, true));
+        demand.want("трафик");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(dormant_said(&events), (before + 2, false));
+        assert_eq!(tokio::time::Instant::now(), now, "a tick's time passed: nothing was said at once");
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
     #[test]
     fn stats_sent_on_change_and_every_3s_otherwise() {
         // The first tick always goes out.

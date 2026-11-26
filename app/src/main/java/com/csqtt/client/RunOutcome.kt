@@ -46,18 +46,21 @@ internal object StopCause {
     fun masked(cause: String, ownerHashes: List<String>): String =
         LogRedaction.redact(maskOwnerHashes(withoutLogStickers(cause), ownerHashes))
 
-    /** B5f (rule 10): Android ended the run and never restarted it — an aggressive battery saver, as a rule. */
-    const val SYSTEM_KILLED = "Туннель остановлен системой: разрешите CSQTT работать в фоне без ограничений"
+    /**
+     * B5f (rule 10): Android ended the run and never restarted it — a phone maker's battery cleaner, as a rule. The cause
+     * and no advice (P3 §1.9: the app asks for no battery exemption); the screen puts «Настройки приложения» under it.
+     */
+    const val SYSTEM_KILLED = "Туннель остановлен системой"
     /** B5f: the phone restarted with the tunnel on; nothing brings it back by itself. */
     const val REBOOTED = "Телефон перезагрузился: туннель выключен"
     /** B5f (review F1): installing an update stops the app, and Android restarts none of its services. */
     const val UPDATED = "CSQTT обновился: туннель выключен"
     /**
      * B5f (review F2, verify N2): a force-stop — Android's «Остановить», a swipe from the recent apps, or a phone maker's
-     * battery cleaner, which Android records the same way — so the advice stays, for the case it was not the user.
+     * battery cleaner, which Android records the same way — so the way to the app's settings stays under it, for the
+     * case it was not the user.
      */
-    const val STOPPED_OUTSIDE =
-        "Туннель остановлен вне приложения: если не вами\u00A0— разрешите CSQTT работать в фоне без ограничений"
+    const val STOPPED_OUTSIDE = "Туннель остановлен вне приложения"
 
     /**
      * B5f: the cause of a run that ended with no stop, decided a few seconds after the app's screen starts — long enough

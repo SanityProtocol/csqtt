@@ -1809,6 +1809,40 @@ mod tests {
         assert!(next_refresh > Duration::from_secs(299) && next_refresh <= Duration::from_secs(300));
     }
 
+    /// §1.9: any answer of the relay to this allocation ends the doubt, not only the Refresh's: the answer to the
+    /// Refresh may be the one that is lost, and the allocation must not end for that.
+    #[test]
+    fn any_answer_of_the_relay_ends_the_doubt_after_a_sleep() {
+        for answered in [METHOD_CREATE_PERMISSION, METHOD_CHANNEL_BIND] {
+            let (core, key) = ready_core();
+            bind_ready_channel(&core, &key);
+            core.poll().unwrap();
+            crate::clock::tests::sleep(Duration::from_secs(180));
+            core.poll().unwrap();
+            let requests = pull_requests(&core);
+            assert!(core.lock().unverified);
+            let (method, transaction) = requests.iter().find(|request| u32::from(request.0) == answered).unwrap();
+            let answer = MessageBuilder::with_transaction(0x0100 | method, *transaction)
+                .finish_authenticated(&key)
+                .unwrap();
+            assert_eq!(core.input_stun(&answer), 0);
+            assert!(!core.lock().unverified, "the relay answered request {answered} and is still doubted");
+            // the Refresh, unanswered, is now a request to a relay known to be there: retried, the allocation kept
+            let mut inner = core.lock();
+            while let Some(deadline) = inner
+                .pending
+                .iter()
+                .find(|pending| pending.operation == Operation::Refresh)
+                .map(|pending| pending.next_attempt)
+            {
+                inner.expire_transactions(deadline);
+                inner.controls.clear();
+            }
+            assert_eq!(inner.state, STATE_READY);
+            assert!(inner.allocation_refresh.is_some(), "no retry of the Refresh is scheduled");
+        }
+    }
+
     /// §1.9: awake, a maintenance request the relay does not answer is retried while the allocation lives (the test
     /// above this one in the file). After a sleep the same silence means the relay, or the NAT before it, forgot the
     /// phone: the allocation ends at once, so its stream is made again when the tunnel is wanted, not after ten minutes.

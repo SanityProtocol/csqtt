@@ -44,8 +44,10 @@ internal class TunnelLockPolicy(
         deploying: Boolean,
         totalBytes: Long,
     ): Locks {
-        val transfer = run && carries(nowMs, totalBytes)
-        val working = run && worksOn(nowMs, work)
+        // both are followed whatever [run] says: a start right after a Wi-Fi pause has its own ten minutes, and the
+        // bytes a pause sat on are no transfer
+        val transfer = carries(nowMs, totalBytes) && run
+        val working = worksOn(nowMs, work && run)
         return Locks(
             cpu = deploying || transfer || working,
             wifi = run && (screenOn || transfer || working),

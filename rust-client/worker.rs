@@ -193,6 +193,22 @@ pub struct DemandGate {
     /// workers waiting for the wish
     parked: AtomicUsize,
     changed: Notify,
+    count: SleepCount,
+    /// when the app last said the screen came on
+    screen_on_at: std::sync::Mutex<Option<crate::clock::Instant>>,
+}
+
+/// What the phone's sleeps cost since the screen last came on, said in one line when it comes on again: «Логи» keeps
+/// 500 records and a night has more, and these are the figures the night on a phone is read for (§1.9).
+#[derive(Default)]
+struct SleepCount {
+    sleeps: AtomicU64,
+    long_sleeps: AtomicU64,
+    longest_secs: AtomicU64,
+    streams_lost: AtomicU64,
+    wanted: AtomicU64,
+    credentials: AtomicU64,
+    quota_refusals: AtomicU64,
 }
 
 impl DemandGate {
@@ -201,6 +217,8 @@ impl DemandGate {
             wanted: AtomicBool::new(true),
             parked: AtomicUsize::new(0),
             changed: Notify::new(),
+            count: SleepCount::default(),
+            screen_on_at: std::sync::Mutex::new(None),
         }
     }
 
@@ -208,16 +226,67 @@ impl DemandGate {
         self.wanted.load(Ordering::Acquire)
     }
 
-    /// The phone slept for `gap`. The long sleeps are logged to the second: they are the ones a relay does not survive.
+    /// The phone slept for `gap`. Every sleep is counted; one of 5 minutes or more, which a relay's permission does not
+    /// survive, is also logged to the second.
     pub fn slept(&self, gap: Duration) {
+        self.count.sleeps.fetch_add(1, Ordering::Relaxed);
+        self.count.longest_secs.fetch_max(gap.as_secs(), Ordering::Relaxed);
         if gap >= Duration::from_secs(300) {
+            self.count.long_sleeps.fetch_add(1, Ordering::Relaxed);
             crate::log_error!("[СОН] Телефон спал {} мин {} с", gap.as_secs() / 60, gap.as_secs() % 60);
-        } else {
-            crate::log_error!("[СОН] Телефон спал меньше 5 минут");
         }
+        // the watcher says a sleep up to one tick of its timer after it ended, and the app's WAKE may come first: a
+        // sleep that ended with the screen coming on leaves the tunnel wanted
+        let screen_on = self.screen_on_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if screen_on.is_some_and(|at| crate::clock::Instant::now() - at < crate::clock::SLEEP_SEEN) {
+            return;
+        }
+        drop(screen_on);
         if self.wanted.swap(false, Ordering::AcqRel) {
             self.changed.notify_waiters();
         }
+    }
+
+    /// A stream that worked before a sleep is gone after it.
+    fn stream_lost(&self) {
+        self.count.streams_lost.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// VK was asked for a TURN credential.
+    fn credential_asked(&self) {
+        self.count.credentials.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// VK refused an allocation for its quota: allocations a sleep cut off still count against the credential.
+    fn quota_refused(&self) {
+        self.count.quota_refusals.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The count since the last one, in a line, and a new count from here; nothing when the phone never slept.
+    fn count_line(&self) -> Option<String> {
+        let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
+        let count = &self.count;
+        let (sleeps, long, longest) = (take(&count.sleeps), take(&count.long_sleeps), take(&count.longest_secs));
+        let (lost, wanted) = (take(&count.streams_lost), take(&count.wanted));
+        let (credentials, quota) = (take(&count.credentials), take(&count.quota_refusals));
+        (sleeps != 0).then(|| {
+            format!(
+                "[СОН] С прошлого включения экрана — снов: {sleeps}, из них дольше 5 минут: {long} (самый долгий \
+                 {} мин {} с); потоков потеряно: {lost}; туннель понадобился: {wanted}; запросов кредов VK: \
+                 {credentials}; отказов VK по квоте: {quota}",
+                longest / 60,
+                longest % 60,
+            )
+        })
+    }
+
+    /// The app's WAKE: the screen came on. The count of the time it was off is said, and the tunnel is wanted.
+    pub fn screen_on(&self) {
+        *self.screen_on_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(crate::clock::Instant::now());
+        if let Some(line) = self.count_line() {
+            crate::log_error!("{line}");
+        }
+        self.want("экран");
     }
 
     /// Somebody wants the tunnel; `cause` goes to the log when that is news. Called for every packet the phone sends.
@@ -228,6 +297,7 @@ impl DemandGate {
         }
         if !self.wanted.swap(true, Ordering::AcqRel) {
             if self.parked.load(Ordering::Acquire) != 0 {
+                self.count.wanted.fetch_add(1, Ordering::Relaxed);
                 crate::log_error!("[СОН] Туннель нужен ({cause}): потоки восстанавливаются");
             }
             self.changed.notify_waiters();
@@ -701,6 +771,7 @@ impl GroupCredentials {
             "[КРЕД #{}] Запрос (хеш: {short_hash}...)",
             self.credential_id
         );
+        self.context.demand.credential_asked();
         let fetched = tokio::select! {
             _ = self.context.cancel.cancelled() => return None,
             _ = self.availability.cancel.cancelled() => return None,
@@ -1019,6 +1090,7 @@ async fn worker_loop(
             fatal_streak = 0;
             // the night's record (§1.9): why a stream that worked before the sleep is gone after it
             if let (Err(error), false) = (&result, context.demand.is_wanted()) {
+                context.demand.stream_lost();
                 crate::log_error!("[СОН] Поток не пережил сон: {error:#}");
             }
         }
@@ -1100,6 +1172,7 @@ async fn worker_loop(
             if is_turn_allocation_quota(error, &lower) {
                 match group_creds.rotate_after_quota(&credential_lease).await {
                     QuotaRotation::Rotated(quota_delay) => {
+                        context.demand.quota_refused();
                         attempt = 0;
                         delay = quota_delay;
                         crate::log_error!(
@@ -1572,6 +1645,51 @@ mod tests {
         assert_eq!(context.demand.parked.load(Ordering::Acquire), 0);
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), worker).await.unwrap().unwrap();
+    }
+
+    /// §1.9: the watcher may say a sleep after the app said the screen came on (its timer ticks every 10 s, and naps add
+    /// up to a sleep only at a tick). The screen is on: the tunnel stays wanted. Any later sleep ends the wish again.
+    #[test]
+    fn a_sleep_said_after_the_screen_came_on_leaves_the_tunnel_wanted() {
+        let gate = DemandGate::new();
+        gate.slept(Duration::from_secs(30));
+        gate.screen_on();
+        assert!(gate.is_wanted());
+        gate.slept(Duration::from_secs(16));
+        assert!(gate.is_wanted(), "the tunnel went to rest with the screen on");
+        // the screen went off, the phone slept again
+        crate::clock::tests::sleep(Duration::from_secs(40));
+        gate.slept(Duration::from_secs(40));
+        assert!(!gate.is_wanted());
+    }
+
+    /// §1.9: the night's figures are one line when the screen comes on, and a new count starts there.
+    #[test]
+    fn the_sleeps_count_is_said_once_when_the_screen_comes_on() {
+        let gate = DemandGate::new();
+        assert_eq!(gate.count_line(), None, "a phone that never slept has nothing to count");
+        gate.slept(Duration::from_secs(40));
+        gate.slept(Duration::from_secs(760));
+        gate.slept(Duration::from_secs(301));
+        for _ in 0..10 {
+            gate.stream_lost();
+        }
+        gate.credential_asked();
+        gate.quota_refused();
+        gate.quota_refused();
+        assert_eq!(
+            gate.count_line().as_deref(),
+            Some(
+                "[СОН] С прошлого включения экрана — снов: 3, из них дольше 5 минут: 2 (самый долгий 12 мин 40 с); \
+                 потоков потеряно: 10; туннель понадобился: 0; запросов кредов VK: 1; отказов VK по квоте: 2"
+            )
+        );
+        assert_eq!(gate.count_line(), None, "the count was said twice");
+        // the screen: the tunnel is wanted, whatever was counted
+        gate.slept(Duration::from_secs(15));
+        gate.screen_on();
+        assert!(gate.is_wanted());
+        assert_eq!(gate.count_line(), None);
     }
 
     /// §1.9: the app hears of the rest and of its end at once (STATS), not at the next tick.

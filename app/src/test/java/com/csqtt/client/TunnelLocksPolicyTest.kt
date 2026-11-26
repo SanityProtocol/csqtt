@@ -104,6 +104,18 @@ class TunnelLocksPolicyTest {
     }
 
     @Test
+    fun `a start that a Wi-Fi pause cut short has its own ten minutes when the run comes back`() {
+        val policy = TunnelLockPolicy()
+        assertEquals(both, policy.at(0, work = true))
+        // paused on Wi-Fi for an hour (no run), then the restore's start
+        assertEquals(none, policy.at(30, run = false))
+        assertEquals(none, policy.at(3_600, run = false))
+        assertEquals(both, policy.at(3_602, work = true))
+        assertEquals(both, policy.at(3_602 + 9 * 60, work = true))
+        assertEquals(none, policy.at(3_602 + 10 * 60, work = true))
+    }
+
+    @Test
     fun `a deploy holds the CPU alone, a paused or stopped run nothing`() {
         val policy = TunnelLockPolicy()
         assertEquals(Locks(cpu = true, wifi = false), policy.at(0, run = false, deploying = true))

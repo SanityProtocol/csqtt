@@ -59,9 +59,13 @@ fn clock(id: libc::clockid_t) -> Duration {
     Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
 }
 
+/// The clock the relay's deadlines are kept on: the one that counts the phone's sleep.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const RELAY_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn boot_time() -> Duration {
-    clock(libc::CLOCK_BOOTTIME)
+    clock(RELAY_CLOCK)
 }
 
 /// Elsewhere (a desktop build of the core) nothing sleeps under the tunnel: the monotonic clock.
@@ -76,10 +80,53 @@ fn sleeps_seen() -> &'static watch::Sender<u64> {
     SLEEPS.get_or_init(|| watch::channel(0).0)
 }
 
-/// The count of sleeps seen: a task that waits on a tokio timer also waits on `changed()` and looks at its deadlines
-/// again. A watch, not a notify: a sleep that ends while the task is busy is still seen at its next wait.
+/// The count of sleeps seen, for [`wait`]. A watch, not a notify: a sleep that ends while the task is busy is still
+/// seen at its next wait.
 pub(crate) fn sleeps() -> watch::Receiver<u64> {
     sleeps_seen().subscribe()
+}
+
+/// Waits `duration` on tokio's timer, or less when a sleep of the phone ended meanwhile: the timer stood still in the
+/// sleep, and what the caller waits for is due on the boot clock. Every wait for a relay deadline is this one.
+pub(crate) async fn wait(duration: Duration, sleeps: &mut watch::Receiver<u64>) {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => {}
+        _ = sleeps.changed() => {}
+    }
+}
+
+/// What the watcher makes of the time the phone has spent asleep, read at each tick of its timer. A sleep of
+/// [`SLEEP_SEEN`] is said at once. Shorter naps add up over the ticks they fall in and are said when they reach it: a
+/// phone that sleeps 8 s of every 10 lets tokio's timers count 2 s in 10, and a keepalive "every 10 s" would go out
+/// every 50. A tick with no sleep in it starts the count over: the timers ran on time.
+struct Naps {
+    said: Duration,
+    last: Duration,
+}
+
+impl Naps {
+    /// The two clocks are read one after the other: less than this between two ticks is no sleep.
+    const NONE: Duration = Duration::from_millis(100);
+
+    fn new(asleep: Duration) -> Self {
+        Self { said: asleep, last: asleep }
+    }
+
+    /// `asleep`: all the time the phone has slept so far. Returns the sleep to say, if there is one.
+    fn tick(&mut self, asleep: Duration) -> Option<Duration> {
+        let slept = asleep.saturating_sub(self.last) >= Self::NONE;
+        self.last = asleep;
+        if !slept {
+            self.said = asleep;
+            return None;
+        }
+        let unsaid = asleep.saturating_sub(self.said);
+        if unsaid < SLEEP_SEEN {
+            return None;
+        }
+        self.said = asleep;
+        Some(unsaid)
+    }
 }
 
 /// Sees the phone's sleeps for the process: [`sleeps`] moves and `slept` is called with each one's length.
@@ -96,7 +143,7 @@ pub(crate) async fn watch_sleep(slept: impl Fn(Duration)) {
         }
     };
     let asleep = || boot_time().saturating_sub(clock(libc::CLOCK_MONOTONIC));
-    let mut asleep_before = asleep();
+    let mut naps = Naps::new(asleep());
     loop {
         let Ok(mut ready) = timer.readable().await else {
             return;
@@ -123,10 +170,7 @@ pub(crate) async fn watch_sleep(slept: impl Fn(Duration)) {
             // not ready after all: the wait is armed again
             Err(_) => continue,
         }
-        let asleep_now = asleep();
-        let gap = asleep_now.saturating_sub(asleep_before);
-        asleep_before = asleep_now;
-        if gap >= SLEEP_SEEN {
+        if let Some(gap) = naps.tick(asleep()) {
             slept(gap);
             sleeps_seen().send_modify(|count| *count += 1);
         }
@@ -171,6 +215,59 @@ pub(crate) mod tests {
     /// The phone sleeps for `duration`: the boot clock of this thread moves on, tokio's and std's do not.
     pub(crate) fn sleep(duration: Duration) {
         AHEAD.with(|ahead| ahead.set(ahead.get() + duration));
+    }
+
+    /// The watcher saw a sleep end: every task that waits with [`wait`] looks at its deadlines.
+    pub(crate) fn announce_sleep() {
+        sleeps_seen().send_modify(|count| *count += 1);
+    }
+
+    /// Only a phone that sleeps can tell the two clocks apart, and no test machine sleeps: this pins which one the
+    /// relay's deadlines are read from.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn the_relays_clock_is_the_boot_clock() {
+        assert_eq!(RELAY_CLOCK, libc::CLOCK_BOOTTIME);
+        let read = clock(libc::CLOCK_BOOTTIME);
+        assert!(boot_time().saturating_sub(read) < Duration::from_secs(1));
+        assert!(read >= clock(libc::CLOCK_MONOTONIC).saturating_sub(Duration::from_secs(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_ends_with_its_time_or_with_a_sleep() {
+        let (seen, mut sleeps) = watch::channel(0u64);
+        let started = tokio::time::Instant::now();
+        wait(Duration::from_secs(10), &mut sleeps).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(10));
+
+        // the phone slept while the task waited: the wait ends with the sleep, not 10 s of awake time later
+        let started = tokio::time::Instant::now();
+        let waiting = tokio::spawn(async move { wait(Duration::from_secs(10), &mut sleeps).await });
+        tokio::task::yield_now().await;
+        seen.send_modify(|count| *count += 1);
+        waiting.await.unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_long_sleep_is_said_at_once_and_naps_add_up() {
+        let seconds = Duration::from_secs;
+        let mut naps = Naps::new(seconds(100));
+        // awake: nothing to say, tick after tick (the two clocks' reads differ by a hair)
+        assert_eq!(naps.tick(seconds(100)), None);
+        assert_eq!(naps.tick(seconds(100) + Duration::from_millis(3)), None);
+        // one sleep of five minutes
+        assert_eq!(naps.tick(seconds(400)), Some(seconds(300) - Duration::from_millis(3)));
+        assert_eq!(naps.tick(seconds(400)), None);
+        // 8 s asleep in every 10: said every second tick, with what added up
+        assert_eq!(naps.tick(seconds(408)), None);
+        assert_eq!(naps.tick(seconds(416)), Some(seconds(16)));
+        assert_eq!(naps.tick(seconds(424)), None);
+        assert_eq!(naps.tick(seconds(432)), Some(seconds(16)));
+        // a nap, then a tick awake: the timers ran on time, the nap is not carried into the next hour
+        assert_eq!(naps.tick(seconds(439)), None);
+        assert_eq!(naps.tick(seconds(439)), None);
+        assert_eq!(naps.tick(seconds(446)), None);
     }
 
     #[test]

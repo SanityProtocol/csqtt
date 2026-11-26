@@ -1529,12 +1529,8 @@ async fn writer_loop(
                 };
                 Some(command)
             }
-            _ = tokio::time::sleep(keepalive_interval) => {
-                None
-            }
-            // the phone slept (§1.9): the server hears from this stream as soon as it wakes, not after the rest of a
-            // timer that stood still meanwhile
-            _ = sleeps.changed() => {
+            // §1.9: or sooner, when the phone slept: the server hears from this stream as soon as it wakes
+            _ = crate::clock::wait(keepalive_interval, &mut sleeps) => {
                 None
             }
         };

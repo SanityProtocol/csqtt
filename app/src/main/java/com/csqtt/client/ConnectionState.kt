@@ -68,8 +68,9 @@ internal data class ConnectionInputs(
     /** A stream is ready but the server never answered GETCONF (M-2). */
     val serverSilent: Boolean = false,
     /**
-     * P3 §1.9: the core is at rest. The phone slept and nothing has wanted the tunnel since, so streams the relay
-     * dropped meanwhile are made again only when the phone sends a packet or the screen comes on.
+     * P3 §1.9: the core is at rest, and the tunnel had streams when it went to rest ([TunnelRest.connected]). The phone
+     * slept and nothing has wanted the tunnel since, so streams the relay dropped meanwhile are made again only when
+     * the phone sends a packet or the screen comes on.
      */
     val dormant: Boolean = false,
     /** The first fatal cause of the last run, until the next start. */

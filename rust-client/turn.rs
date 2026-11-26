@@ -1135,9 +1135,8 @@ async fn driver_loop_udp(common: DriverCommon, socket: Arc<UdpSocket>) {
             let event = tokio::select! {
                 biased;
                 _ = shared.wake.notified() => DriverEvent::Wake,
-                _ = tokio::time::sleep(wait) => DriverEvent::Timer,
-                // the phone slept: tokio's timer has the rest of its wait to count, the deadlines are due now
-                _ = sleeps.changed() => DriverEvent::Timer,
+                // the wait ends early when the phone slept: the deadlines are due on the boot clock (§1.9)
+                _ = crate::clock::wait(wait, &mut sleeps) => DriverEvent::Timer,
                 result = socket.readable() => DriverEvent::Readable(result),
             };
             match event {
@@ -1233,8 +1232,7 @@ async fn driver_loop_stream(
         let event = tokio::select! {
             biased;
             _ = shared.wake.notified() => StreamDriverEvent::Wake,
-            _ = tokio::time::sleep(wait) => StreamDriverEvent::Timer,
-            _ = sleeps.changed() => StreamDriverEvent::Timer,
+            _ = crate::clock::wait(wait, &mut sleeps) => StreamDriverEvent::Timer,
             changed = write_failure.changed() => StreamDriverEvent::WriteFailure(changed),
             result = reader.read_frame(&pool) => StreamDriverEvent::Frame(result),
         };

@@ -38,7 +38,6 @@ class MtuSettingTest {
             val pkg = instrumentation.targetContext.packageName
             instrumentation.uiAutomation.apply {
                 executeShellCommand("pm grant $pkg android.permission.POST_NOTIFICATIONS").close()
-                executeShellCommand("dumpsys deviceidle whitelist +$pkg").close()
             }
         }
 

@@ -304,7 +304,8 @@ object TunnelManager {
     /** The service waits for a network VK answers on, before the process starts. */
     internal val awaitingNetwork = MutableStateFlow(false)
     private val serverSilent = MutableStateFlow(false)
-    /** P3 §1.9: the core is at rest (STATS): its stream count may be zero with nothing wrong, and nothing is restarted. */
+    /** P3 §1.9: what the core's STATS say of its rest; [dormant] is the part of it the connection state reads. */
+    private val rest = TunnelRest()
     private val dormant = MutableStateFlow(false)
     private val runFatal = AtomicReference(FirstFatal())
     val failure = MutableStateFlow<String?>(null)
@@ -511,6 +512,12 @@ object TunnelManager {
         }
     }
 
+    /** P3 §1.9: the core's process is gone, or a new one starts: nothing of it is at rest. */
+    private fun endRest() {
+        rest.reset()
+        dormant.value = false
+    }
+
     /**
      * P3 §1.9: the screen came on. The core makes the streams its relay dropped in the phone's sleep again now, before
      * the user's first tap needs them.
@@ -715,11 +722,11 @@ object TunnelManager {
                     val msg = "Активных: ${event.active} · трафик %.2f МБ".format(totalMB)
                     updateProcessLog(identity, "stats", "[СЕТЬ] $msg", 25, false, LogLevel.NET)
                 }
-                activeWorkers.value = event.active
                 // §1.9: wanted again with no stream left (the relay dropped them in the phone's sleep). The core makes
                 // them again now; if it cannot, the recovery a zero count starts takes over, as when the count fell
-                val wokeEmpty = dormant.value && !event.dormant && event.active == 0
-                dormant.value = event.dormant
+                val wokeEmpty = rest.onStats(activeWorkers.value, event.active, event.dormant)
+                activeWorkers.value = event.active
+                dormant.value = rest.connected
                 if (wokeEmpty) scheduleWorkerZeroRecovery(identity)
                 if (workerRecoveryPolicy.observe(event.active)) {
                     workerRecoveryJob?.cancel()
@@ -746,7 +753,7 @@ object TunnelManager {
                 if (activeWorkers.value != 0) updateProcessLog(identity, "stats", "[СЕТЬ] Активных: 0", 25, false, LogLevel.NET)
                 activeWorkers.value = 0
                 // a tunnel at rest has lost its streams to the phone's sleep, not to a fault: nothing is restarted (§1.9)
-                if (!dormant.value) scheduleWorkerZeroRecovery(identity)
+                if (rest.recovers) scheduleWorkerZeroRecovery(identity)
             }
             is TunnelEventParser.Event.CallUnavailable -> handleUnavailableVkCall(event, identity)
             is TunnelEventParser.Event.NetworkSuspect -> verifyVkReachability(identity)
@@ -1101,7 +1108,7 @@ object TunnelManager {
         workerRecoveryJob = activeScope.launch {
             try {
                 delay(WORKER_ZERO_CONFIRMATION_MS)
-                if (!isCurrent(identity) || !running.value || dormant.value) return@launch
+                if (!isCurrent(identity) || !running.value || !rest.recovers) return@launch
                 if (!workerRecoveryPolicy.shouldRecover(activeWorkers.value, target)) return@launch
                 val context = activeContext() ?: return@launch
                 requestTransportRestart(
@@ -1597,7 +1604,7 @@ object TunnelManager {
         process = startedProcess
         tunconfThisProcess.value = false
         serverSilent.value = false
-        dormant.value = false
+        endRest()
         targetWorkers.value = totalWorkers
         callRecoveryPending.set(false)
         nativeProcessPid = processIdOf(startedProcess)
@@ -1942,7 +1949,7 @@ object TunnelManager {
                         processIdentity = null
                         nativeProcessPid = null
                         activeWorkers.value = 0
-                        dormant.value = false
+                        endRest()
                         clearTrafficSpeed()
                         resetWorkerRecoveryState()
                         if (readerJob === coroutineContext[Job]) readerJob = null
@@ -2116,7 +2123,7 @@ object TunnelManager {
             processIdentity = null
             nativeProcessPid = null
             activeWorkers.value = 0
-            dormant.value = false
+            endRest()
             return
         }
         val attached = (identity == null || processIdentity === identity) && process === targetProcess
@@ -2144,7 +2151,7 @@ object TunnelManager {
             }
         }
         activeWorkers.value = 0
-        dormant.value = false
+        endRest()
     }
 
     private fun terminateExactProcess(

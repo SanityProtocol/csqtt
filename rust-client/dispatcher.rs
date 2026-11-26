@@ -2056,6 +2056,38 @@ mod tests {
         dispatcher.shutdown().await;
     }
 
+    /// §1.9: the same for a core that takes its packets from the UDP listener (no TUN).
+    #[tokio::test]
+    async fn a_packet_on_the_udp_listener_ends_the_tunnels_rest() {
+        let cancel = CancellationToken::new();
+        let (dispatcher, port) = Dispatcher::start(
+            "127.0.0.1:0",
+            None,
+            PacketPool::new(8),
+            Arc::new(Stats::default()),
+            [0; 32],
+            crate::obfs::ObfsMode::Unified,
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        dispatcher.demand.slept(Duration::from_secs(120));
+        let phone = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        phone
+            .send_to(&ipv4_packet(6, 49152, 443, 60), format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dispatcher.demand.is_wanted() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a packet on the UDP listener left the tunnel at rest");
+        cancel.cancel();
+        dispatcher.shutdown().await;
+    }
+
     #[test]
     fn flow_key_parses_ipv4_and_separates_flows() {
         let a = ipv4_packet(6, 49152, 80, 60);

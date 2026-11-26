@@ -494,6 +494,103 @@ async fn tcp_turn_flow(dpi_split: crate::dpi_split::DpiSplit) {
         .unwrap();
 }
 
+/// P3 §1.9: the phone slept three minutes, and tokio's timer of the driver stood still for them. The moment the watcher
+/// says the sleep ended, the driver looks at its deadlines on the boot clock and sends what fell due: the question whether
+/// the allocation is still there (a Refresh), the permission and the channel. Without the watcher's word it would first
+/// count the rest of its own wait, 10 s of awake time, which a short wake of a phone does not have.
+/// (One thread: the test's sleep moves the boot clock of the thread the driver runs on.)
+#[tokio::test]
+async fn a_sleeps_end_sends_what_fell_due_at_once() {
+    let server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_address = server.local_addr().unwrap();
+    let peer: SocketAddr = "127.0.0.1:39011".parse().unwrap();
+    let relay: SocketAddr = "127.0.0.1:49011".parse().unwrap();
+    let (asked_tx, asked_rx) = oneshot::channel();
+    let server_task = tokio::spawn({
+        let server = server.clone();
+        async move {
+            let client = receive_challenged_allocate(&server, relay).await;
+            receive_create_permission(&server, client, peer).await;
+            let (channel_wire, _) = recv_datagram(&server).await;
+            let channel_request = assert_authenticated_request(&channel_wire, CHANNEL_BIND_REQUEST);
+            server
+                .send_to(
+                    &empty_authenticated_success(CHANNEL_BIND_SUCCESS, channel_request.transaction()),
+                    client,
+                )
+                .await
+                .unwrap();
+
+            // after the sleep: three requests, each answered (recv_datagram gives up after 3 s)
+            let mut asked = Vec::new();
+            while asked.len() < 3 {
+                let (wire, _) = recv_datagram(&server).await;
+                if wire[0] & 0xc0 == 0x40 {
+                    continue; // a keepalive: channel data
+                }
+                let request = StunMessage::decode(&wire).unwrap();
+                assert_eq!(request.class(), StunClass::Request);
+                asked.push(request.method());
+                server
+                    .send_to(
+                        &empty_authenticated_success(0x0100 | request.method(), request.transaction()),
+                        client,
+                    )
+                    .await
+                    .unwrap();
+            }
+            asked_tx.send(asked).unwrap();
+
+            // the end: Refresh with a lifetime of zero
+            loop {
+                let (wire, _) = recv_datagram(&server).await;
+                if wire[0] & 0xc0 == 0x40 {
+                    continue;
+                }
+                let request = StunMessage::decode(&wire).unwrap();
+                if request.method() == 4 && attribute_u32(&request, ATTR_LIFETIME) == 0 {
+                    server
+                        .send_to(&refresh_zero_success(request.transaction()), client)
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
+        }
+    });
+
+    let pool = PacketPool::new(4);
+    let allocation = connect(server_address, peer, pool).await;
+    tokio::time::timeout(Duration::from_secs(5), allocation.prepare_channel())
+        .await
+        .unwrap()
+        .unwrap();
+
+    crate::clock::tests::sleep(Duration::from_secs(180));
+    let woke = std::time::Instant::now();
+    crate::clock::tests::announce_sleep();
+    let mut asked = tokio::time::timeout(Duration::from_secs(4), asked_rx)
+        .await
+        .expect("the driver sent nothing when the sleep ended")
+        .unwrap();
+    assert!(
+        woke.elapsed() < Duration::from_secs(2),
+        "what fell due went out {:?} after the wake",
+        woke.elapsed()
+    );
+    asked.sort_unstable();
+    assert_eq!(asked, [4, 8, 9], "a Refresh, a CreatePermission and a ChannelBind");
+    assert!(allocation.is_alive());
+
+    tokio::time::timeout(Duration::from_secs(3), allocation.deallocate())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server_task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_flow_survives_pool_deficit_and_keeps_channel_data_zero_copy() {
     let server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
