@@ -194,8 +194,10 @@ pub struct DemandGate {
     parked: AtomicUsize,
     changed: Notify,
     count: SleepCount,
-    /// when the app last said the screen came on
-    screen_on_at: std::sync::Mutex<Option<crate::clock::Instant>>,
+    /// when the app last asked for the tunnel itself: WAKE or RESUME
+    asked_at: std::sync::Mutex<Option<crate::clock::Instant>>,
+    /// when the last sleep was said, and whether a stream was lost to it yet
+    last_sleep: std::sync::Mutex<Option<(crate::clock::Instant, bool)>>,
 }
 
 /// What the phone's sleeps cost since the screen last came on, said in one line when it comes on again: «Логи» keeps
@@ -205,8 +207,9 @@ struct SleepCount {
     sleeps: AtomicU64,
     long_sleeps: AtomicU64,
     longest_secs: AtomicU64,
+    /// sleeps that cost at least one stream: how often the streams had to be made again
+    costly_sleeps: AtomicU64,
     streams_lost: AtomicU64,
-    wanted: AtomicU64,
     credentials: AtomicU64,
     quota_refusals: AtomicU64,
 }
@@ -218,7 +221,8 @@ impl DemandGate {
             parked: AtomicUsize::new(0),
             changed: Notify::new(),
             count: SleepCount::default(),
-            screen_on_at: std::sync::Mutex::new(None),
+            asked_at: std::sync::Mutex::new(None),
+            last_sleep: std::sync::Mutex::new(None),
         }
     }
 
@@ -235,22 +239,41 @@ impl DemandGate {
             self.count.long_sleeps.fetch_add(1, Ordering::Relaxed);
             crate::log_error!("[СОН] Телефон спал {} мин {} с", gap.as_secs() / 60, gap.as_secs() % 60);
         }
-        // the watcher says a sleep up to one tick of its timer after it ended, and the app's WAKE may come first: a
-        // sleep that ended with the screen coming on leaves the tunnel wanted
-        let screen_on = self.screen_on_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if screen_on.is_some_and(|at| crate::clock::Instant::now() - at < crate::clock::SLEEP_SEEN) {
+        let now = crate::clock::Instant::now();
+        *self.last_sleep.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((now, false));
+        // the watcher says a sleep up to one tick of its timer after it ended, and the app's WAKE or RESUME may come
+        // first: a sleep that ended with the app asking for the tunnel leaves it wanted
+        let asked = self.asked_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if asked.is_some_and(|at| now - at < crate::clock::SLEEP_SEEN) {
             return;
         }
-        drop(screen_on);
+        drop(asked);
         if self.wanted.swap(false, Ordering::AcqRel) {
             self.changed.notify_waiters();
         }
     }
 
-    /// A stream that worked before a sleep is gone after it.
-    fn stream_lost(&self) {
+    /// A stream that worked has ended. True, and counted, when a sleep cost it: nobody has wanted the tunnel since the
+    /// phone slept, or the sleep was said in the last [`Self::LOST_TO_SLEEP`] (whoever woke the phone wanted the
+    /// tunnel at once, and the relay's verdict on the streams came after).
+    fn stream_lost_to_sleep(&self) -> bool {
+        let mut last_sleep = self.last_sleep.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let just_slept = last_sleep.is_some_and(|(at, _)| crate::clock::Instant::now() - at < Self::LOST_TO_SLEEP);
+        if self.is_wanted() && !just_slept {
+            return false;
+        }
         self.count.streams_lost.fetch_add(1, Ordering::Relaxed);
+        if let Some((_, costly)) = last_sleep.as_mut()
+            && !std::mem::replace(costly, true)
+        {
+            self.count.costly_sleeps.fetch_add(1, Ordering::Relaxed);
+        }
+        true
     }
+
+    /// The relay's verdict on a stream after a sleep comes within seconds (3 s when it is silent); a stream that ends
+    /// later than this after one was lost to something else.
+    const LOST_TO_SLEEP: Duration = Duration::from_secs(30);
 
     /// VK was asked for a TURN credential.
     fn credential_asked(&self) {
@@ -267,12 +290,12 @@ impl DemandGate {
         let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
         let count = &self.count;
         let (sleeps, long, longest) = (take(&count.sleeps), take(&count.long_sleeps), take(&count.longest_secs));
-        let (lost, wanted) = (take(&count.streams_lost), take(&count.wanted));
+        let (costly, lost) = (take(&count.costly_sleeps), take(&count.streams_lost));
         let (credentials, quota) = (take(&count.credentials), take(&count.quota_refusals));
         (sleeps != 0).then(|| {
             format!(
                 "[СОН] С прошлого включения экрана — снов: {sleeps}, из них дольше 5 минут: {long} (самый долгий \
-                 {} мин {} с); потоков потеряно: {lost}; туннель понадобился: {wanted}; запросов кредов VK: \
+                 {} мин {} с), с потерей потоков: {costly}; потоков потеряно: {lost}; запросов кредов VK: \
                  {credentials}; отказов VK по квоте: {quota}",
                 longest / 60,
                 longest % 60,
@@ -282,11 +305,20 @@ impl DemandGate {
 
     /// The app's WAKE: the screen came on. The count of the time it was off is said, and the tunnel is wanted.
     pub fn screen_on(&self) {
-        *self.screen_on_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(crate::clock::Instant::now());
         if let Some(line) = self.count_line() {
             crate::log_error!("{line}");
         }
-        self.want("экран");
+        self.asked("экран");
+    }
+
+    /// The app's RESUME: a network came back. The tunnel is wanted.
+    pub fn network_back(&self) {
+        self.asked("сеть");
+    }
+
+    fn asked(&self, cause: &str) {
+        *self.asked_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(crate::clock::Instant::now());
+        self.want(cause);
     }
 
     /// Somebody wants the tunnel; `cause` goes to the log when that is news. Called for every packet the phone sends.
@@ -297,7 +329,6 @@ impl DemandGate {
         }
         if !self.wanted.swap(true, Ordering::AcqRel) {
             if self.parked.load(Ordering::Acquire) != 0 {
-                self.count.wanted.fetch_add(1, Ordering::Relaxed);
                 crate::log_error!("[СОН] Туннель нужен ({cause}): потоки восстанавливаются");
             }
             self.changed.notify_waiters();
@@ -1089,8 +1120,9 @@ async fn worker_loop(
             attempt = 0;
             fatal_streak = 0;
             // the night's record (§1.9): why a stream that worked before the sleep is gone after it
-            if let (Err(error), false) = (&result, context.demand.is_wanted()) {
-                context.demand.stream_lost();
+            if let Err(error) = &result
+                && context.demand.stream_lost_to_sleep()
+            {
                 crate::log_error!("[СОН] Поток не пережил сон: {error:#}");
             }
         }
@@ -1647,20 +1679,23 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), worker).await.unwrap().unwrap();
     }
 
-    /// §1.9: the watcher may say a sleep after the app said the screen came on (its timer ticks every 10 s, and naps add
-    /// up to a sleep only at a tick). The screen is on: the tunnel stays wanted. Any later sleep ends the wish again.
+    /// §1.9: the watcher may say a sleep after the app asked for the tunnel (its timer ticks every 10 s, and naps add
+    /// up to a sleep only at a tick). The screen is on, or the network just came back: the tunnel stays wanted. Any
+    /// later sleep ends the wish again.
     #[test]
-    fn a_sleep_said_after_the_screen_came_on_leaves_the_tunnel_wanted() {
-        let gate = DemandGate::new();
-        gate.slept(Duration::from_secs(30));
-        gate.screen_on();
-        assert!(gate.is_wanted());
-        gate.slept(Duration::from_secs(16));
-        assert!(gate.is_wanted(), "the tunnel went to rest with the screen on");
-        // the screen went off, the phone slept again
-        crate::clock::tests::sleep(Duration::from_secs(40));
-        gate.slept(Duration::from_secs(40));
-        assert!(!gate.is_wanted());
+    fn a_sleep_said_after_the_app_asked_leaves_the_tunnel_wanted() {
+        for ask in [DemandGate::screen_on, DemandGate::network_back] {
+            let gate = DemandGate::new();
+            gate.slept(Duration::from_secs(30));
+            ask(&gate);
+            assert!(gate.is_wanted());
+            gate.slept(Duration::from_secs(16));
+            assert!(gate.is_wanted(), "the tunnel went to rest right after the app asked for it");
+            // later the phone slept again
+            crate::clock::tests::sleep(Duration::from_secs(40));
+            gate.slept(Duration::from_secs(40));
+            assert!(!gate.is_wanted());
+        }
     }
 
     /// §1.9: the night's figures are one line when the screen comes on, and a new count starts there.
@@ -1668,20 +1703,29 @@ mod tests {
     fn the_sleeps_count_is_said_once_when_the_screen_comes_on() {
         let gate = DemandGate::new();
         assert_eq!(gate.count_line(), None, "a phone that never slept has nothing to count");
+        // a sleep that cost nothing; one that cost ten streams, nobody wanting the tunnel; one after which the phone's
+        // own packet wanted the tunnel at once and the relay's verdict on four streams came after
         gate.slept(Duration::from_secs(40));
         gate.slept(Duration::from_secs(760));
-        gate.slept(Duration::from_secs(301));
         for _ in 0..10 {
-            gate.stream_lost();
+            assert!(gate.stream_lost_to_sleep());
+        }
+        gate.slept(Duration::from_secs(301));
+        gate.want("трафик");
+        for _ in 0..4 {
+            assert!(gate.stream_lost_to_sleep(), "a stream lost right after a sleep is the sleep's, wanted or not");
         }
         gate.credential_asked();
         gate.quota_refused();
         gate.quota_refused();
+        // long after the last sleep, with the tunnel wanted, a stream's end is not a sleep's doing
+        crate::clock::tests::sleep(Duration::from_secs(120));
+        assert!(!gate.stream_lost_to_sleep());
         assert_eq!(
             gate.count_line().as_deref(),
             Some(
-                "[СОН] С прошлого включения экрана — снов: 3, из них дольше 5 минут: 2 (самый долгий 12 мин 40 с); \
-                 потоков потеряно: 10; туннель понадобился: 0; запросов кредов VK: 1; отказов VK по квоте: 2"
+                "[СОН] С прошлого включения экрана — снов: 3, из них дольше 5 минут: 2 (самый долгий 12 мин 40 с), \
+                 с потерей потоков: 2; потоков потеряно: 14; запросов кредов VK: 1; отказов VK по квоте: 2"
             )
         );
         assert_eq!(gate.count_line(), None, "the count was said twice");

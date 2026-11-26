@@ -7,7 +7,6 @@
 
 use std::{
     ops::{Add, Sub},
-    sync::OnceLock,
     time::Duration,
 };
 use tokio::sync::watch;
@@ -71,13 +70,20 @@ fn boot_time() -> Duration {
 /// Elsewhere (a desktop build of the core) nothing sleeps under the tunnel: the monotonic clock.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn boot_time() -> Duration {
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed()
 }
 
-fn sleeps_seen() -> &'static watch::Sender<u64> {
-    static SLEEPS: OnceLock<watch::Sender<u64>> = OnceLock::new();
-    SLEEPS.get_or_init(|| watch::channel(0).0)
+#[cfg(not(test))]
+fn sleeps_seen() -> watch::Sender<u64> {
+    static SLEEPS: std::sync::OnceLock<watch::Sender<u64>> = std::sync::OnceLock::new();
+    SLEEPS.get_or_init(|| watch::channel(0).0).clone()
+}
+
+/// In a test the phone is the test's own thread, as for the clock: a sleep one test says wakes no other test's tasks.
+#[cfg(test)]
+fn sleeps_seen() -> watch::Sender<u64> {
+    tests::SLEEPS.with(Clone::clone)
 }
 
 /// The count of sleeps seen, for [`wait`]. A watch, not a notify: a sleep that ends while the task is busy is still
@@ -132,9 +138,17 @@ impl Naps {
 /// Sees the phone's sleeps for the process: [`sleeps`] moves and `slept` is called with each one's length.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) async fn watch_sleep(slept: impl Fn(Duration)) {
+    // all the time the phone has slept so far: what the boot clock counted and the monotonic one did not
+    let asleep = || boot_time().saturating_sub(clock(libc::CLOCK_MONOTONIC));
+    watch(SLEEP_SEEN, asleep, slept).await;
+}
+
+/// [`watch_sleep`] with its timer's period and its reading of the phone's sleep named: a test has its own of both.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+async fn watch(period: Duration, asleep: impl Fn() -> Duration, slept: impl Fn(Duration)) {
     // a timer on the boot clock fires the moment the phone wakes, if it fell due in the sleep; tokio's own would first
     // count the rest of its interval, and a short wake would be over before it fired
-    let timer = match boot_timer(SLEEP_SEEN) {
+    let timer = match boot_timer(period) {
         Ok(timer) => timer,
         Err(error) => {
             // the deadlines are on the boot clock all the same: each task finds them when its own timer fires
@@ -142,7 +156,7 @@ pub(crate) async fn watch_sleep(slept: impl Fn(Duration)) {
             return;
         }
     };
-    let asleep = || boot_time().saturating_sub(clock(libc::CLOCK_MONOTONIC));
+    let sleeps = sleeps_seen();
     let mut naps = Naps::new(asleep());
     loop {
         let Ok(mut ready) = timer.readable().await else {
@@ -172,7 +186,7 @@ pub(crate) async fn watch_sleep(slept: impl Fn(Duration)) {
         }
         if let Some(gap) = naps.tick(asleep()) {
             slept(gap);
-            sleeps_seen().send_modify(|count| *count += 1);
+            sleeps.send_modify(|count| *count += 1);
         }
     }
 }
@@ -210,6 +224,8 @@ pub(crate) mod tests {
     thread_local! {
         /// The sleep a test has put this thread's clock through.
         pub(super) static AHEAD: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+        /// This thread's count of sleeps seen: the tasks of a test on one thread wait on it, no other test's do.
+        pub(super) static SLEEPS: watch::Sender<u64> = watch::channel(0).0;
     }
 
     /// The phone sleeps for `duration`: the boot clock of this thread moves on, tokio's and std's do not.
@@ -247,6 +263,39 @@ pub(crate) mod tests {
         seen.send_modify(|count| *count += 1);
         waiting.await.unwrap();
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    /// The watcher itself, on a timer of 20 ms and a phone whose sleep the test sets: awake ticks say nothing; a sleep is
+    /// said to the callback (the demand gate's `slept`) and moves the watch the drivers and keepalives wait on.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn the_watcher_says_a_sleep_and_wakes_who_waits() {
+        use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+        let slept_secs = Arc::new(AtomicU64::new(0));
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let mut sleeps = sleeps();
+        let watcher = tokio::spawn(watch(
+            Duration::from_millis(20),
+            {
+                let slept_secs = slept_secs.clone();
+                move || Duration::from_secs(slept_secs.load(Ordering::Relaxed))
+            },
+            {
+                let said = said.clone();
+                move |gap| said.lock().unwrap().push(gap)
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(said.lock().unwrap().is_empty(), "an awake phone was said to have slept");
+        assert!(!sleeps.has_changed().unwrap());
+
+        slept_secs.store(60, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(3), sleeps.changed())
+            .await
+            .expect("a minute's sleep moved nothing")
+            .unwrap();
+        assert_eq!(*said.lock().unwrap(), [Duration::from_secs(60)]);
+        watcher.abort();
     }
 
     #[test]

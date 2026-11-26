@@ -52,6 +52,25 @@ class TunnelRestTest {
     }
 
     @Test
+    fun `streams that come up during a rest make it a working tunnel's rest`() {
+        // an outage: the repair failed, the phone sleeps with attempts in flight, the core rests with no stream
+        val rest = TunnelRest()
+        rest.onStats(activeBefore = 0, active = 0, dormant = true)
+        assertFalse(rest.connected)
+        // the network is back, the attempts finish at a wake; nothing wanted the tunnel, so the core still rests
+        rest.onStats(activeBefore = 0, active = 4, dormant = true)
+        assertTrue(rest.connected)
+        // the next sleep costs them: a tunnel at rest, not a repair to hold the phone awake for
+        rest.onStats(activeBefore = 4, active = 0, dormant = true)
+        assertTrue("streams lost at rest read as a failed repair", rest.connected)
+        val state = deriveConnectionState(
+            ConnectionInputs(running = true, tunconf = true, vpnReady = true, everConnected = true, dormant = rest.connected),
+        )
+        assertEquals(ConnectionState.Connected(0), state)
+        assertFalse(state.isWork)
+    }
+
+    @Test
     fun `wanted again with streams left arms nothing, and a few streams at the sleep are a working tunnel`() {
         val rest = TunnelRest()
         assertFalse(rest.onStats(activeBefore = 0, active = 3, dormant = true))

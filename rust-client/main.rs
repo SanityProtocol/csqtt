@@ -860,7 +860,7 @@ fn start_control_input(
                 "PAUSE" => paused.set_paused(true),
                 "RESUME" => {
                     paused.set_paused(false);
-                    demand.want("сеть");
+                    demand.network_back();
                 }
                 // §1.9: the screen came on. Streams that did not survive the phone's sleep are made again now, not at
                 // the first packet the user's tap sends
@@ -1179,8 +1179,9 @@ mod worker_count_tests {
             dispatcher,
             receiver,
         );
-        // RESUME first: a sleep said within 10 s after a WAKE leaves the tunnel wanted by itself
         for command in ["RESUME", "WAKE"] {
+            // (a sleep said within 10 s after either leaves the tunnel wanted by itself: the phone's clock moves on)
+            clock::tests::sleep(Duration::from_secs(60));
             demand.slept(Duration::from_secs(60));
             assert!(!demand.is_wanted());
             sender.send(Ok(command.to_owned())).await.unwrap();

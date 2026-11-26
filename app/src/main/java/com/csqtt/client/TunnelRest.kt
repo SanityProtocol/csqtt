@@ -14,7 +14,7 @@ internal class TunnelRest {
     var dormant = false
         private set
 
-    /** At rest, and the tunnel had streams when it went to rest: «Подключено», whatever the count is now. */
+    /** At rest, and the tunnel has had streams in this rest: «Подключено», whatever the count is now. */
     @Volatile
     var connected = false
         private set
@@ -30,8 +30,13 @@ internal class TunnelRest {
      */
     fun onStats(activeBefore: Int, active: Int, dormant: Boolean): Boolean {
         val wokeEmpty = this.dormant && !dormant && active == 0
-        if (dormant && !this.dormant) connected = activeBefore > 0 || active > 0
-        if (!dormant) connected = false
+        connected = when {
+            !dormant -> false
+            // the rest begins: it is a working tunnel's if it has streams
+            !this.dormant -> activeBefore > 0 || active > 0
+            // streams that came up during the rest (attempts in flight when the phone slept) make it one too
+            else -> connected || active > 0
+        }
         this.dormant = dormant
         return wokeEmpty
     }
