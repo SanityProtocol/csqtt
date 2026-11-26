@@ -20,3 +20,5 @@ app/src/main/assets/licenses/Gooby-LICENSE.txt and Gooby-NOTICE.txt; the file's 
 The app's outline icons (app/src/main/java/com/csqtt/client/ui/design/Icons.kt) are Lucide's, https://lucide.dev,
 Copyright (c) Lucide Icons and Contributors, under the ISC License, some of them derived from Feather, Copyright (c)
 2013-present Cole Bemis, under the MIT License. Both licences ship as app/src/main/assets/licenses/Lucide-LICENSE.txt.
+The server's web panel draws with the same icons (rust-server/web_panel.rs, `icon_sprite`), and its pages carry that
+notice beside them.

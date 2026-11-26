@@ -339,6 +339,9 @@ struct ClientInfo {
     /// B6b: a password's device limit; none for the owner's main password, which has no limit
     #[serde(default)]
     device_limit: Option<u32>,
+    /// The owner's main password. The panel opens the owner's sheet for it: the server neither renames it, nor ends
+    /// its term, nor deletes it, nor switches it off (the last two answer 404).
+    is_owner: bool,
 }
 
 fn url_encode(input: &str) -> String {
@@ -1563,6 +1566,44 @@ fn count_active_sessions(
     count
 }
 
+/// The owner's main password as an entry of the client list: flagged, without a term and without a device limit.
+fn owner_client_info(
+    db: &model::Database,
+    host: &str,
+    peer_port: u16,
+    name: &str,
+    (session_up, session_down): (i64, i64),
+    active_sessions: usize,
+) -> ClientInfo {
+    ClientInfo {
+        password: db.main_password.clone(),
+        down: db.main_down_bytes + session_down,
+        up: db.main_up_bytes + session_up,
+        expires: 0,
+        active: true,
+        active_sessions,
+        vk_hash: String::new(),
+        ports: String::new(),
+        ip: crate::model::owner_tunnel_ip(),
+        name: name.to_string(),
+        vk_hashes: if db.main_vk_hashes.is_empty() {
+            db.vk_hashes.clone()
+        } else {
+            db.main_vk_hashes.clone()
+        },
+        vk_token: db.main_vk_token_enabled,
+        peer_port,
+        local_port: 0,
+        group_id: String::new(),
+        routing_rule_id: db.main_routing_rule_id.clone(),
+        link: make_main_link(host, peer_port, db),
+        sub_uuid: db.main_sub_uuid.clone(),
+        workers: db.main_workers,
+        device_limit: None,
+        is_owner: true,
+    }
+}
+
 async fn clients_get(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1611,6 +1652,7 @@ async fn clients_get(
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
                 device_limit: Some(entry.device_limit()),
+                is_owner: false,
             }
         })
         .collect();
@@ -1625,33 +1667,14 @@ async fn clients_get(
             }
         }
 
-        let main_peer_port = state.app.listen.port();
-        list.push(ClientInfo {
-            password: db.main_password.clone(),
-            down: db.main_down_bytes + session_down,
-            up: db.main_up_bytes + session_up,
-            expires: 0,
-            active: true,
-            active_sessions: count_active_sessions(&state.app.sessions, &db.main_password),
-            vk_hash: String::new(),
-            ports: String::new(),
-            ip: crate::model::owner_tunnel_ip(),
-            name: "Владелец".to_string(),
-            vk_hashes: if db.main_vk_hashes.is_empty() {
-                db.vk_hashes.clone()
-            } else {
-                db.main_vk_hashes.clone()
-            },
-            vk_token: db.main_vk_token_enabled,
-            peer_port: main_peer_port,
-            local_port: 0,
-            group_id: String::new(),
-            routing_rule_id: db.main_routing_rule_id.clone(),
-            link: make_main_link(&host, main_peer_port, &db),
-            sub_uuid: db.main_sub_uuid.clone(),
-            workers: db.main_workers,
-            device_limit: None,
-        });
+        list.push(owner_client_info(
+            &db,
+            &host,
+            state.app.listen.port(),
+            "Владелец",
+            (session_up, session_down),
+            count_active_sessions(&state.app.sessions, &db.main_password),
+        ));
     }
 
     if let Some(ref gid) = query.group_id {
@@ -1726,6 +1749,7 @@ async fn group_clients_get(
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
                 device_limit: Some(entry.device_limit()),
+                is_owner: false,
             }
         })
         .collect();
@@ -2101,33 +2125,14 @@ async fn client_get(
             }
         }
 
-        let main_peer_port = state.app.listen.port();
-        let info = ClientInfo {
-            password: db.main_password.clone(),
-            down: db.main_down_bytes + session_down,
-            up: db.main_up_bytes + session_up,
-            expires: 0,
-            active: true,
+        let info = owner_client_info(
+            &db,
+            &host,
+            state.app.listen.port(),
+            "Главный пароль",
+            (session_up, session_down),
             active_sessions,
-            vk_hash: String::new(),
-            ports: String::new(),
-            ip: crate::model::owner_tunnel_ip(),
-            name: "Главный пароль".to_string(),
-            vk_hashes: if db.main_vk_hashes.is_empty() {
-                db.vk_hashes.clone()
-            } else {
-                db.main_vk_hashes.clone()
-            },
-            vk_token: db.main_vk_token_enabled,
-            peer_port: main_peer_port,
-            local_port: 0,
-            group_id: String::new(),
-            routing_rule_id: db.main_routing_rule_id.clone(),
-            link: make_main_link(&host, main_peer_port, &db),
-            sub_uuid: db.main_sub_uuid.clone(),
-            workers: db.main_workers,
-            device_limit: None,
-        };
+        );
         return Json(info).into_response();
     }
 
@@ -2169,6 +2174,7 @@ async fn client_get(
             sub_uuid: entry.sub_uuid.clone(),
             workers: entry.workers,
             device_limit: Some(entry.device_limit()),
+            is_owner: false,
         };
         return Json(info).into_response();
     }
@@ -2781,6 +2787,8 @@ struct GroupInfo {
     up: i64,
     down: i64,
     active_sessions: usize,
+    /// The streams limit of the group's keys that set none of their own; none: no limit
+    workers: Option<u32>,
 }
 
 async fn groups_get(State(state): State<WebState>) -> Response {
@@ -2809,6 +2817,7 @@ async fn groups_get(State(state): State<WebState>) -> Response {
             up,
             down,
             active_sessions,
+            workers: group.workers,
         });
     }
     Json(list).into_response()
@@ -2853,6 +2862,8 @@ async fn groups_create(
 struct UpdateGroupRequest {
     name: Option<String>,
     routing_rule_id: Option<String>,
+    /// 0: no limit; 3–100: the streams limit of the group's keys that set none of their own
+    workers: Option<u32>,
 }
 
 async fn groups_update(
@@ -2874,6 +2885,12 @@ async fn groups_update(
         }
         if let Some(r_id) = request.routing_rule_id {
             group.routing_rule_id = r_id;
+        }
+        if let Some(workers) = request.workers {
+            match validate_workers(Some(workers)) {
+                Ok(validated) => group.workers = validated,
+                Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+            }
         }
         state.app.db_persistence.submit(db.clone())
     };
@@ -5720,7 +5737,43 @@ self.addEventListener('fetch', event => {
 
 const QRCODE_JS: &str = r##"var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=new Array(t),e=0;e<t;e+=1){r[e]=new Array(t);for(var n=0;n<t;n+=1)r[e][n]=null}return r}(l=4*u+17),e(0,0),e(l-7,0),e(0,l-7),i(),o(),v(t,r),7<=u&&h(t),null==n&&(n=w(u,f,c)),d(n,r)}var u=t,f=y[r],g=null,l=0,n=null,c=[],s={},e=function(t,r){for(var e=-1;e<=7;e+=1)if(!(t+e<=-1||l<=t+e))for(var n=-1;n<=7;n+=1)r+n<=-1||l<=r+n||(g[t+e][r+n]=0<=e&&e<=6&&(0==n||6==n)||0<=n&&n<=6&&(0==e||6==e)||2<=e&&e<=4&&2<=n&&n<=4)},o=function(){for(var t=8;t<l-8;t+=1)null==g[t][6]&&(g[t][6]=t%2==0);for(var r=8;r<l-8;r+=1)null==g[6][r]&&(g[6][r]=r%2==0)},i=function(){for(var t=B.getPatternPosition(u),r=0;r<t.length;r+=1)for(var e=0;e<t.length;e+=1){var n=t[r],o=t[e];if(null==g[n][o])for(var i=-2;i<=2;i+=1)for(var a=-2;a<=2;a+=1)g[n+i][o+a]=-2==i||2==i||-2==a||2==a||0==i&&0==a}},h=function(t){for(var r=B.getBCHTypeNumber(u),e=0;e<18;e+=1){var n=!t&&1==(r>>e&1);g[Math.floor(e/3)][e%3+l-8-3]=n}for(e=0;e<18;e+=1){n=!t&&1==(r>>e&1);g[e%3+l-8-3][Math.floor(e/3)]=n}},v=function(t,r){for(var e=f<<3|r,n=B.getBCHTypeInfo(e),o=0;o<15;o+=1){var i=!t&&1==(n>>o&1);o<6?g[o][8]=i:o<8?g[o+1][8]=i:g[l-15+o][8]=i}for(o=0;o<15;o+=1){i=!t&&1==(n>>o&1);o<8?g[8][l-o-1]=i:o<9?g[8][15-o-1+1]=i:g[8][15-o-1]=i}g[l-8][8]=!t},d=function(t,r){for(var e=-1,n=l-1,o=7,i=0,a=B.getMaskFunction(r),u=l-1;0<u;u-=2)for(6==u&&(u-=1);;){for(var f=0;f<2;f+=1)if(null==g[n][u-f]){var c=!1;i<t.length&&(c=1==(t[i]>>>o&1)),a(n,u-f)&&(c=!c),g[n][u-f]=c,-1==(o-=1)&&(i+=1,o=7)}if((n+=e)<0||l<=n){n-=e,e=-e;break}}},w=function(t,r,e){for(var n=b.getRSBlocks(t,r),o=M(),i=0;i<e.length;i+=1){var a=e[i];o.put(a.getMode(),4),o.put(a.getLength(),B.getLengthInBits(a.getMode(),t)),a.write(o)}var u=0;for(i=0;i<n.length;i+=1)u+=n[i].dataCount;if(o.getLengthInBits()>8*u)throw"code length overflow. ("+o.getLengthInBits()+">"+8*u+")";for(o.getLengthInBits()+4<=8*u&&o.put(0,4);o.getLengthInBits()%8!=0;)o.putBit(!1);for(;!(o.getLengthInBits()>=8*u||(o.put(236,8),o.getLengthInBits()>=8*u));)o.put(17,8);return function(t,r){for(var e=0,n=0,o=0,i=new Array(r.length),a=new Array(r.length),u=0;u<r.length;u+=1){var f=r[u].dataCount,c=r[u].totalCount-f;n=Math.max(n,f),o=Math.max(o,c),i[u]=new Array(f);for(var g=0;g<i[u].length;g+=1)i[u][g]=255&t.getBuffer()[g+e];e+=f;var l=B.getErrorCorrectPolynomial(c),h=C(i[u],l.getLength()-1).mod(l);a[u]=new Array(l.getLength()-1);for(g=0;g<a[u].length;g+=1){var s=g+h.getLength()-a[u].length;a[u][g]=0<=s?h.getAt(s):0}}var v=0;for(g=0;g<r.length;g+=1)v+=r[g].totalCount;var d=new Array(v),w=0;for(g=0;g<n;g+=1)for(u=0;u<r.length;u+=1)g<i[u].length&&(d[w]=i[u][g],w+=1);for(g=0;g<o;g+=1)for(u=0;u<r.length;u+=1)g<a[u].length&&(d[w]=a[u][g],w+=1);return d}(o,n)};s.addData=function(t,r){var e=null;switch(r=r||"Byte"){case"Numeric":e=x(t);break;case"Alphanumeric":e=m(t);break;case"Byte":e=L(t);break;case"Kanji":e=D(t);break;default:throw"mode:"+r}c.push(e),n=null},s.isDark=function(t,r){if(t<0||l<=t||r<0||l<=r)throw t+","+r;return g[t][r]},s.getModuleCount=function(){return l},s.make=function(){if(u<1){for(var t=1;t<40;t++){for(var r=b.getRSBlocks(t,f),e=M(),n=0;n<c.length;n++){var o=c[n];e.put(o.getMode(),4),e.put(o.getLength(),B.getLengthInBits(o.getMode(),t)),o.write(e)}var i=0;for(n=0;n<r.length;n++)i+=r[n].dataCount;if(e.getLengthInBits()<=8*i)break}u=t}a(!1,function(){for(var t=0,r=0,e=0;e<8;e+=1){a(!0,e);var n=B.getLostPoint(s);(0==e||n<t)&&(t=n,r=e)}return r}())},s.createTableTag=function(t,r){t=t||2;var e="";e+='<table style="',e+=" border-width: 0px; border-style: none;",e+=" border-collapse: collapse;",e+=" padding: 0px; margin: "+(r=void 0===r?4*t:r)+"px;",e+='">',e+="<tbody>";for(var n=0;n<s.getModuleCount();n+=1){e+="<tr>";for(var o=0;o<s.getModuleCount();o+=1)e+='<td style="',e+=" border-width: 0px; border-style: none;",e+=" border-collapse: collapse;",e+=" padding: 0px; margin: 0px;",e+=" width: "+t+"px;",e+=" height: "+t+"px;",e+=" background-color: ",e+=s.isDark(n,o)?"#000000":"#ffffff",e+=";",e+='"/>';e+="</tr>"}return e+="</tbody>",e+="</table>"},s.createSvgTag=function(t,r,e,n){var o={};"object"==typeof t&&(t=(o=t).cellSize,r=o.margin,e=o.alt,n=o.title),t=t||2,r=void 0===r?4*t:r,(e="string"==typeof e?{text:e}:e||{}).text=e.text||null,e.id=e.text?e.id||"qrcode-description":null,(n="string"==typeof n?{text:n}:n||{}).text=n.text||null,n.id=n.text?n.id||"qrcode-title":null;var i,a,u,f,c=s.getModuleCount()*t+2*r,g="";for(f="l"+t+",0 0,"+t+" -"+t+",0 0,-"+t+"z ",g+='<svg version="1.1" xmlns="http://www.w3.org/2000/svg"',g+=o.scalable?"":' width="'+c+'px" height="'+c+'px"',g+=' viewBox="0 0 '+c+" "+c+'" ',g+=' preserveAspectRatio="xMinYMin meet"',g+=n.text||e.text?' role="img" aria-labelledby="'+p([n.id,e.id].join(" ").trim())+'"':"",g+=">",g+=n.text?'<title id="'+p(n.id)+'">'+p(n.text)+"</title>":"",g+=e.text?'<description id="'+p(e.id)+'">'+p(e.text)+"</description>":"",g+='<rect width="100%" height="100%" fill="white" cx="0" cy="0"/>',g+='<path d="',a=0;a<s.getModuleCount();a+=1)for(u=a*t+r,i=0;i<s.getModuleCount();i+=1)s.isDark(a,i)&&(g+="M"+(i*t+r)+","+u+f);return g+='" stroke="transparent" fill="black"/>',g+="</svg>"},s.createDataURL=function(o,t){o=o||2,t=void 0===t?4*o:t;var r=s.getModuleCount()*o+2*t,i=t,a=r-t;return I(r,r,function(t,r){if(i<=t&&t<a&&i<=r&&r<a){var e=Math.floor((t-i)/o),n=Math.floor((r-i)/o);return s.isDark(n,e)?0:1}return 1})},s.createImgTag=function(t,r,e){t=t||2,r=void 0===r?4*t:r;var n=s.getModuleCount()*t+2*r,o="";return o+="<img",o+=' src="',o+=s.createDataURL(t,r),o+='"',o+=' width="',o+=n,o+='"',o+=' height="',o+=n,o+='"',e&&(o+=' alt="',o+=p(e),o+='"'),o+="/>"};var p=function(t){for(var r="",e=0;e<t.length;e+=1){var n=t.charAt(e);switch(n){case"<":r+="&lt;";break;case">":r+="&gt;";break;case"&":r+="&amp;";break;case'"':r+="&quot;";break;default:r+=n}}return r};return s.createASCII=function(t,r){if((t=t||1)<2)return function(t){t=void 0===t?2:t;var r,e,n,o,i,a=1*s.getModuleCount()+2*t,u=t,f=a-t,c={"██":"█","█ ":"▀"," █":"▄","  ":" "},g={"██":"▀","█ ":"▀"," █":" ","  ":" "},l="";for(r=0;r<a;r+=2){for(n=Math.floor((r-u)/1),o=Math.floor((r+1-u)/1),e=0;e<a;e+=1)i="█",u<=e&&e<f&&u<=r&&r<f&&s.isDark(n,Math.floor((e-u)/1))&&(i=" "),u<=e&&e<f&&u<=r+1&&r+1<f&&s.isDark(o,Math.floor((e-u)/1))?i+=" ":i+="█",l+=t<1&&f<=r+1?g[i]:c[i];l+="\n"}return a%2&&0<t?l.substring(0,l.length-a-1)+Array(1+a).join("▀"):l.substring(0,l.length-1)}(r);t-=1,r=void 0===r?2*t:r;var e,n,o,i,a=s.getModuleCount()*t+2*r,u=r,f=a-r,c=Array(t+1).join("██"),g=Array(t+1).join("  "),l="",h="";for(e=0;e<a;e+=1){for(o=Math.floor((e-u)/t),h="",n=0;n<a;n+=1)i=1,u<=n&&n<f&&u<=e&&e<f&&s.isDark(o,Math.floor((n-u)/t))&&(i=0),h+=i?c:g;for(o=0;o<t;o+=1)l+=h+"\n"}return l.substring(0,l.length-1)},s.renderTo2dContext=function(t,r){r=r||2;for(var e=s.getModuleCount(),n=0;n<e;n++)for(var o=0;o<e;o++)t.fillStyle=s.isDark(n,o)?"black":"white",t.fillRect(n*r,o*r,r,r)},s}i.stringToBytes=(i.stringToBytesFuncs={default:function(t){for(var r=[],e=0;e<t.length;e+=1){var n=t.charCodeAt(e);r.push(255&n)}return r}}).default,i.createStringToBytes=function(u,f){var i=function(){function t(){var t=r.read();if(-1==t)throw"eof";return t}for(var r=S(u),e=0,n={};;){var o=r.read();if(-1==o)break;var i=t(),a=t()<<8|t();n[String.fromCharCode(o<<8|i)]=a,e+=1}if(e!=f)throw e+" != "+f;return n}(),a="?".charCodeAt(0);return function(t){for(var r=[],e=0;e<t.length;e+=1){var n=t.charCodeAt(e);if(n<128)r.push(n);else{var o=i[t.charAt(e)];"number"==typeof o?(255&o)==o?r.push(o):(r.push(o>>>8),r.push(255&o)):r.push(a)}}return r}};var r,t,a=1,u=2,o=4,f=8,y={L:1,M:0,Q:3,H:2},e=0,n=1,c=2,g=3,l=4,h=5,s=6,v=7,B=(r=[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,134],[6,34,60,86,112,138],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]],(t={}).getBCHTypeInfo=function(t){for(var r=t<<10;0<=d(r)-d(1335);)r^=1335<<d(r)-d(1335);return 21522^(t<<10|r)},t.getBCHTypeNumber=function(t){for(var r=t<<12;0<=d(r)-d(7973);)r^=7973<<d(r)-d(7973);return t<<12|r},t.getPatternPosition=function(t){return r[t-1]},t.getMaskFunction=function(t){switch(t){case e:return function(t,r){return(t+r)%2==0};case n:return function(t,r){return t%2==0};case c:return function(t,r){return r%3==0};case g:return function(t,r){return(t+r)%3==0};case l:return function(t,r){return(Math.floor(t/2)+Math.floor(r/3))%2==0};case h:return function(t,r){return t*r%2+t*r%3==0};case s:return function(t,r){return(t*r%2+t*r%3)%2==0};case v:return function(t,r){return(t*r%3+(t+r)%2)%2==0};default:throw"bad maskPattern:"+t}},t.getErrorCorrectPolynomial=function(t){for(var r=C([1],0),e=0;e<t;e+=1)r=r.multiply(C([1,w.gexp(e)],0));return r},t.getLengthInBits=function(t,r){if(1<=r&&r<10)switch(t){case a:return 10;case u:return 9;case o:case f:return 8;default:throw"mode:"+t}else if(r<27)switch(t){case a:return 12;case u:return 11;case o:return 16;case f:return 10;default:throw"mode:"+t}else{if(!(r<41))throw"type:"+r;switch(t){case a:return 14;case u:return 13;case o:return 16;case f:return 12;default:throw"mode:"+t}}},t.getLostPoint=function(t){for(var r=t.getModuleCount(),e=0,n=0;n<r;n+=1)for(var o=0;o<r;o+=1){for(var i=0,a=t.isDark(n,o),u=-1;u<=1;u+=1)if(!(n+u<0||r<=n+u))for(var f=-1;f<=1;f+=1)o+f<0||r<=o+f||0==u&&0==f||a==t.isDark(n+u,o+f)&&(i+=1);5<i&&(e+=3+i-5)}for(n=0;n<r-1;n+=1)for(o=0;o<r-1;o+=1){var c=0;t.isDark(n,o)&&(c+=1),t.isDark(n+1,o)&&(c+=1),t.isDark(n,o+1)&&(c+=1),t.isDark(n+1,o+1)&&(c+=1),0!=c&&4!=c||(e+=3)}for(n=0;n<r;n+=1)for(o=0;o<r-6;o+=1)t.isDark(n,o)&&!t.isDark(n,o+1)&&t.isDark(n,o+2)&&t.isDark(n,o+3)&&t.isDark(n,o+4)&&!t.isDark(n,o+5)&&t.isDark(n,o+6)&&(e+=40);for(o=0;o<r;o+=1)for(n=0;n<r-6;n+=1)t.isDark(n,o)&&!t.isDark(n+1,o)&&t.isDark(n+2,o)&&t.isDark(n+3,o)&&t.isDark(n+4,o)&&!t.isDark(n+5,o)&&t.isDark(n+6,o)&&(e+=40);var g=0;for(o=0;o<r;o+=1)for(n=0;n<r;n+=1)t.isDark(n,o)&&(g+=1);return e+=Math.abs(100*g/r/r-50)/5*10},t);function d(t){for(var r=0;0!=t;)r+=1,t>>>=1;return r}var w=function(){for(var r=new Array(256),e=new Array(256),t=0;t<8;t+=1)r[t]=1<<t;for(t=8;t<256;t+=1)r[t]=r[t-4]^r[t-5]^r[t-6]^r[t-8];for(t=0;t<255;t+=1)e[r[t]]=t;var n={glog:function(t){if(t<1)throw"glog("+t+")";return e[t]},gexp:function(t){for(;t<0;)t+=255;for(;256<=t;)t-=255;return r[t]}};return n}();function C(n,o){if(void 0===n.length)throw n.length+"/"+o;var r=function(){for(var t=0;t<n.length&&0==n[t];)t+=1;for(var r=new Array(n.length-t+o),e=0;e<n.length-t;e+=1)r[e]=n[e+t];return r}(),i={getAt:function(t){return r[t]},getLength:function(){return r.length},multiply:function(t){for(var r=new Array(i.getLength()+t.getLength()-1),e=0;e<i.getLength();e+=1)for(var n=0;n<t.getLength();n+=1)r[e+n]^=w.gexp(w.glog(i.getAt(e))+w.glog(t.getAt(n)));return C(r,0)},mod:function(t){if(i.getLength()-t.getLength()<0)return i;for(var r=w.glog(i.getAt(0))-w.glog(t.getAt(0)),e=new Array(i.getLength()),n=0;n<i.getLength();n+=1)e[n]=i.getAt(n);for(n=0;n<t.getLength();n+=1)e[n]^=w.gexp(w.glog(t.getAt(n))+r);return C(e,0).mod(t)}};return i}function p(){var e=[],o={writeByte:function(t){e.push(255&t)},writeShort:function(t){o.writeByte(t),o.writeByte(t>>>8)},writeBytes:function(t,r,e){r=r||0,e=e||t.length;for(var n=0;n<e;n+=1)o.writeByte(t[n+r])},writeString:function(t){for(var r=0;r<t.length;r+=1)o.writeByte(t.charCodeAt(r))},toByteArray:function(){return e},toString:function(){var t="";t+="[";for(var r=0;r<e.length;r+=1)0<r&&(t+=","),t+=e[r];return t+="]"}};return o}var k,A,b=(k=[[1,26,19],[1,26,16],[1,26,13],[1,26,9],[1,44,34],[1,44,28],[1,44,22],[1,44,16],[1,70,55],[1,70,44],[2,35,17],[2,35,13],[1,100,80],[2,50,32],[2,50,24],[4,25,9],[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12],[2,86,68],[4,43,27],[4,43,19],[4,43,15],[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14],[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15],[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13],[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16],[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13],[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15],[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12],[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13],[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12,7,37,13],[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16],[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15],[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15],[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14],[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16],[4,144,116,4,145,117],[17,68,42],[17,50,22,6,51,23],[19,46,16,6,47,17],[2,139,111,7,140,112],[17,74,46],[7,54,24,16,55,25],[34,37,13],[4,151,121,5,152,122],[4,75,47,14,76,48],[11,54,24,14,55,25],[16,45,15,14,46,16],[6,147,117,4,148,118],[6,73,45,14,74,46],[11,54,24,16,55,25],[30,46,16,2,47,17],[8,132,106,4,133,107],[8,75,47,13,76,48],[7,54,24,22,55,25],[22,45,15,13,46,16],[10,142,114,2,143,115],[19,74,46,4,75,47],[28,50,22,6,51,23],[33,46,16,4,47,17],[8,152,122,4,153,123],[22,73,45,3,74,46],[8,53,23,26,54,24],[12,45,15,28,46,16],[3,147,117,10,148,118],[3,73,45,23,74,46],[4,54,24,31,55,25],[11,45,15,31,46,16],[7,146,116,7,147,117],[21,73,45,7,74,46],[1,53,23,37,54,24],[19,45,15,26,46,16],[5,145,115,10,146,116],[19,75,47,10,76,48],[15,54,24,25,55,25],[23,45,15,25,46,16],[13,145,115,3,146,116],[2,74,46,29,75,47],[42,54,24,1,55,25],[23,45,15,28,46,16],[17,145,115],[10,74,46,23,75,47],[10,54,24,35,55,25],[19,45,15,35,46,16],[17,145,115,1,146,116],[14,74,46,21,75,47],[29,54,24,19,55,25],[11,45,15,46,46,16],[13,145,115,6,146,116],[14,74,46,23,75,47],[44,54,24,7,55,25],[59,46,16,1,47,17],[12,151,121,7,152,122],[12,75,47,26,76,48],[39,54,24,14,55,25],[22,45,15,41,46,16],[6,151,121,14,152,122],[6,75,47,34,76,48],[46,54,24,10,55,25],[2,45,15,64,46,16],[17,152,122,4,153,123],[29,74,46,14,75,47],[49,54,24,10,55,25],[24,45,15,46,46,16],[4,152,122,18,153,123],[13,74,46,32,75,47],[48,54,24,14,55,25],[42,45,15,32,46,16],[20,147,117,4,148,118],[40,75,47,7,76,48],[43,54,24,22,55,25],[10,45,15,67,46,16],[19,148,118,6,149,119],[18,75,47,31,76,48],[34,54,24,34,55,25],[20,45,15,61,46,16]],(A={}).getRSBlocks=function(t,r){var e=function(t,r){switch(r){case y.L:return k[4*(t-1)+0];case y.M:return k[4*(t-1)+1];case y.Q:return k[4*(t-1)+2];case y.H:return k[4*(t-1)+3];default:return}}(t,r);if(void 0===e)throw"bad rs block @ typeNumber:"+t+"/errorCorrectionLevel:"+r;for(var n,o,i=e.length/3,a=[],u=0;u<i;u+=1)for(var f=e[3*u+0],c=e[3*u+1],g=e[3*u+2],l=0;l<f;l+=1)a.push((n=g,o=void 0,(o={}).totalCount=c,o.dataCount=n,o));return a},A),M=function(){var e=[],n=0,o={getBuffer:function(){return e},getAt:function(t){var r=Math.floor(t/8);return 1==(e[r]>>>7-t%8&1)},put:function(t,r){for(var e=0;e<r;e+=1)o.putBit(1==(t>>>r-e-1&1))},getLengthInBits:function(){return n},putBit:function(t){var r=Math.floor(n/8);e.length<=r&&e.push(0),t&&(e[r]|=128>>>n%8),n+=1}};return o},x=function(t){var r=a,n=t,e={getMode:function(){return r},getLength:function(t){return n.length},write:function(t){for(var r=n,e=0;e+2<r.length;)t.put(o(r.substring(e,e+3)),10),e+=3;e<r.length&&(r.length-e==1?t.put(o(r.substring(e,e+1)),4):r.length-e==2&&t.put(o(r.substring(e,e+2)),7))}},o=function(t){for(var r=0,e=0;e<t.length;e+=1)r=10*r+i(t.charAt(e));return r},i=function(t){if("0"<=t&&t<="9")return t.charCodeAt(0)-"0".charCodeAt(0);throw"illegal char :"+t};return e},m=function(t){var r=u,n=t,e={getMode:function(){return r},getLength:function(t){return n.length},write:function(t){for(var r=n,e=0;e+1<r.length;)t.put(45*o(r.charAt(e))+o(r.charAt(e+1)),11),e+=2;e<r.length&&t.put(o(r.charAt(e)),6)}},o=function(t){if("0"<=t&&t<="9")return t.charCodeAt(0)-"0".charCodeAt(0);if("A"<=t&&t<="Z")return t.charCodeAt(0)-"A".charCodeAt(0)+10;switch(t){case" ":return 36;case"$":return 37;case"%":return 38;case"*":return 39;case"+":return 40;case"-":return 41;case".":return 42;case"/":return 43;case":":return 44;default:throw"illegal char :"+t}};return e},L=function(t){var r=o,e=i.stringToBytes(t),n={getMode:function(){return r},getLength:function(t){return e.length},write:function(t){for(var r=0;r<e.length;r+=1)t.put(e[r],8)}};return n},D=function(t){var r=f,e=i.stringToBytesFuncs.SJIS;if(!e)throw"sjis not supported.";!function(){var t=e("友");if(2!=t.length||38726!=(t[0]<<8|t[1]))throw"sjis not supported."}();var o=e(t),n={getMode:function(){return r},getLength:function(t){return~~(o.length/2)},write:function(t){for(var r=o,e=0;e+1<r.length;){var n=(255&r[e])<<8|255&r[e+1];if(33088<=n&&n<=40956)n-=33088;else{if(!(57408<=n&&n<=60351))throw"illegal char at "+(e+1)+"/"+n;n-=49472}n=192*(n>>>8&255)+(255&n),t.put(n,13),e+=2}if(e<r.length)throw"illegal char at "+(e+1)}};return n},S=function(t){var e=t,n=0,o=0,i=0,r={read:function(){for(;i<8;){if(n>=e.length){if(0==i)return-1;throw"unexpected end of file./"+i}var t=e.charAt(n);if(n+=1,"="==t)return i=0,-1;t.match(/^\s$/)||(o=o<<6|a(t.charCodeAt(0)),i+=6)}var r=o>>>i-8&255;return i-=8,r}},a=function(t){if(65<=t&&t<=90)return t-65;if(97<=t&&t<=122)return t-97+26;if(48<=t&&t<=57)return t-48+52;if(43==t)return 62;if(47==t)return 63;throw"c:"+t};return r},I=function(t,r,e){for(var n=function(t,r){var n=t,o=r,l=new Array(t*r),e={setPixel:function(t,r,e){l[r*n+t]=e},write:function(t){t.writeString("GIF87a"),t.writeShort(n),t.writeShort(o),t.writeByte(128),t.writeByte(0),t.writeByte(0),t.writeByte(0),t.writeByte(0),t.writeByte(0),t.writeByte(255),t.writeByte(255),t.writeByte(255),t.writeString(","),t.writeShort(0),t.writeShort(0),t.writeShort(n),t.writeShort(o),t.writeByte(0);var r=i(2);t.writeByte(2);for(var e=0;255<r.length-e;)t.writeByte(255),t.writeBytes(r,e,255),e+=255;t.writeByte(r.length-e),t.writeBytes(r,e,r.length-e),t.writeByte(0),t.writeString(";")}},i=function(t){for(var r=1<<t,e=1+(1<<t),n=t+1,o=h(),i=0;i<r;i+=1)o.add(String.fromCharCode(i));o.add(String.fromCharCode(r)),o.add(String.fromCharCode(e));var a=p(),u=function(t){var e=t,n=0,o=0,r={write:function(t,r){if(t>>>r!=0)throw"length over";for(;8<=n+r;)e.writeByte(255&(t<<n|o)),r-=8-n,t>>>=8-n,n=o=0;o|=t<<n,n+=r},flush:function(){0<n&&e.writeByte(o)}};return r}(a);u.write(r,n);var f=0,c=String.fromCharCode(l[f]);for(f+=1;f<l.length;){var g=String.fromCharCode(l[f]);f+=1,o.contains(c+g)?c+=g:(u.write(o.indexOf(c),n),o.size()<4095&&(o.size()==1<<n&&(n+=1),o.add(c+g)),c=g)}return u.write(o.indexOf(c),n),u.write(e,n),u.flush(),a.toByteArray()},h=function(){var r={},e=0,n={add:function(t){if(n.contains(t))throw"dup key:"+t;r[t]=e,e+=1},size:function(){return e},indexOf:function(t){return r[t]},contains:function(t){return void 0!==r[t]}};return n};return e}(t,r),o=0;o<r;o+=1)for(var i=0;i<t;i+=1)n.setPixel(i,o,e(i,o));var a=p();n.write(a);for(var u=function(){function e(t){a+=String.fromCharCode(r(63&t))}var n=0,o=0,i=0,a="",t={},r=function(t){if(t<0);else{if(t<26)return 65+t;if(t<52)return t-26+97;if(t<62)return t-52+48;if(62==t)return 43;if(63==t)return 47}throw"n:"+t};return t.writeByte=function(t){for(n=n<<8|255&t,o+=8,i+=1;6<=o;)e(n>>>o-6),o-=6},t.flush=function(){if(0<o&&(e(n<<6-o),o=n=0),i%3!=0)for(var t=3-i%3,r=0;r<t;r+=1)a+="="},t.toString=function(){return a},t}(),f=a.toByteArray(),c=0;c<f.length;c+=1)u.writeByte(f[c]);return u.flush(),"data:image/gif;base64,"+u};return i}();qrcode.stringToBytesFuncs["UTF-8"]=function(t){return function(t){for(var r=[],e=0;e<t.length;e++){var n=t.charCodeAt(e);n<128?r.push(n):n<2048?r.push(192|n>>6,128|63&n):n<55296||57344<=n?r.push(224|n>>12,128|n>>6&63,128|63&n):(e++,n=65536+((1023&n)<<10|1023&t.charCodeAt(e)),r.push(240|n>>18,128|n>>12&63,128|n>>6&63,128|63&n))}return r}(t)},function(t){"function"==typeof define&&define.amd?define([],t):"object"==typeof exports&&(module.exports=t())}(function(){return qrcode});"##;
 
-const LOGIN_HTML: &str = r##"
+/// The panel, the group admin page and the login page share one stylesheet (web_panel.css) and the brand's drawings.
+/// Each drawing is written once and put into its pages by concat!: every detector reads the version label out of the
+/// binary (`aria_label_once` in main.rs), and that label is the panel header's alone.
+macro_rules! icon_sprite {
+    () => {
+        r##"<!-- Icons: Lucide, https://lucide.dev, Copyright (c) Lucide Icons and Contributors, ISC License; some derived from Feather, Copyright (c) 2013-present Cole Bemis, MIT License --><svg width="0" height="0" style="position: absolute" aria-hidden="true"><symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></symbol><symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></symbol><symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></symbol><symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></symbol><symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></symbol><symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol><symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></symbol><symbol id="i-list" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M7 12h10"></path><path d="M10 18h4"></path></symbol><symbol id="i-qr" viewBox="0 0 24 24"><rect width="5" height="5" x="3" y="3" rx="1"></rect><rect width="5" height="5" x="16" y="3" rx="1"></rect><rect width="5" height="5" x="3" y="16" rx="1"></rect><path d="M21 16h-3a2 2 0 0 0-2 2v3"></path><path d="M21 21v.01"></path><path d="M12 7v3a2 2 0 0 1-2 2H7"></path><path d="M3 12h.01"></path><path d="M12 3h.01"></path><path d="M12 16v.01"></path><path d="M16 12h1"></path><path d="M21 12v.01"></path><path d="M12 21v-1"></path></symbol><symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></symbol><symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path></symbol><symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol><symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v4"></path><path d="M12 16h.01"></path></symbol><symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></symbol><symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"></path><path d="M18.4 6.6a9 9 0 1 1-12.77.04"></path></symbol><symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></symbol><symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></symbol><symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m7 10 5 5 5-5"></path><path d="M12 15V3"></path></symbol><symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></symbol><symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></symbol><symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"></rect><rect width="20" height="8" x="2" y="14" rx="2"></rect><path d="M6 6h.01"></path><path d="M6 18h.01"></path></symbol><symbol id="i-cpu" viewBox="0 0 24 24"><rect width="16" height="16" x="4" y="4" rx="2"></rect><rect width="6" height="6" x="9" y="9"></rect><path d="M15 2v2"></path><path d="M15 20v2"></path><path d="M2 15h2"></path><path d="M2 9h2"></path><path d="M20 15h2"></path><path d="M20 9h2"></path><path d="M9 2v2"></path><path d="M9 20v2"></path></symbol><symbol id="i-drive" viewBox="0 0 24 24"><path d="M22 12H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path><path d="M6 16h.01"></path><path d="M10 16h.01"></path></symbol><symbol id="i-updown" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4"></path><path d="M17 20V4"></path><path d="m3 8 4-4 4 4"></path><path d="M7 4v16"></path></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></symbol><symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"></path><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"></path><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"></path><path d="m2 2 20 20"></path></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9V3Z"></path></symbol><symbol id="i-stop" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect></symbol><symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></symbol><symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6"></path><path d="m8 6-6 6 6 6"></path></symbol><symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></symbol></svg>"##
+    };
+}
+macro_rules! brand_logo {
+    () => {
+        r##"<svg class="brand-logo" viewBox="0 0 760 184" role="img" aria-label="CSQTT">
+<defs>
+<linearGradient id="csqttLogoGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="68" y2="340">
+<stop offset="0" stop-color="#3DBFFD"></stop><stop offset="0.32" stop-color="#299BFD"></stop><stop offset="0.66" stop-color="#1475FD"></stop><stop offset="1" stop-color="#0450FC"></stop>
+</linearGradient>
+</defs>
+<path fill="url(#csqttLogoGradient)" fill-rule="evenodd" d="M79,11 L66,15 L48,25 L40,32 L27,49 L21,62 L17,78 L17,98 L19,108 L22,117 L33,136 L40,144 L56,156 L66,161 L84,166 L108,166 L118,164 L127,161 L143,152 L157,139 L160,135 L160,133 L137,116 L135,116 L123,128 L113,133 L106,135 L100,135 L99,136 L87,135 L73,130 L67,126 L57,116 L51,105 L48,93 L48,83 L51,71 L58,59 L67,50 L83,42 L105,41 L115,44 L129,53 L136,61 L160,44 L160,42 L155,35 L144,25 L135,19 L124,14 L108,10 Z M219,13 L208,18 L201,23 L191,35 L186,49 L186,66 L188,73 L193,82 L200,89 L208,94 L219,98 L248,103 L264,108 L270,113 L272,117 L272,125 L267,132 L260,136 L255,137 L234,137 L220,133 L212,129 L199,119 L181,141 L199,155 L212,161 L222,164 L232,165 L233,166 L257,166 L276,161 L285,156 L292,150 L298,142 L302,132 L303,112 L297,97 L287,87 L276,81 L258,76 L234,72 L224,68 L218,63 L216,58 L217,50 L222,44 L228,41 L237,39 L248,39 L258,41 L268,45 L279,53 L281,53 L299,32 L285,21 L270,14 L259,11 L233,10 Z M354,25 L344,34 L333,49 L328,60 L324,74 L324,79 L323,80 L324,103 L329,119 L336,132 L349,147 L360,155 L372,161 L391,166 L414,166 L430,162 L442,156 L460,174 L478,156 L462,140 L469,131 L474,122 L479,109 L481,99 L481,77 L479,68 L474,54 L466,41 L453,27 L441,19 L430,14 L414,10 L385,11 L372,15 Z M389,42 L411,41 L427,47 L442,61 L449,76 L450,96 L447,106 L444,112 L439,118 L421,100 L404,116 L405,119 L418,132 L416,134 L399,136 L385,133 L377,129 L363,116 L355,99 L354,83 L357,71 L361,63 L373,50 L379,46 Z M496,13 L496,44 L536,44 L537,45 L537,163 L568,163 L568,45 L569,44 L609,44 L610,43 L610,13 Z M628,13 L627,14 L627,37 L628,38 L627,43 L628,44 L666,44 L667,45 L667,163 L698,163 L699,162 L699,45 L700,44 L738,44 L738,13 Z"></path>
+</svg>"##
+    };
+}
+macro_rules! brand_version {
+    () => {
+        r##"<svg class="brand-version" viewBox="4 10 146 42" aria-hidden="true" fill="none" stroke="url(#brandVersionGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+<defs><linearGradient id="brandVersionGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="516" y2="64"><stop offset="0" stop-color="#45B7FF"></stop><stop offset="0.45" stop-color="#2087FF"></stop><stop offset="1" stop-color="#075BFF"></stop></linearGradient></defs>
+<path d="M8,24 L18,48 L28,24 M34,20 Q38,14 46,14 H50 Q58,14 58,22 Q58,28 52,33 L36,48 H58 M67,47 L67.8,47 M101,19 Q97,14 90,14 Q78,14 78,31 Q78,48 90,48 Q102,48 102,38 Q102,28 90,28 Q80,28 78,35 M110,47 L110.8,47 M134,14 Q122,14 122,31 Q122,48 134,48 Q146,48 146,31 Q146,14 134,14 Z"></path>
+</svg>"##
+    };
+}
+macro_rules! brand_by_art {
+    () => {
+        r##"<defs><linearGradient id="versionLogoGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="516" y2="64"><stop offset="0" stop-color="#45B7FF"></stop><stop offset="0.45" stop-color="#2087FF"></stop><stop offset="1" stop-color="#075BFF"></stop></linearGradient></defs>
+<path d="M158,12 V48 M158,31 Q163,24 170,24 Q180,24 180,36 Q180,48 170,48 Q163,48 158,41 M190,24 L200,47 M210,24 L200,47 L196,57 Q194,60 189,58 M250,30 Q246,24 239,24 Q228,24 228,36 Q228,48 239,48 Q246,48 250,42 M250,24 V48 M260,48 V24 M260,31 Q264,24 270,24 Q277,24 277,32 V48 M277,31 Q281,24 287,24 Q294,24 294,32 V48 M304,24 V39 Q304,48 314,48 Q324,48 324,39 V24 M334,48 V24 M334,32 Q338,24 348,24 M382,29 Q378,24 370,24 Q360,24 360,36 Q360,48 370,48 Q378,48 382,43 M414,30 Q410,24 403,24 Q392,24 392,36 Q392,48 403,48 Q410,48 414,42 M414,24 V48 M424,48 V24 M424,32 Q429,24 436,24 Q446,24 446,35 V48 M467,24 Q456,24 456,36 Q456,48 467,48 Q478,48 478,36 Q478,24 467,24 Z M488,24 L498,48 L508,24"></path>"##
+    };
+}
+
+const LOGIN_HTML: &str = concat!(
+    r##"
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -5739,60 +5792,36 @@ const LOGIN_HTML: &str = r##"
     <meta property="og:image" content="/pwa-icon.svg">
     <title>CSQTT — Вход</title>
     <style>
-        :root {
-            --bg-color: #f8fafc;
-            --surface: #ffffff;
-            --primary: #0077ff;
-            --text-main: #0f172a;
-            --text-muted: #64748b;
-            --error: #ef4444;
-            --border: #e2e8f0;
-            --glass: rgba(255, 255, 255, 0.9);
-        }
-
-        html { -webkit-text-size-adjust: none; text-size-adjust: none; }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
-        body { background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-
-        main {
-            z-index: 1; width: min(420px, calc(100% - 40px)); background: var(--glass);
-            backdrop-filter: blur(20px); border: 1px solid var(--border); border-radius: 24px;
-            padding: 48px 40px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.05);
-            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        @keyframes slideUp { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: translateY(0); } }
-
-        h1 { text-align: center; font-size: 28px; font-weight: 700; margin-bottom: 36px; color: var(--text-main); }
-
-        .input-group { margin-bottom: 20px; }
-        .input-group label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
-        .input-group input, .input-group select { width: 100%; height: 52px; background: #f8fafc; border: 1px solid var(--border); border-radius: 14px; padding: 0 16px; font-size: 15px; color: var(--text-main); outline: none; transition: all 0.2s; }
-        .input-group input:focus, .input-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(0, 119, 255, 0.1); }
-
-        button { width: 100%; height: 52px; background: var(--primary); color: white; border: none; border-radius: 14px; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; margin-top: 12px; box-shadow: 0 8px 16px rgba(0, 119, 255, 0.25); }
-        button:hover { transform: translateY(-2px); box-shadow: 0 12px 20px rgba(0, 119, 255, 0.35); }
-        button:active { transform: translateY(0); }
-
-        #e { min-height: 20px; color: var(--error); font-size: 14px; font-weight: 500; text-align: center; margin-top: 16px; opacity: 0; }
-    </style>
+"##,
+    include_str!("web_panel.css"),
+    r##"    </style>
 </head>
 <body>
-    <main>
-        <h1>Вход</h1>
-        <form id="f">
+    <main class="login">
+        <form id="f" class="card">
+            <div class="brand" aria-label="CSQTT">
+                "##,
+    brand_logo!(),
+    r##"
+                "##,
+    brand_version!(),
+    r##"
+            </div>
+            <span class="s">сборка SanityProtocol</span>
             <div class="input-group">
                 <label for="u">Пользователь</label>
-                <input id="u" required>
+                <input id="u" required autocomplete="username" autocapitalize="none" spellcheck="false">
             </div>
             <div class="input-group">
                 <label for="p">Пароль</label>
-                <input id="p" type="password" required>
+                <input id="p" type="password" required autocomplete="current-password">
             </div>
-            <button id="submitBtn" type="submit">Войти</button>
-            <div id="e"></div>
+            <div id="e" role="alert"></div>
+            <button id="submitBtn" class="btn btn-primary" type="submit">Войти</button>
         </form>
     </main>
     <script>
+        if (localStorage.getItem('csqtt-theme') === 'dark') { document.documentElement.setAttribute('data-theme', 'dark'); }
         const basePath = window.location.pathname.replace(/\/$/, '');
         if (basePath) {
             document.querySelectorAll('link[rel="manifest"], link[rel="icon"], link[rel="apple-touch-icon"]').forEach(el => {
@@ -5812,7 +5841,7 @@ const LOGIN_HTML: &str = r##"
             x.preventDefault();
             const btn = document.getElementById('submitBtn');
             const err = document.getElementById('e');
-            err.style.opacity = '0';
+            err.textContent = '';
             try {
                 let r = await fetch((basePath || '') + "/api/login", {
                     method: "POST",
@@ -5821,20 +5850,21 @@ const LOGIN_HTML: &str = r##"
                     body: JSON.stringify({user: caesarEncode(u.value), pass: caesarEncode(p.value)})
                 });
                 if (r.ok) {
-                    btn.innerHTML = 'Успешно!'; btn.style.background = '#0077ff';
+                    btn.textContent = 'Успешно!';
                     setTimeout(() => {
                         window.location.href = (basePath || '') + '/';
                     }, 150);
                 } else {
-                    err.textContent = r.status === 429 ? "Подождите 3 минуты." : "Неверный логин или пароль"; err.style.opacity = '1';
+                    err.textContent = r.status === 429 ? "Подождите 3 минуты." : "Неверный логин или пароль";
                 }
-            } catch (error) { err.textContent = "Ошибка сети"; err.style.opacity = '1'; }
+            } catch (error) { err.textContent = "Ошибка сети"; }
         };
     </script>
 </body>
 </html>
 
-"##;
+"##,
+);
 
 const CLIENT_SUB_HTML: &str = r##"<!DOCTYPE html>
 <html lang="ru" data-theme="dark">
@@ -6425,7 +6455,8 @@ const GROUP_SUB_HTML: &str = r##"<!DOCTYPE html>
 </html>
 "##;
 
-const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
+const GROUP_ADMIN_HTML: &str = concat!(
+    r##"<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
@@ -6439,671 +6470,192 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
     <title>CSQTT — Панель группы</title>
     <script src="/qrcode.min.js"></script>
     <style>
-        :root {
-            --bg-color: #f8fafc;
-            --surface: #ffffff;
-            --surface-hover: #f1f5f9;
-            --primary: #0077ff;
-            --primary-hover: #0060cc;
-            --text-main: #0f172a;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --danger: #ef4444;
-            --success: #10b981;
-            --icon-bg: rgba(0, 119, 255, 0.1);
-        }
-
-        [data-theme="dark"] {
-            --bg-color: #000000;
-            --surface: #0a0a0c;
-            --surface-hover: #161619;
-            --text-main: #f4f4f5;
-            --text-muted: #9ca3af;
-            --border: #1f1f23;
-            --danger: #ef4444;
-            --success: #10b981;
-            --icon-bg: rgba(0, 119, 255, 0.15);
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            padding: 24px 16px;
-            transition: background-color 0.3s ease, color 0.3s ease;
-        }
-        .main-card {
-            max-width: 760px;
-            width: 100%;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            padding: 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06);
-            align-self: flex-start;
-        }
-        .dlg-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .btn {
-            font-size: 13px;
-            padding: 0 16px;
-            height: 38px;
-            white-space: nowrap;
-            border-radius: 10px;
-            border: 1px solid var(--border);
-            cursor: pointer;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: all 0.2s;
-            box-sizing: border-box;
-        }
-        .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-        .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
-        .btn-ghost { background: var(--surface); color: var(--text-main); }
-        .btn-ghost:hover { background: var(--surface-hover); }
-        .btn-danger { color: #ef4444; border-color: rgba(239, 68, 68, 0.35); background: transparent; }
-        .btn-danger:hover { background: rgba(239, 68, 68, 0.1); }
-        .badge {
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px 8px;
-            border-radius: 6px;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-        }
-        .badge.active { background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25); }
-        .badge.inactive { background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.25); }
-        .badge.admin { background: var(--icon-bg); color: var(--primary); border: 1px solid rgba(0, 119, 255, 0.25); }
-        .group-dlg-actions {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 8px;
-        }
-        .group-act-btn {
-            height: 38px;
-            font-size: 13px;
-            border-radius: 10px;
-            padding: 0 16px;
-            box-sizing: border-box;
-            border: 1px solid var(--border);
-            white-space: nowrap;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 600;
-        }
-        .group-search-wrapper {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            flex: 1;
-            min-width: 170px;
-        }
-        input[type="text"].group-search-input, .group-search-input {
-            width: 100%;
-            height: 38px;
-            background: var(--surface-hover);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 0 32px 0 46px !important;
-            font-size: 13px;
-            color: var(--text-main);
-            outline: none;
-            box-sizing: border-box;
-            transition: all 0.2s;
-        }
-        .group-search-input:focus { border-color: var(--primary); }
-        .group-search-icon {
-            position: absolute;
-            left: 13px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: var(--text-muted);
-            pointer-events: none;
-        }
-        .stats-summary {
-            font-size: 13px;
-            color: var(--text-muted);
-            padding: 10px 14px;
-            background: var(--surface-hover);
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            font-weight: 500;
-        }
-        .client-cards-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 14px;
-            margin-top: 4px;
-        }
-        .client-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 16px;
-            cursor: pointer;
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            transition: all 0.2s ease;
-        }
-        .client-card:hover {
-            border-color: var(--primary);
-            transform: translateY(-2px);
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
-        }
-        .client-card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 10px;
-            min-height: 32px;
-        }
-        .client-card-title {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-weight: 700;
-            font-size: 14px;
-            color: var(--text-main);
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .client-card-body {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .client-card-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 12px;
-            color: var(--text-muted);
-        }
-        .client-card-label { color: var(--text-muted); }
-        .client-card-value { color: var(--text-main); font-weight: 500; }
-        .client-pw {
-            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-            color: var(--primary);
-            font-weight: 600;
-            background: var(--icon-bg);
-            padding: 2px 6px;
-            border-radius: 6px;
-        }
-        .client-sub-btn {
-            width: 100%;
-            margin-top: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            font-size: 12px;
-            padding: 7px 10px;
-            border: 1px solid var(--border) !important;
-            color: var(--text-main) !important;
-            background: transparent !important;
-            border-radius: 8px;
-            font-weight: 500;
-            transition: all 0.15s ease;
-            cursor: pointer;
-            box-sizing: border-box;
-        }
-        .client-sub-btn:hover {
-            background: var(--surface-hover) !important;
-            border-color: var(--primary) !important;
-            color: var(--primary) !important;
-        }
-        [data-theme="dark"] .client-sub-btn {
-            border-color: rgba(255, 255, 255, 0.25) !important;
-            color: #ffffff !important;
-        }
-        [data-theme="dark"] .client-sub-btn:hover {
-            border-color: var(--primary) !important;
-            color: var(--primary) !important;
-            background: rgba(255, 255, 255, 0.05) !important;
-        }
-        .hub-bulk-panel {
-            background: var(--surface-hover);
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 16px;
-            margin-bottom: 20px;
-        }
-        .hub-field-block {
-            display: flex;
-            flex-direction: column;
-            margin-bottom: 12px;
-        }
-        .hub-field-block:last-child {
-            margin-bottom: 0;
-        }
-        .hub-field-label {
-            display: block;
-            font-size: 11px;
-            font-weight: 700;
-            color: var(--text-muted);
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .hub-field-row {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        .hub-field-input {
-            flex: 1;
-            min-width: 0;
-            min-height: 38px;
-            height: 38px;
-            font-size: 13px;
-            padding: 0 12px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: var(--surface);
-            color: var(--text-main);
-            box-sizing: border-box;
-        }
-        .hub-field-actions {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            flex-shrink: 0;
-        }
-        .hub-btn-apply {
-            height: 38px;
-            font-size: 13px;
-            font-weight: 600;
-            min-width: 175px;
-            padding: 0 14px;
-            white-space: nowrap;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-        }
-        .hub-btn-clear {
-            height: 38px;
-            font-size: 13px;
-            font-weight: 600;
-            min-width: 135px;
-            padding: 0 12px;
-            white-space: nowrap;
-            color: #ef4444 !important;
-            border: 1px solid rgba(239, 68, 68, 0.35) !important;
-            background: transparent;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-            transition: all 0.15s ease;
-        }
-        .hub-btn-clear:hover {
-            background: rgba(239, 68, 68, 0.1) !important;
-            border-color: #ef4444 !important;
-            color: #dc2626 !important;
-        }
-        .hub-bulk-footer {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            align-items: center;
-            justify-content: space-between;
-            border-top: 1px solid var(--border);
-            padding-top: 12px;
-            margin-top: 14px;
-        }
-        input.hub-search-input, .hub-search-input {
-            width: 100%;
-            height: 36px;
-            padding: 0 32px 0 44px !important;
-            border-radius: 8px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            color: var(--text-main);
-            font-size: 13px;
-            outline: none;
-            box-sizing: border-box;
-            transition: all 0.2s;
-        }
-        .hub-search-input::placeholder {
-            color: var(--text-muted);
-            opacity: 0.8;
-        }
-        .hub-search-input:focus {
-            border-color: var(--primary);
-            background: var(--surface-hover);
-            box-shadow: 0 0 0 2px rgba(0, 119, 255, 0.15);
-        }
-        dialog {
-            background: var(--surface);
-            color: var(--text-main);
-            border: 1px solid var(--border);
-            border-radius: 18px;
-            padding: 20px;
-            margin: auto;
-            max-width: 500px;
-            width: min(500px, calc(100% - 24px));
-            outline: none;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.25);
-        }
-        dialog::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); }
-        .input-group {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            margin-bottom: 12px;
-        }
-        label { font-size: 12px; color: var(--text-muted); font-weight: 600; }
-        input[type="text"], input[type="number"], input:not([type]), input {
-            background: var(--surface-hover);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            height: 40px;
-            padding: 0 12px;
-            color: var(--text-main);
-            font-size: 14px;
-            outline: none;
-            transition: all 0.2s;
-            box-sizing: border-box;
-        }
-        input:focus { border-color: var(--primary); }
-        .dlg-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-            margin-top: 16px;
-        }
-        .toast {
-            position: fixed;
-            bottom: 24px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: var(--surface);
-            color: var(--text-main);
-            padding: 10px 18px;
-            border-radius: 10px;
-            font-size: 13px;
-            border: 1px solid var(--border);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-            z-index: 10000;
-            display: none;
-            font-weight: 500;
-        }
-        #qrCodeContainer {
-            background: #ffffff;
-            padding: 14px;
-            border-radius: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-            border: 1px solid var(--border);
-            width: 240px;
-            height: 240px;
-            max-width: 100%;
-            aspect-ratio: 1;
-            box-sizing: border-box;
-            overflow: hidden;
-            margin: 0 auto;
-        }
-        #qrCodeContainer svg {
-            width: 100% !important;
-            height: 100% !important;
-            max-width: 100% !important;
-            max-height: 100% !important;
-            display: block !important;
-        }
-        .show-mobile { display: none; }
-        .hide-mobile { display: inline-block; }
-        @media (max-width: 600px) {
-            body { padding: 12px 8px; }
-            .main-card { padding: 16px; border-radius: 16px; gap: 12px; }
-            .group-dlg-actions { flex-direction: column; align-items: stretch; gap: 8px; }
-            .group-act-btn { width: 100%; justify-content: center; }
-            .group-search-wrapper { width: 100%; min-width: 0; }
-            .client-cards-grid { grid-template-columns: 1fr; }
-            .show-mobile { display: inline-block !important; }
-            .hide-mobile { display: none !important; }
-            .hub-field-row {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 8px;
-            }
-            .hub-field-row .hub-field-input {
-                width: 100% !important;
-                height: 38px !important;
-                min-height: 38px !important;
-                flex: none !important;
-                box-sizing: border-box !important;
-            }
-            .hub-field-actions {
-                width: 100%;
-                display: flex;
-                gap: 8px;
-            }
-            .hub-btn-apply,
-            .hub-btn-clear {
-                flex: 1;
-                width: auto;
-                min-width: 0;
-                font-size: 12px;
-                padding: 0 8px;
-                height: 38px;
-                box-sizing: border-box;
-            }
-            .hub-field-row.hub-workers-row {
-                flex-direction: row;
-                align-items: center;
-                gap: 8px;
-            }
-            .hub-field-row.hub-workers-row .hub-workers-input {
-                width: 75px !important;
-                flex: 0 0 75px !important;
-                height: 38px !important;
-                min-height: 38px !important;
-                text-align: center;
-                box-sizing: border-box !important;
-            }
-            .hub-field-row.hub-workers-row .hub-field-actions {
-                flex: 1;
-                min-width: 0;
-            }
-            .hub-bulk-footer {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 10px;
-            }
-            .hub-search-container {
-                width: 100% !important;
-            }
-            .hub-search-input {
-                height: 38px;
-                font-size: 13px;
-            }
-        }
-    </style>
+"##,
+    include_str!("web_panel.css"),
+    r##"    </style>
 </head>
 <body>
-    <div class="main-card">
-        <div class="dlg-header">
-            <div style="display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0;">
-                <h2 id="groupDlgTitle" style="font-size: 22px; font-weight: 700; margin: 0; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Группа</h2>
-                <span class="badge admin">Админ</span>
+    "##,
+    icon_sprite!(),
+    r##"
+    <header>
+        <div class="header-container">
+            <div class="brand" aria-label="CSQTT">
+                "##,
+    brand_logo!(),
+    r##"
+                "##,
+    brand_version!(),
+    r##"
             </div>
-            <button class="btn btn-ghost" onclick="toggleTheme()" title="Сменить тему" style="width: 36px; height: 36px; padding: 0; border: 1px solid var(--border); border-radius: 10px;">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
-            </button>
-        </div>
-        <div id="statsSummary" class="stats-summary">Загрузка данных...</div>
-        <div class="group-dlg-actions">
-            <button class="btn btn-primary group-act-btn" onclick="openNewClientModal()">Создать пароль</button>
-            <button class="btn btn-ghost group-act-btn" onclick="openLinksAndTokensDlg()">Настройка ссылок</button>
-            <div class="group-search-wrapper">
-                <input type="text" id="groupSearchInput" class="group-search-input" placeholder="Поиск в группе..." oninput="handleSearch(this.value)" style="padding-left: 46px !important;">
-                <svg class="group-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <div class="header-actions">
+                <button class="ib sm" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему"><svg class="ic" aria-hidden="true"><use href="#i-moon"></use></svg></button>
+                <div class="version-badge">
+                    <svg class="version-logo" viewBox="152 0 362 64" aria-hidden="true" fill="none" stroke="url(#versionLogoGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+                        "##,
+    brand_by_art!(),
+    r##"
+                    </svg>
+                    <span class="version-build">сборка SanityProtocol</span>
+                </div>
             </div>
         </div>
-        <div id="groupClientsCards" class="client-cards-grid"></div>
-    </div>
+    </header>
 
-    <dialog id="newClientModal">
-        <div class="dlg-header" style="margin-bottom: 14px;">
-            <h3 style="font-size: 18px; margin: 0; font-weight: 700;">Создать пароль</h3>
-            <button class="btn btn-ghost" style="width: 32px; height: 32px; padding: 0; border: none; font-size: 16px;" onclick="document.getElementById('newClientModal').close()">✕</button>
+    <main class="narrow">
+        <div class="page">
+            <div class="wh">
+                <h1 id="groupDlgTitle">Группа</h1>
+                <span class="chip acc">админ</span>
+            </div>
+            <div id="statsSummary" class="stat">Загрузка данных...</div>
+            <div class="btns">
+                <button class="btn btn-primary grow" onclick="openNewClientModal()"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg>Создать доступ</button>
+                <button class="btn grow" onclick="openLinksAndTokensDlg()"><svg class="ic" aria-hidden="true"><use href="#i-link"></use></svg>Настройка ссылок</button>
+            </div>
+            <div class="search">
+                <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+                <input type="text" id="groupSearchInput" placeholder="Поиск в группе" aria-label="Поиск в группе" oninput="handleSearch(this.value)">
+            </div>
+            <div id="groupClientsCards" class="cells"></div>
+        </div>
+    </main>
+
+    <dialog id="newClientModal" class="sheet">
+        <div class="dlg-header">
+            <h2>Создание доступа</h2>
+            <button class="close-btn" onclick="document.getElementById('newClientModal').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
         <div class="input-group">
-            <label>Имя клиента</label>
-            <input type="text" id="newClientName" placeholder="Например: Клиент123">
+            <label for="newClientName">Имя клиента</label>
+            <input type="text" id="newClientName" placeholder="Например: Маша">
         </div>
         <div class="input-group">
-            <label>Срок действия (0 = Бессрочно, 1-365 Ручной лимит)</label>
+            <label for="newClientDays">Срок действия, дней</label>
             <input type="number" id="newClientDays" value="30" min="0" max="365">
+            <span class="hint">0 — бессрочно · до 365</span>
         </div>
+        <div class="hr"></div>
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('newClientModal').close()">Отмена</button>
-            <button class="btn btn-primary" onclick="submitNewClient()">Создать</button>
+            <button class="btn btn-primary btn-wide" onclick="submitNewClient()">Создать</button>
         </div>
     </dialog>
 
-    <dialog id="editClientModal">
-        <div class="dlg-header" style="margin-bottom: 14px;">
-            <h3 style="font-size: 18px; margin: 0; font-weight: 700;">Управление клиентом</h3>
-            <button class="btn btn-ghost" style="width: 32px; height: 32px; padding: 0; border: none; font-size: 16px;" onclick="document.getElementById('editClientModal').close()">✕</button>
+    <dialog id="editClientModal" class="sheet">
+        <div class="dlg-header">
+            <h2 id="editClientTitle">Доступ</h2>
+            <button class="close-btn" onclick="document.getElementById('editClientModal').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
         <div class="input-group">
-            <label>Имя клиента</label>
+            <label for="editName">Имя клиента</label>
             <input type="text" id="editName">
         </div>
         <div class="input-group">
-            <label>Пароль (ключ)</label>
-            <div style="display: flex; gap: 8px; align-items: center;">
-                <input type="text" id="editPass" readonly style="flex: 1; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--text-muted);">
-                <button class="btn btn-ghost" onclick="copyPasswordText()" style="width: 40px; height: 40px; padding: 0;" title="Копировать"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
-                <button class="btn btn-ghost" onclick="openQrModalForActiveClient()" style="width: 40px; height: 40px; padding: 0;" title="QR-код"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M7 7h.01M17 7h.01M7 17h.01M17 17h.01"></path></svg></button>
+            <label for="editPass">Пароль (ключ)</label>
+            <div class="field-row">
+                <input type="text" id="editPass" class="mono" readonly>
+                <button class="ib sm" type="button" onclick="copyPasswordText()" title="Копировать" aria-label="Копировать"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+                <button class="ib sm" type="button" onclick="openQrModalForActiveClient()" title="QR-код" aria-label="QR-код"><svg class="ic" aria-hidden="true"><use href="#i-qr"></use></svg></button>
             </div>
         </div>
         <div class="input-group">
-            <label>Срок действия (0 = Бессрочно, 1-365 Ручной лимит)</label>
+            <label for="editDays">Срок действия, дней</label>
             <input type="number" id="editDays" min="0" max="365">
+            <span class="hint" id="editDaysHint">0 — бессрочно · до 365</span>
         </div>
-        <div style="border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin: 12px 0; font-size: 13px; display: flex; flex-direction: column; gap: 8px; background: var(--surface-hover);">
-            <div style="display: flex; justify-content: space-between;"><span style="color: var(--text-muted);">IP-адрес:</span><span id="editIp">—</span></div>
-            <div style="display: flex; justify-content: space-between;"><span style="color: var(--text-muted);">Трафик:</span><span id="editTraffic" style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace;">↑ 0 B / ↓ 0 B</span></div>
+        <div class="facts">
+            <div><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg><span>IP <span id="editIp">—</span> · трафик <span id="editTraffic">↑ 0 B / ↓ 0 B</span></span></div>
         </div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-            <button class="btn btn-ghost" onclick="executeResetTraffic()" style="flex: 1; height: 38px;">Сбросить трафик</button>
-            <button class="btn btn-ghost" onclick="executeExtend30()" style="flex: 1; height: 38px;">Продлить +30 дн.</button>
-            <button class="btn btn-ghost" id="editToggleBtn" onclick="executeToggleClient()" style="flex: 1; height: 38px;">Отключить</button>
+        <div class="btns">
+            <button class="btn btn-sm" onclick="executeExtend30()"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>+30 дней</button>
+            <button class="btn btn-sm" onclick="executeResetTraffic()">Сбросить трафик</button>
+            <button class="btn btn-sm btn-tonal" id="editToggleBtn" onclick="executeToggleClient()">Выключить</button>
         </div>
-        <div class="dlg-actions" style="justify-content: space-between;">
-            <button class="btn btn-danger" onclick="executeDeleteClient()" style="height: 38px;">Удалить</button>
-            <button class="btn btn-primary" onclick="saveClientChanges()" style="height: 38px;">Сохранить</button>
+        <div class="hr"></div>
+        <div class="dlg-actions split">
+            <button class="btn btn-ghost danger" onclick="executeDeleteClient()">Удалить</button>
+            <span>
+                <button class="btn btn-ghost" onclick="document.getElementById('editClientModal').close()">Отмена</button>
+                <button class="btn btn-primary btn-wide" onclick="saveClientChanges()">Сохранить</button>
+            </span>
         </div>
     </dialog>
 
-    <dialog id="qrDlg" style="max-width: 440px; width: min(440px, calc(100% - 24px)); text-align: center;">
-        <div class="dlg-header" style="justify-content: space-between;">
-            <h3 id="qrDlgTitle" style="font-size: 18px; margin: 0; font-weight: 700;">QR-код клиента</h3>
-            <button class="btn btn-ghost" style="width: 32px; height: 32px; padding: 0; border: none; font-size: 16px;" onclick="document.getElementById('qrDlg').close()">✕</button>
-        </div>
-        <div style="display: flex; flex-direction: column; align-items: center; gap: 16px; margin: 16px 0;">
-            <div id="qrCodeContainer"></div>
-            <div style="width: 100%; display: flex; gap: 8px; align-items: center;">
-                <input type="text" id="qrDlgLink" readonly style="flex: 1; height: 40px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--text-muted);" onclick="this.select()">
-                <button class="btn btn-ghost" onclick="copyQrLink()" style="height: 40px; width: 44px; padding: 0;" title="Копировать"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
-            </div>
-        </div>
-        <button class="btn btn-primary" style="width: 100%; height: 40px;" onclick="document.getElementById('qrDlg').close()">Закрыть</button>
-    </dialog>
-
-    <dialog id="linksAndTokensDlg" style="max-width: 820px; width: min(820px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+    <dialog id="qrDlg" class="w440">
         <div class="dlg-header">
-            <h2 style="font-size: 20px; font-weight: 700; margin: 0;">Настройка ссылок</h2>
-            <button class="btn btn-ghost" style="width: 32px; height: 32px; padding: 0; border: none; font-size: 16px;" onclick="document.getElementById('linksAndTokensDlg').close()">✕</button>
+            <h2 id="qrDlgTitle">QR-код клиента</h2>
+            <button class="close-btn" onclick="document.getElementById('qrDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-
-        <!-- Top bulk settings panel -->
-        <div class="hub-bulk-panel">
-            <div class="hub-field-block">
-                <label class="hub-field-label">VK токен группы</label>
-                <div class="hub-field-row">
-                    <span class="hub-field-input" style="display:flex;align-items:center;color:var(--text-muted);font-size:13px;line-height:1.4;">VK-токен на сервере больше не хранится: клиенты в режиме «токен» получают VK хеши владельца (поле ниже).</span>
-                    <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Выдать хеши владельца</span><span class="show-mobile">Хеши владельца</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Выключить режим «токен»</span><span class="show-mobile">Выключить</span></button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="hub-field-block">
-                <label class="hub-field-label">VK хеши группы (через запятую)</label>
-                <div class="hub-field-row">
-                    <input id="hubVkHashesInput" class="hub-field-input" placeholder="hash1,hash2,...,hash6" onchange="autoSaveHubVkHashes()" onblur="autoSaveHubVkHashes()">
-                    <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkHashesDirect()"><span class="hide-mobile">Применить VK хеши</span><span class="show-mobile">Применить хеши</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-hashes')"><span class="hide-mobile">Очистить хеши</span><span class="show-mobile">Очистить</span></button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="hub-field-block">
-                <label class="hub-field-label">Установить число потоков (0 = Клиентские настройки, 3-99 Ручной лимит)</label>
-                <div class="hub-field-row hub-workers-row">
-                    <input type="number" id="hubWorkersInput" class="hub-field-input hub-workers-input" min="0" max="99" value="0" placeholder="0 (Клиентские)">
-                    <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubWorkersDirect()"><span class="hide-mobile">Установить число потоков</span><span class="show-mobile">Установить</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-workers')"><span class="hide-mobile">Сбросить число потоков</span><span class="show-mobile">Сбросить</span></button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="hub-bulk-footer">
-                <div style="display: flex; align-items: center; gap: 8px; font-size: 13px;">
-                    <input type="checkbox" id="hubSelectAll" onchange="toggleSelectAllHubClients(this.checked)" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary);">
-                    <label for="hubSelectAll" style="cursor: pointer; font-weight: 600;">Выбрать всех</label>
-                    <span id="hubSelectedCount" style="color: var(--text-muted); font-size: 12px;">(0 выбрано)</span>
-                </div>
-                <div class="hub-search-container" style="position: relative; width: 280px; max-width: 100%;">
-                    <input type="text" id="hubSearchInput" class="hub-search-input" placeholder="Клиент (группа)..." oninput="handleHubSearch(this.value)" style="padding-left: 44px !important; padding-right: 32px !important;">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                    <button id="hubSearchClearBtn" onclick="clearHubSearch()" style="display: none; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; align-items: center; justify-content: center;" title="Очистить">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                    </button>
-                </div>
+        <div id="qrCodeContainer"></div>
+        <div class="input-group">
+            <label for="qrDlgLink">Ссылка</label>
+            <div class="field-row">
+                <input type="text" id="qrDlgLink" class="mono" readonly onclick="this.select()">
+                <button class="ib sm" onclick="copyQrLink()" title="Копировать" aria-label="Копировать ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
             </div>
         </div>
-
-        <!-- Clients links list -->
-        <div id="hubClientsList" style="display: flex; flex-direction: column; gap: 10px;"></div>
+        <div class="dlg-actions">
+            <button class="btn btn-wide" onclick="document.getElementById('qrDlg').close()">Закрыть</button>
+        </div>
     </dialog>
 
-    <dialog id="batchConfirmDlg" style="max-width: 440px; width: min(440px, calc(100% - 24px));">
-        <h3 id="batchConfirmTitle" style="font-size: 18px; margin: 0 0 12px 0; font-weight: 700;">Подтверждение</h3>
-        <p id="batchConfirmMessage" style="font-size: 14px; color: var(--text-muted); line-height: 1.5; margin-bottom: 24px;"></p>
+    <dialog id="linksAndTokensDlg" class="w820">
+        <div class="dlg-header">
+            <h2>Настройка ссылок</h2>
+            <button class="close-btn" onclick="document.getElementById('linksAndTokensDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+        </div>
+        <div class="settings-grid">
+            <div class="card">
+                <h3>Хеши VK группы</h3>
+                <span class="s">Токен VK на сервере не хранится: клиенты в режиме «токен» получают хеши владельца.</span>
+                <div class="btns">
+                    <button class="btn btn-sm" onclick="applyHubVkTokenDirect()">Хеши владельца</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-token')">Выключить «токен»</button>
+                </div>
+                <div class="input-group">
+                    <label for="hubVkHashesInput">Хеши VK группы (через запятую)</label>
+                    <input id="hubVkHashesInput" placeholder="hash1,hash2,...,hash6" onchange="autoSaveHubVkHashes()" onblur="autoSaveHubVkHashes()">
+                </div>
+                <div class="btns">
+                    <button class="btn btn-tonal btn-sm" onclick="applyHubVkHashesDirect()">Применить</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-hashes')">Очистить</button>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Потоки для выбранных</h3>
+                <div class="input-group">
+                    <label for="hubWorkersInput">Потоки</label>
+                    <select id="hubWorkersInput" class="workers-select"></select>
+                    <span class="hint">клиент может взять меньше · 3–100</span>
+                </div>
+                <div class="btns">
+                    <button class="btn btn-tonal btn-sm" onclick="applyHubWorkersDirect()">Установить</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-workers')">Сбросить</button>
+                </div>
+            </div>
+        </div>
+        <div class="wbar">
+            <label class="btns" for="hubSelectAll">
+                <input type="checkbox" id="hubSelectAll" onchange="toggleSelectAllHubClients(this.checked)">
+                <span class="t">Выбрать всех</span>
+                <span class="s" id="hubSelectedCount">(0 выбрано)</span>
+            </label>
+            <div class="search">
+                <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+                <input type="text" id="hubSearchInput" placeholder="Клиент" aria-label="Клиент" oninput="handleHubSearch(this.value)">
+                <button class="ib sm" id="hubSearchClearBtn" onclick="clearHubSearch()" style="display: none;" title="Очистить" aria-label="Очистить"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+        </div>
+        <div id="hubClientsList" class="cells"></div>
+    </dialog>
+
+    <dialog id="batchConfirmDlg" class="w440">
+        <h2 id="batchConfirmTitle">Подтверждение</h2>
+        <p id="batchConfirmMessage"></p>
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('batchConfirmDlg').close()">Отмена</button>
-            <button class="btn btn-primary" id="batchConfirmSubmitBtn">Применить</button>
+            <button class="btn btn-primary btn-wide" id="batchConfirmSubmitBtn">Применить</button>
         </div>
     </dialog>
 
@@ -7125,6 +6677,19 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 
         function esc(s) {
             return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+        }
+
+        const ic = name => `<svg class="ic" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+        // «Потоки»: no limit first, then 3–100; the value 0 is what the server reads as no limit
+        document.querySelectorAll('select.workers-select').forEach(select => {
+            select.innerHTML = '<option value="0">Без ограничения</option>'
+                + Array.from({ length: 98 }, (_, i) => `<option value="${i + 3}">${i + 3}</option>`).join('');
+        });
+        const shortDate = seconds => new Date(seconds * 1000)
+            .toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }).replace(/\.| г\./g, '');
+        function termText(x) {
+            if (!x.expires) return 'бессрочно';
+            return (x.expires * 1000 <= Date.now() ? 'истёк ' : 'до ') + shortDate(x.expires);
         }
 
         function size(b) {
@@ -7165,7 +6730,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         function showToast(msg, isError) {
             const t = document.getElementById('toast');
             t.textContent = msg;
-            t.style.borderColor = isError ? 'var(--danger)' : 'var(--border)';
+            t.style.borderColor = isError ? 'var(--danger)' : 'transparent';
             t.style.display = 'block';
             setTimeout(() => { t.style.display = 'none'; }, 2500);
         }
@@ -7216,7 +6781,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                 sumDown += (c.down || 0);
                 sumSessions += (c.active_sessions || 0);
             }
-            document.getElementById('statsSummary').textContent = `Участники: ${clients.length} · Трафик: ↑ ${size(sumUp)} / ↓ ${size(sumDown)} · Потоки: ${sumSessions}`;
+            document.getElementById('statsSummary').innerHTML = `<span>Участники: <b>${clients.length}</b></span><span>Трафик: <b>↑ ${size(sumUp)} · ↓ ${size(sumDown)}</b></span><span>Потоки: <b>${sumSessions}</b></span>`;
             renderCards(clients);
         }
 
@@ -7225,45 +6790,22 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             const filtered = query ? clients.filter(c => (c.name || '').toLowerCase().includes(query) || c.password.toLowerCase().includes(query)) : clients;
             const container = document.getElementById('groupClientsCards');
             if (filtered.length === 0) {
-                container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 32px; color: var(--text-muted); font-size: 14px;">' + (query ? 'Ничего не найдено' : 'В группе пока нет клиентов. Нажмите «Создать пароль».') + '</div>';
+                container.innerHTML = '<div class="empty-state">' + (query ? 'Ничего не найдено' : 'В группе пока нет клиентов. Нажмите «Создать доступ», чтобы добавить.') + '</div>';
                 return;
             }
             container.innerHTML = filtered.map(c => {
-                const expiryStr = c.expires ? new Date(c.expires * 1000).toLocaleDateString() : '∞ Бессрочно';
+                const expired = !c.is_deactivated && !c.active;
+                const line = c.active
+                    ? `${esc(c.ip || '—')} · ${termText(c)} · ↑ ${size(c.up)} / ↓ ${size(c.down)} · потоки ${c.active_sessions || 0}`
+                    : `${expired ? 'срок истёк' : 'выключен'} · ${termText(c)}`;
+                const chip = c.active ? '<span class="chip sm ok"><span class="dot"></span>активен</span>'
+                    : expired ? '<span class="chip sm warn">срок истёк</span>' : '<span class="chip sm">выключен</span>';
                 return `
-                <div class="client-card" onclick="openEditModal('${esc(c.password)}')">
-                    <div class="client-card-header">
-                        <div class="client-card-title">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0;"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                            <span>${esc(c.name || 'Клиент')}</span>
-                        </div>
-                        <span class="badge ${c.active ? 'active' : 'inactive'}">${c.active ? 'Участник' : 'Неактивно'}</span>
-                    </div>
-                    <div class="client-card-body">
-                        <div class="client-card-row">
-                            <span class="client-card-label">IP:</span>
-                            <span class="client-card-value">${esc(c.ip || '—')}</span>
-                        </div>
-                        <div class="client-card-row">
-                            <span class="client-card-label">Срок действия:</span>
-                            <span class="client-card-value">${expiryStr}</span>
-                        </div>
-                        <div class="client-card-row">
-                            <span class="client-card-label">Трафик:</span>
-                            <span class="client-card-value" style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace;">↑ ${size(c.up)} / ↓ ${size(c.down)}</span>
-                        </div>
-                        <div class="client-card-row">
-                            <span class="client-card-label">Потоки:</span>
-                            <span class="client-card-value">${c.active_sessions || 0}</span>
-                        </div>
-                        ${c.sub_uuid ? `
-                        <button class="btn btn-ghost client-sub-btn" onclick="event.stopPropagation(); copyClientSubLink('${c.sub_uuid}', this)" title="Скопировать ссылку подписки">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                            <span>Скопировать ссылку подписки</span>
-                        </button>
-                        ` : ''}
-                    </div>
-                </div>`;
+                <button type="button" class="cell" onclick="openEditModal('${esc(c.password)}')">
+                    <span class="grow"><span class="t">${esc(c.name || 'Клиент')}</span><span class="s">${line}</span></span>
+                    ${chip}
+                    ${ic('chevron-right')}
+                </button>`;
             }).join('');
         }
 
@@ -7293,12 +6835,12 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                     body: JSON.stringify({ name, days, workers })
                 });
                 if (r.ok) {
-                    showToast('Пароль создан');
+                    showToast('Ключ создан');
                     document.getElementById('newClientModal').close();
                     await loadData();
                 } else {
                     const msg = await r.text().catch(() => '');
-                    showToast(msg || 'Ошибка создания пароля', true);
+                    showToast(msg || 'Не удалось создать ключ', true);
                 }
             } catch (e) {
                 showToast('Ошибка сети', true);
@@ -7309,6 +6851,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             const c = (currentData?.clients || []).find(x => x.password === password);
             if (!c) return;
             activeClient = c;
+            document.getElementById('editClientTitle').textContent = `Доступ «${c.name || 'Клиент'}»`;
             document.getElementById('editName').value = c.name || '';
             document.getElementById('editPass').value = c.password;
             let remainingDays = 0;
@@ -7316,11 +6859,11 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                 remainingDays = Math.max(0, Math.ceil((c.expires * 1000 - Date.now()) / 86400000));
             }
             document.getElementById('editDays').value = c.expires ? remainingDays : 0;
+            document.getElementById('editDaysHint').textContent = (c.expires ? termText(c) + ' · ' : '') + '0 — бессрочно · до 365';
             document.getElementById('editIp').textContent = c.ip || '—';
             document.getElementById('editTraffic').textContent = `↑ ${size(c.up)} / ↓ ${size(c.down)}`;
             const toggleBtn = document.getElementById('editToggleBtn');
-            toggleBtn.textContent = c.is_deactivated ? 'Включить' : 'Отключить';
-            toggleBtn.style.color = c.is_deactivated ? '#10b981' : '#ef4444';
+            toggleBtn.textContent = c.is_deactivated ? 'Включить' : 'Выключить';
             document.getElementById('editClientModal').showModal();
         }
 
@@ -7426,7 +6969,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                 qr.make();
                 return qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
             } catch (e) {
-                return '<div style="color: #ef4444; padding: 16px;">Ошибка генерации QR</div>';
+                return '<div style="color: var(--danger); padding: 16px;">Ошибка генерации QR</div>';
             }
         }
 
@@ -7449,7 +6992,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             const url = window.location.origin + '/' + subUuid + '/sub';
             if (await copyToClipboard(url)) {
                 if (btn) {
-                    btn.style.color = '#10b981';
+                    btn.style.color = 'var(--ok)';
                     setTimeout(() => { btn.style.color = ''; }, 1500);
                 }
                 showToast("Ссылка подписки скопирована");
@@ -7534,8 +7077,8 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         async function applyHubWorkersDirect() {
             const input = document.getElementById('hubWorkersInput');
             const w = parseInt(input ? input.value : '0', 10);
-            if (isNaN(w) || w < 0 || (w > 0 && w < 3) || w > 99) {
-                showToast("Число потоков должно быть 0 (клиентские) или от 3 до 99", true);
+            if (isNaN(w) || w < 0 || (w > 0 && w < 3) || w > 100) {
+                showToast("Число потоков должно быть 0 или от 3 до 100", true);
                 return;
             }
             promptBatchAction('workers');
@@ -7662,39 +7205,23 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             container.innerHTML = displayClients.map(item => {
                 const c = item.client;
                 const link = c.link || '';
-                let badge = '';
                 const hashes = String(c.vk_hashes || '').trim();
-                if (c.vk_token) {
-                    badge = '<span class="badge active" style="font-size: 11px;">VK Токен</span>';
-                } else if (hashes) {
-                    badge = '<span class="badge active" style="font-size: 11px;">VK Хеши</span>';
-                } else {
-                    badge = '<span class="badge inactive" style="font-size: 11px;">Прямой</span>';
-                }
+                let chips = `<span class="chip sm">${c.vk_token ? 'хеши владельца' : hashes ? 'свои хеши' : 'без хешей'}</span>`;
                 if (c.workers && c.workers >= 3) {
-                    badge += ` <span class="badge active" style="font-size: 11px;">Потоки: ${c.workers}</span>`;
+                    chips += `<span class="chip sm">потоки ${c.workers}</span>`;
                 }
                 const isChecked = hubSelectedPasswords.has(c.password);
-                const displayName = `${c.name || 'Клиент'} (${groupName})`;
 
                 return `
-                <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <input type="checkbox" class="hub-client-cb" value="${esc(c.password)}" ${isChecked ? 'checked' : ''} onchange="handleHubClientCbChange(this)" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary);">
-                            <span style="font-weight: 600; font-size: 14px; color: var(--text-main);">${esc(displayName)}</span>
-                            ${badge}
-                        </div>
-                    </div>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <input readonly value="${esc(link)}" style="flex: 1; height: 40px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; padding: 0 10px; background: var(--surface-hover); color: var(--text-muted); border-radius: 8px;" onclick="this.select()">
-                        <button class="btn btn-ghost" style="height: 40px; width: 44px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px;" onclick="copyHubClientLink('${esc(c.password)}', this)" title="Копировать ссылку">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary);"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                        </button>
-                        <button class="btn btn-ghost" style="height: 40px; width: 44px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px;" onclick="openQrModalForClient('${esc(c.password)}')" title="QR-код">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary);"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M7 7h.01M17 7h.01M7 17h.01M17 17h.01"></path></svg>
-                        </button>
-                    </div>
+                <div class="cell wrap-tags hub-row">
+                    <input type="checkbox" class="hub-client-cb" value="${esc(c.password)}" ${isChecked ? 'checked' : ''} onchange="handleHubClientCbChange(this)" aria-label="${esc(c.name || 'Клиент')}">
+                    <span class="grow">
+                        <span class="t">${esc(c.name || 'Клиент')}</span>
+                        <span class="s mono ell">${esc(link)}</span>
+                    </span>
+                    <span class="tags">${chips}</span>
+                    <button class="ib sm" onclick="copyHubClientLink('${esc(c.password)}', this)" title="Копировать ссылку" aria-label="Копировать ссылку">${ic('copy')}</button>
+                    <button class="ib sm" onclick="openQrModalForClient('${esc(c.password)}')" title="QR-код" aria-label="QR-код">${ic('qr')}</button>
                 </div>
                 `;
             }).join('');
@@ -7744,7 +7271,7 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                 showToast("Ссылка скопирована");
                 if (btn) {
                     const orig = btn.innerHTML;
-                    btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+                    btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color: var(--ok);" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
                     setTimeout(() => { btn.innerHTML = orig; }, 1500);
                 }
             } else {
@@ -7818,12 +7345,12 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                     return;
                 }
                 titleEl.textContent = "Установить число потоков";
-                msgEl.textContent = `Установить число потоков (${w === 0 ? 'Клиентские настройки (0)' : w}) для выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = `Установить потоки (${w === 0 ? 'без ограничения' : w}) для выбранных клиентов (${count} шт.)?`;
                 submitBtn.textContent = "Установить число потоков";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-workers') {
                 titleEl.textContent = "Сбросить число потоков";
-                msgEl.textContent = `Сбросить число потоков до клиентских настроек (0) для выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = `Снять ограничение потоков у выбранных клиентов (${count} шт.)?`;
                 submitBtn.textContent = "Сбросить число потоков";
                 submitBtn.className = "btn btn-danger";
             } else if (action === 'clear') {
@@ -7917,9 +7444,11 @@ const GROUP_ADMIN_HTML: &str = r##"<!DOCTYPE html>
     </script>
 </body>
 </html>
-"##;
+"##,
+);
 
-const PANEL_HTML: &str = r##"
+const PANEL_HTML: &str = concat!(
+    r##"
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -7939,1394 +7468,176 @@ const PANEL_HTML: &str = r##"
     <title>CSQTT</title>
     <script src="/qrcode.min.js"></script>
     <style>
-        :root {
-            --bg-color: #f8fafc;
-            --surface: #ffffff;
-            --surface-hover: #f1f5f9;
-            --primary: #0077ff;
-            --primary-hover: #0060cc;
-            --text-main: #0f172a;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --glass: rgba(255, 255, 255, 0.9);
-            --icon-bg: rgba(0, 119, 255, 0.1);
-            --header-glass: rgba(255, 255, 255, 0.8);
-        }
-
-        [data-theme="dark"] {
-            --bg-color: #000000;
-            --surface: #0a0a0c;
-            --surface-hover: #161619;
-            --text-main: #f4f4f5;
-            --text-muted: #9ca3af;
-            --border: #1f1f23;
-            --glass: rgba(10, 10, 12, 0.85);
-            --header-glass: rgba(0, 0, 0, 0.8);
-            --icon-bg: rgba(0, 119, 255, 0.15);
-        }
-
-        html { -webkit-text-size-adjust: none; text-size-adjust: none; }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
-        body { background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; flex-direction: column; overflow-x: hidden; width: 100%; }
-
-        body, header, .header-container, .brand, .brand-logo, .brand-version, .version-logo, .support-card, .header-actions, .btn, main, .glass-panel,
-        .stat-card, .stat-icon, .stat-value, .stat-sub, .progress-bar, .progress-fill,
-        .section-header, .section-title, .table-wrapper, table, th, td, tr,
-        .client-name, .client-pw, .client-hash, .traffic-flex, .badge, .actions,
-        .settings-grid, .setting-card, .input-group, .input-group input, .input-group select,
-        .toggle-row, .switch, .slider, dialog, .dlg-row, .dlg-actions,
-        svg, path, rect, line, polyline, circle, .tab-btn {
-            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, fill 0.3s ease, stroke 0.3s ease, box-shadow 0.3s ease;
-        }
-
-        .glass-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
-
-        header { position: sticky; top: 0; z-index: 40; height: 72px; background: var(--header-glass); backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); width: 100%; }
-        .header-container { max-width: 1300px; width: 100%; margin: 0 auto; padding: 0 24px; height: 100%; display: flex; align-items: center; justify-content: space-between; }
-        .brand { display: flex; align-items: flex-end; gap: 10px; flex: 0 1 auto; min-width: 0; }
-        .brand-logo { display: block; width: 165px; height: auto; flex: 0 1 auto; min-width: 0; }
-        .brand-version { display: block; width: 86px; height: auto; margin-bottom: 3.3px; flex: 0 1 auto; min-width: 0; }
-        .version-badge { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: 0 1 auto; min-width: 0; }
-        .version-logo { display: block; width: 168px; height: auto; flex: 0 1 auto; }
-        .version-build { font-size: 10px; line-height: 1; letter-spacing: 0.02em; color: var(--text-muted); white-space: nowrap; }
-        .crypto-button {
-            display: inline-flex; align-items: center; justify-content: center; width: 100%;
-            height: 48px; min-height: 48px; padding: 0 16px; border: 0; border-radius: 12px;
-            background: #1e293b; box-shadow: 0 4px 12px rgba(30, 41, 59, 0.38); text-decoration: none; cursor: pointer;
-        }
-        .crypto-button:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(30, 41, 59, 0.48); }
-        .crypto-button:active { transform: scale(0.96); }
-        .crypto-button:focus-visible { outline: 2px solid #38bdf8; outline-offset: 3px; }
-        .crypto-logo { display: block; width: 120px; height: auto; }
-        .telegram-button {
-            display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
-            height: 48px; min-height: 48px; padding: 0 16px; border: 0; border-radius: 12px;
-            background: #24a1de; box-shadow: 0 4px 12px rgba(36, 161, 222, 0.32); text-decoration: none;
-            color: #ffffff; font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.2s;
-        }
-        .telegram-button:hover { background: #1f94cd; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(36, 161, 222, 0.44); color: #ffffff; }
-        .telegram-button:active { transform: scale(0.96); }
-        .telegram-button:focus-visible { outline: 2px solid #24a1de; outline-offset: 3px; }
-        .tg-plane-icon { display: block; width: 22px; height: 22px; flex-shrink: 0; }
-
-        .header-actions { display: flex; gap: 16px; align-items: center; }
-
-        .restart-required-banner { display: none; width: 100%; padding: 11px 20px; background: #b91c1c; color: #fff; text-align: center; font-size: 13px; font-weight: 700; box-shadow: 0 8px 20px rgba(185, 28, 28, 0.24); transform: translateY(-100%); opacity: 0; }
-        .restart-required-banner.visible { display: block; animation: restartBannerIn 0.32s ease-out forwards; }
-        @keyframes restartBannerIn { to { transform: translateY(0); opacity: 1; } }
-
-        .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; border-radius: 12px; border: none; cursor: pointer; transition: all 0.2s; outline: none; }
-        .btn:active { transform: scale(0.96); }
-        .btn-primary { background: var(--primary); color: #fff; box-shadow: 0 4px 12px rgba(0, 119, 255, 0.25); }
-        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0, 119, 255, 0.35); }
-        .btn:disabled { cursor: not-allowed; opacity: 0.42; transform: none !important; box-shadow: none; }
-        .btn.save-success { background: #10b981; opacity: 1; }
-        .btn-ghost { background: transparent; color: var(--text-muted); }
-        .btn-ghost:hover { background: var(--surface-hover); color: var(--text-main); }
-        .btn-icon { padding: 8px; border-radius: 10px; }
-        .btn-api {
-            background: transparent;
-            color: var(--text-muted);
-            border: none;
-            border-radius: 8px;
-            padding: 6px 10px;
-            height: 36px;
-            font-size: 14px;
-            font-weight: 500;
-            gap: 6px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            transition: all 0.2s ease;
-        }
-        .btn-api:hover {
-            background: var(--surface-hover);
-            color: var(--text-main);
-            transform: translateY(-1px);
-        }
-        .btn-api:active {
-            transform: scale(0.96);
-        }
-        .btn-api svg {
-            color: var(--primary);
-        }
-
-        .api-card {
-            background: var(--bg-color);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            overflow: hidden;
-            transition: border-color 0.2s;
-        }
-        .api-card:hover { border-color: var(--primary); }
-        .api-card-header {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 10px 14px;
-            background: var(--surface-hover);
-            border-bottom: 1px solid var(--border);
-            font-size: 13px;
-            flex-wrap: wrap;
-        }
-        .api-method {
-            font-size: 11px;
-            font-weight: 700;
-            padding: 3px 7px;
-            border-radius: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }
-        .api-method.get { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .api-method.post { background: rgba(0, 119, 255, 0.15); color: var(--primary); border: 1px solid rgba(0, 119, 255, 0.3); }
-        .api-method.put { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .api-method.delete { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .api-path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; color: var(--text-main); }
-        .api-desc { color: var(--text-muted); font-size: 12px; margin-left: auto; }
-        .api-card-body { padding: 12px 14px; }
-        .api-code-label { font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
-        .api-code-block {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 10px;
-            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-            font-size: 12px;
-            line-height: 1.5;
-            color: var(--text-main);
-            overflow-x: auto;
-            margin: 0;
-        }
-
-        .api-tabs-nav {
-            display: flex;
-            gap: 6px;
-            margin-bottom: 20px;
-            overflow-x: auto;
-            padding-bottom: 6px;
-            border-bottom: 1px solid var(--border);
-            scrollbar-width: none;
-        }
-        .api-tabs-nav::-webkit-scrollbar { display: none; }
-        .api-tab-btn {
-            padding: 8px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            white-space: nowrap;
-            border-radius: 10px;
-            border: 1px solid transparent;
-            cursor: pointer;
-            background: transparent;
-            color: var(--text-muted);
-            transition: all 0.2s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .api-tab-btn:hover {
-            color: var(--text-main);
-            background: var(--surface-hover);
-        }
-        .api-tab-btn.active {
-            background: var(--primary);
-            color: #ffffff;
-            box-shadow: 0 4px 12px rgba(0, 119, 255, 0.25);
-        }
-        .api-curl-copy-btn {
-            padding: 3px 8px;
-            font-size: 11px;
-            height: 24px;
-            border-radius: 6px;
-            background: var(--surface-hover);
-            color: var(--text-muted);
-            border: 1px solid var(--border);
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .api-curl-copy-btn:hover {
-            color: var(--text-main);
-            border-color: var(--primary);
-        }
-
-        main { max-width: 1300px; width: 100%; margin: 0 auto; padding: 32px 24px 80px; display: flex; flex-direction: column; gap: 32px; }
-
-        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; }
-        .stat-card { padding: 24px; display: flex; flex-direction: column; gap: 12px; position: relative; overflow: hidden; }
-        .stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--primary); opacity: 0.8; }
-        .stat-header { display: flex; align-items: center; justify-content: space-between; }
-        .stat-icon { width: 40px; height: 40px; border-radius: 12px; background: var(--icon-bg); color: var(--primary); display: grid; place-items: center; }
-        .stat-icon svg { width: 20px; height: 20px; fill: currentColor; stroke: currentColor; }
-        .stat-label { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        .stat-value { font-size: 28px; font-weight: 700; color: var(--text-main); line-height: 1.1; }
-        #ram_val { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-        #ram_detail { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-        #traffic_ingress { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-        .stat-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
-        .progress-bar { width: 100%; height: 6px; background: var(--surface-hover); border-radius: 3px; margin-top: 8px; overflow: hidden; }
-        .progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width 0.5s ease-out; }
-
-        .tabs-container { display: flex; justify-content: center; margin-bottom: 8px; }
-        .tabs { display: inline-flex; background: var(--surface); border: 1px solid var(--border); padding: 4px; border-radius: 14px; gap: 4px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
-        .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 20px; font-size: 14px; font-weight: 600; border-radius: 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; outline: none; white-space: nowrap; }
-        .tab-btn:hover { color: var(--text-main); }
-        .tab-btn.active { background: var(--primary); color: #ffffff; box-shadow: 0 4px 12px rgba(0, 119, 255, 0.2); }
-
-        .section-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 16px; }
-        .clients-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-        .clients-tb-links-btn { color: var(--primary); border: 1px solid rgba(0, 119, 255, 0.4); white-space: nowrap; flex-shrink: 0; order: 1; }
-        .panel-search-wrapper { flex: 1 1 240px; max-width: 440px; min-width: 180px; position: relative; order: 2; }
-        .panel-search-input { width: 100%; height: 38px; padding: 0 32px 0 34px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); color: var(--text-main); font-size: 13px; outline: none; transition: border-color 0.2s, background 0.2s, box-shadow 0.2s; }
-        .panel-search-input::placeholder { color: var(--text-muted); opacity: 0.8; }
-        .panel-search-input:focus { border-color: var(--primary); background: var(--surface-hover); box-shadow: 0 0 0 2px rgba(0, 119, 255, 0.15); }
-        .clients-tb-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; order: 3; }
-        .group-dlg-actions { display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: nowrap; margin-bottom: 12px; }
-        .group-act-btn { height: 36px; font-size: 13px; border-radius: 8px; padding: 0 14px; box-sizing: border-box; white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; flex-shrink: 0; }
-        .group-admin-row { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
-        #groupAdminLinkBtn {
-            background: transparent !important;
-            color: var(--primary) !important;
-            border: 1.5px solid var(--primary) !important;
-            box-shadow: none !important;
-        }
-        #groupAdminLinkBtn:hover {
-            background: var(--icon-bg) !important;
-        }
-        .group-delete-btn {
-            background: transparent !important;
-            color: #ef4444 !important;
-            border: 1.5px solid #ef4444 !important;
-            box-shadow: none !important;
-        }
-        .group-delete-btn:hover {
-            background: rgba(239, 68, 68, 0.1) !important;
-        }
-        .group-regen-btn { width: 36px; min-width: 36px; height: 36px; padding: 0 !important; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; box-sizing: border-box; }
-        .group-search-wrapper { position: relative; display: inline-flex; align-items: center; flex: 1 1 auto; min-width: 140px; }
-        .group-search-input { width: 100%; height: 36px; padding: 0 28px 0 38px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); color: var(--text-main); font-size: 13px; outline: none; box-sizing: border-box; transition: all 0.2s; }
-        .group-search-input::placeholder { color: var(--text-muted); opacity: 0.8; }
-        .group-search-input:focus { border-color: var(--primary); background: var(--surface-hover); box-shadow: 0 0 0 2px rgba(0, 119, 255, 0.15); }
-        .group-search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
-        .section-title { font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 10px; color: var(--text-main); }
-        .section-title svg { stroke: var(--primary); }
-
-        .table-wrapper { overflow-x: auto; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); }
-        table { width: 100%; border-collapse: collapse; min-width: 900px; }
-        th { text-align: left; padding: 16px 20px; font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border); background: var(--bg-color); transition: background 0.3s; }
-        td { padding: 16px 20px; border-bottom: 1px solid var(--border); vertical-align: middle; transition: background 0.2s, border-color 0.3s; }
-        tr:last-child td { border-bottom: none; }
-        tr:hover td { background: var(--surface-hover); }
-
-        .client-name { font-weight: 600; font-size: 15px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;}
-        .client-pw { font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; font-size: 12px; color: var(--primary); background: var(--icon-bg); padding: 2px 6px; border-radius: 4px; }
-        .client-hash { font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; font-size: 12px; color: var(--text-muted); max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
-
-        .traffic-flex { display: flex; flex-direction: column; gap: 4px; font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; font-size: 13px; }
-        .t-up { color: var(--primary); } .t-down { color: var(--primary); }
-
-        .badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-        .badge::before { content: ''; display: block; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
-        .badge.active { background: var(--icon-bg); color: var(--primary); border: 1px solid var(--primary); }
-        .badge.inactive { background: var(--surface-hover); color: var(--text-muted); border: 1px solid var(--border); }
-        .badge.inactive::before { background: var(--text-muted); }
-
-        .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-        .empty-state { text-align: center; padding: 64px 20px; color: var(--text-muted); }
-
-        .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-        @media (max-width: 1024px) { .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-        @media (max-width: 600px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
-        .setting-card { padding: 24px; }
-        .dns-selection { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
-        .dns-selection.is-custom { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); }
-        .dns-selection .dns-manual-input { display: none; }
-        .dns-selection.is-custom .dns-manual-input { display: block; }
-        .settings-actions-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
-        .settings-action-btn {
-            width: 100%; min-width: 0; padding: 10px 8px; border: 0; background: transparent;
-            color: var(--text-main); font-size: 14px; font-weight: 600; cursor: pointer; border-radius: 8px;
-        }
-        .settings-action-btn:hover { color: var(--primary); background: transparent; }
-        .settings-action-btn:active { transform: scale(0.97); }
-        .settings-action-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-        .settings-action-btn.reboot { color: var(--primary); }
-        .settings-action-btn.reboot:hover { color: #005fcc; }
-        .settings-action-btn.danger { color: #ef4444; }
-        .settings-action-btn.danger:hover { color: #dc2626; }
-        .support-card { padding: 24px; display: flex; flex-direction: column; gap: 18px; }
-        .support-card-title { margin: 0; color: var(--text-main); font-size: 16px; font-weight: 600; }
-        .proxy-info-btn {
-            width: 24px; height: 24px; flex: 0 0 24px; display: inline-flex; align-items: center; justify-content: center;
-            border: 1px solid var(--border); border-radius: 50%; background: var(--bg-color); color: var(--text-muted);
-            font-size: 14px; font-weight: 700; line-height: 1; cursor: pointer; transition: color .2s, border-color .2s, background .2s;
-        }
-        .proxy-info-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--icon-bg); }
-        .proxy-info-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-        .proxy-info-btn svg { width: 15px; height: 15px; display: block; }
-        .proxy-info-list { margin: 0; padding-left: 20px; color: var(--text-muted); font-size: 14px; line-height: 1.6; }
-        .proxy-info-list li + li { margin-top: 12px; }
-        .proxy-info-list strong { color: var(--text-main); }
-        .proxy-profiles { display: flex; flex-direction: column; gap: 10px; }
-        .proxy-profile-card {
-            display: flex; align-items: center; gap: 12px; padding: 14px 16px;
-            background: var(--bg-color); border: 1px solid var(--border); border-radius: 14px;
-            transition: border-color .2s, background .2s, box-shadow .2s;
-        }
-        .proxy-profile-card.is-active { border-color: #10b981; background: rgba(16, 185, 129, 0.06); }
-        .proxy-profile-dot {
-            width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%;
-            background: var(--border); transition: background .2s;
-        }
-        .proxy-profile-card.is-active .proxy-profile-dot { background: #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.4); }
-        .proxy-profile-body { flex: 1; min-width: 0; }
-        .proxy-profile-name { font-size: 14px; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .proxy-profile-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-        .proxy-profile-actions { display: flex; gap: 4px; flex-shrink: 0; }
-        .proxy-profile-actions button {
-            width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
-            border: 1px solid var(--border); border-radius: 8px; background: transparent;
-            color: var(--text-muted); font-size: 15px; cursor: pointer; transition: color .2s, border-color .2s, background .2s;
-        }
-        .proxy-profile-actions button:hover { color: var(--primary); border-color: var(--primary); background: var(--icon-bg); }
-        .proxy-profile-actions button.danger:hover { color: #ef4444; border-color: #ef4444; }
-        .proxy-profile-actions button svg { width: 15px; height: 15px; display: block; }
-        .proxy-empty { text-align: center; padding: 32px 16px; color: var(--text-muted); font-size: 14px; }
-        .proxy-add-btn {
-            display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
-            border: 1px dashed var(--border); border-radius: 8px; background: transparent;
-            color: var(--text-muted); font-size: 18px; font-weight: 400; cursor: pointer;
-            transition: color .2s, border-color .2s, background .2s;
-        }
-        .proxy-add-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--icon-bg); }
-        .proxy-add-btn svg { width: 16px; height: 16px; display: block; }
-        input { background: var(--bg-color); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; outline: none; }
-        .input-group { margin-bottom: 16px; }
-        .input-group label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; }
-        /* Custom Modern Scrollbar */
-        ::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
-        }
-        ::-webkit-scrollbar-track {
-            background: transparent;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: rgba(100, 116, 139, 0.3);
-            border-radius: 999px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: rgba(100, 116, 139, 0.55);
-        }
-        * {
-            scrollbar-width: thin;
-            scrollbar-color: rgba(100, 116, 139, 0.3) transparent;
-        }
-
-        .input-group input:not([type="checkbox"]), .input-group select { width: 100%; height: 48px; background: var(--bg-color); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 0 16px; font-size: 14px; outline: none; transition: background 0.3s, border-color 0.3s, color 0.3s; }
-        .input-group input:not([type="checkbox"]):focus, .input-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0, 119, 255, 0.15); }
-        .input-group input.is-invalid { border-color: #ef4444 !important; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15) !important; }
-
-        .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 16px; padding: 12px; background: var(--bg-color); border-radius: 12px; border: 1px solid var(--border); transition: background 0.3s, border-color 0.3s; }
-        .toggle-row label { font-size: 14px; font-weight: 600; color: var(--text-main); margin: 0; text-transform: none; white-space: nowrap; }
-        .vk-hashes-toggle { margin-top: 10px; }
-        .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--border); transition: .3s; border-radius: 24px; }
-        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
-        input:checked + .slider { background-color: var(--primary); }
-        input:checked + .slider:before { transform: translateX(20px); }
-
-        dialog { margin: auto; width: min(500px, calc(100% - 32px)); max-height: min(90vh, 760px); overflow-y: auto; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 24px; padding: 32px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); }
-        dialog::backdrop { background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); }
-        dialog h2 { margin-bottom: 24px; font-size: 24px; }
-        .dlg-row { display: flex; gap: 16px; }
-        .dlg-row > div { flex: 1; }
-        .dlg-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
-
-        .client-cards-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 16px;
-            margin-top: 16px;
-        }
-        .client-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 16px;
-            cursor: pointer;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            position: relative;
-        }
-        .client-card:hover {
-            background: var(--surface-hover);
-            transform: translateY(-2px);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-        }
-        .client-card.group-card {
-            border: 1.5px solid var(--primary, #0077ff);
-        }
-        .client-card.group-card:hover {
-            border-color: var(--primary-hover, #0060cc);
-            box-shadow: 0 10px 20px -3px rgba(0, 119, 255, 0.2);
-        }
-        .group-card-tag {
-            display: inline-flex;
-            align-items: center;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 2px 8px;
-            border-radius: 6px;
-            background: var(--icon-bg);
-            color: var(--primary);
-        }
-        .rule-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .rule-card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .rule-card-title {
-            font-size: 15px;
-            font-weight: 700;
-            color: var(--text-main);
-        }
-        .rule-chip {
-            display: inline-flex;
-            align-items: center;
-            font-size: 11px;
-            padding: 3px 8px;
-            border-radius: 6px;
-            background: var(--surface-hover);
-            color: var(--text-muted);
-            border: 1px solid var(--border);
-        }
-        #qrCodeContainer {
-            background: #ffffff;
-            padding: 16px;
-            border-radius: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-            border: 1px solid var(--border);
-            width: 260px;
-            height: 260px;
-            max-width: 100%;
-            aspect-ratio: 1;
-            box-sizing: border-box;
-            overflow: hidden;
-            margin: 0 auto;
-        }
-        #qrCodeContainer svg {
-            width: 100% !important;
-            height: 100% !important;
-            max-width: 100% !important;
-            max-height: 100% !important;
-            display: block !important;
-        }
-
-        /* Hub Links & Bulk Settings Panel */
-        .hub-bulk-panel {
-            background: var(--bg-color);
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 16px;
-            margin-bottom: 20px;
-        }
-        .hub-field-block {
-            display: flex;
-            flex-direction: column;
-            margin-bottom: 12px;
-        }
-        .hub-field-block:last-child {
-            margin-bottom: 0;
-        }
-        .hub-field-label {
-            display: block;
-            font-size: 11px;
-            font-weight: 700;
-            color: var(--text-muted);
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .hub-field-row {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        .hub-field-input {
-            flex: 1;
-            min-width: 0;
-            min-height: 38px;
-            height: 38px;
-            font-size: 13px;
-            padding: 0 12px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: var(--surface);
-            color: var(--text-main);
-            box-sizing: border-box;
-        }
-        .hub-field-actions {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            flex-shrink: 0;
-        }
-        .hub-btn-apply {
-            height: 38px;
-            font-size: 13px;
-            font-weight: 600;
-            min-width: 175px;
-            padding: 0 14px;
-            white-space: nowrap;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-        }
-        .hub-btn-clear {
-            height: 38px;
-            font-size: 13px;
-            font-weight: 600;
-            min-width: 135px;
-            padding: 0 12px;
-            white-space: nowrap;
-            color: #ef4444 !important;
-            border: 1px solid rgba(239, 68, 68, 0.35) !important;
-            background: transparent;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-            transition: all 0.15s ease;
-        }
-        .hub-btn-clear:hover {
-            background: rgba(239, 68, 68, 0.1) !important;
-            border-color: #ef4444 !important;
-            color: #dc2626 !important;
-        }
-        .hub-bulk-footer {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            align-items: center;
-            justify-content: space-between;
-            border-top: 1px solid var(--border);
-            padding-top: 12px;
-            margin-top: 14px;
-        }
-        input.hub-search-input, .hub-search-input {
-            width: 100%;
-            height: 36px;
-            padding: 0 32px 0 44px !important;
-            border-radius: 8px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            color: var(--text-main);
-            font-size: 13px;
-            outline: none;
-            box-sizing: border-box;
-            transition: all 0.2s;
-        }
-        .hub-search-input::placeholder {
-            color: var(--text-muted);
-            opacity: 0.8;
-        }
-        .hub-search-input:focus {
-            border-color: var(--primary);
-            background: var(--surface-hover);
-            box-shadow: 0 0 0 2px rgba(0, 119, 255, 0.15);
-        }
-
-        @media (max-width: 640px) {
-            .hub-field-row {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 8px;
-            }
-            .hub-field-row .hub-field-input {
-                width: 100% !important;
-                height: 38px !important;
-                min-height: 38px !important;
-                flex: none !important;
-                box-sizing: border-box !important;
-            }
-            .hub-field-actions {
-                width: 100%;
-                display: flex;
-                gap: 8px;
-            }
-            .hub-btn-apply,
-            .hub-btn-clear {
-                flex: 1;
-                width: auto;
-                min-width: 0;
-                font-size: 12px;
-                padding: 0 8px;
-                height: 38px;
-                box-sizing: border-box;
-            }
-            .hub-field-row.hub-workers-row {
-                flex-direction: row;
-                align-items: center;
-                gap: 8px;
-            }
-            .hub-field-row.hub-workers-row .hub-workers-input {
-                width: 75px !important;
-                flex: 0 0 75px !important;
-                height: 38px !important;
-                min-height: 38px !important;
-                text-align: center;
-                box-sizing: border-box !important;
-            }
-            .hub-field-row.hub-workers-row .hub-field-actions {
-                flex: 1;
-                min-width: 0;
-            }
-            .hub-bulk-footer {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 10px;
-            }
-            .hub-search-container {
-                width: 100% !important;
-            }
-            .hub-search-input {
-                height: 38px;
-                font-size: 13px;
-            }
-        }
-
-        .client-card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 10px;
-            margin-bottom: 2px;
-            min-height: 40px;
-        }
-        .client-card-title {
-            font-size: 15px;
-            font-weight: 700;
-            color: var(--text-main);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .rule-targets-container {
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            background: var(--bg-color);
-            padding: 8px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .rule-target-section-title {
-            font-size: 11px;
-            font-weight: 700;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            padding: 4px 6px 2px;
-        }
-        .rule-target-item {
-            display: flex !important;
-            align-items: center !important;
-            gap: 10px !important;
-            padding: 8px 12px !important;
-            border-radius: 10px !important;
-            background: var(--surface) !important;
-            border: 1px solid var(--border) !important;
-            cursor: pointer !important;
-            transition: background 0.15s, border-color 0.15s !important;
-            user-select: none;
-            width: 100%;
-            box-sizing: border-box;
-        }
-        .rule-target-item:hover {
-            background: var(--surface-hover) !important;
-            border-color: rgba(0, 119, 255, 0.4) !important;
-        }
-        .rule-target-item input[type="checkbox"] {
-            width: 18px !important;
-            min-width: 18px !important;
-            max-width: 18px !important;
-            height: 18px !important;
-            min-height: 18px !important;
-            max-height: 18px !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            accent-color: var(--primary);
-            cursor: pointer;
-            flex-shrink: 0;
-            border-radius: 4px;
-        }
-        .rule-target-info {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-            flex: 1;
-            min-width: 0;
-        }
-        .rule-target-name {
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-main);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .rule-target-meta {
-            font-size: 11px;
-            color: var(--text-muted);
-            font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;
-            white-space: nowrap;
-            flex-shrink: 0;
-        }
-        .rule-target-badge {
-            display: inline-flex;
-            align-items: center;
-            font-size: 10px;
-            font-weight: 600;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background: var(--icon-bg);
-            color: var(--primary);
-            flex-shrink: 0;
-        }
-        .client-card-body {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .client-card-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 13px;
-        }
-        .client-card-label {
-            color: var(--text-muted);
-            font-weight: 600;
-        }
-        .client-card-value {
-            color: var(--text-main);
-            font-weight: 500;
-        }
-        .client-sub-btn {
-            width: 100%;
-            margin-top: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            font-size: 12px;
-            padding: 7px 10px;
-            border: 1px solid var(--border) !important;
-            color: var(--text-main) !important;
-            background: transparent !important;
-            border-radius: 8px;
-            font-weight: 500;
-            transition: all 0.15s ease;
-            cursor: pointer;
-            box-sizing: border-box;
-        }
-        .client-sub-btn:hover {
-            background: var(--surface-hover) !important;
-            border-color: var(--primary) !important;
-            color: var(--primary) !important;
-        }
-        [data-theme="dark"] .client-sub-btn {
-            border-color: rgba(255, 255, 255, 0.25) !important;
-            color: #ffffff !important;
-        }
-        [data-theme="dark"] .client-sub-btn:hover {
-            border-color: var(--primary) !important;
-            color: var(--primary) !important;
-            background: rgba(255, 255, 255, 0.05) !important;
-        }
-
-        .dlg-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-        .dlg-header h2 {
-            margin: 0;
-            font-size: 22px;
-        }
-        .close-btn {
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            cursor: pointer;
-            padding: 4px;
-            border-radius: 50%;
-            display: grid;
-            place-items: center;
-            outline: none;
-        }
-        .close-btn:hover {
-            background: var(--surface-hover);
-            color: var(--text-main);
-        }
-
-        @keyframes spin { 100% { transform: rotate(360deg); } }
-        @keyframes shrink { from { width: 100%; } to { width: 0%; } }
-
-        .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 100000; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
-        .toast {
-            position: relative;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            color: var(--text-main);
-            padding: 14px 20px;
-            border-radius: 12px;
-            font-size: 14px;
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
-            animation: toastIn 0.3s forwards;
-            overflow: hidden;
-            transition: all 0.3s;
-            pointer-events: auto;
-        }
-        .toast.hide { animation: toastOut 0.3s forwards; }
-        @keyframes toastIn { from { opacity: 0; transform: translateX(50px); } to { opacity: 1; transform: translateX(0); } }
-        @keyframes toastOut { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(50px); } }
-        .toast-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--icon-bg); color: var(--primary); }
-
-        .toast-success { border-left: 3px solid #10b981; }
-        .toast-error { border-left: 3px solid #ef4444; }
-
-        .toast-progress {
-            position: absolute; bottom: 0; left: 0; height: 3px; width: 100%;
-            background: rgba(0,0,0,0.3);
-            animation: shrink 1.5s linear forwards;
-        }
-
-        .show-mobile { display: none !important; }
-        @media(max-width: 480px) {
-            .hide-mobile { display: none !important; }
-            .show-mobile { display: inline-block !important; }
-
-            .header-container { padding: 0 10px !important; }
-            .brand-logo { width: 92px !important; }
-            .brand { gap: 6px; }
-            .brand-version { width: 48px !important; margin-bottom: 1.9px !important; }
-            .header-actions { gap: 6px !important; }
-            .version-logo { width: 79px !important; }
-            .version-build { font-size: 8px; }
-            .header-actions .btn:not(.btn-icon) { padding: 6px 8px !important; font-size: 12px !important; white-space: nowrap !important; }
-            .header-actions .btn-icon { padding: 6px !important; }
-
-            .routing-panel { padding: 16px !important; }
-            .routing-header { gap: 8px !important; margin-bottom: 16px !important; }
-        }
-
-        @media(max-width: 420px) {
-            /* the version beside CSQTT needs the room: the API button keeps its word, without the icon */
-            .btn-api svg { display: none; }
-        }
-
-        @media(max-width: 768px) {
-            header { height: 64px; }
-            .header-container { padding: 0 16px; }
-            .brand-logo { width: 128px; }
-            .brand-version { width: 67px; margin-bottom: 2.5px; }
-            .version-logo { width: 123px; }
-            main { padding: 20px 12px 80px; gap: 20px; }
-
-            .tabs-container { width: 100%; margin-bottom: 4px; }
-            .tabs { display: flex; width: 100%; }
-            .tab-btn { flex: 1; justify-content: center; padding: 10px 0; font-size: 13px; }
-
-            .dashboard { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-            .dashboard .stat-card {
-                padding: 12px 14px;
-                min-height: 106px;
-                display: flex;
-                flex-direction: column;
-                justify-content: space-between;
-                gap: 8px;
-            }
-            .dashboard .cpu-card,
-            .dashboard .memory-card {
-                grid-column: auto;
-                min-width: 0;
-                min-height: 106px;
-            }
-            .dashboard .traffic-card {
-                grid-column: span 2;
-                min-height: auto;
-                flex-direction: row;
-                align-items: center;
-                justify-content: space-between;
-                padding: 12px 16px;
-            }
-            .dashboard .traffic-card .stat-header {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-            }
-            .dashboard .traffic-card div[style*="display: flex"] {
-                flex-direction: row !important;
-                gap: 16px !important;
-            }
-            .dashboard .traffic-card .stat-value {
-                font-size: 15px !important;
-            }
-            .dashboard .cpu-card .stat-value,
-            .dashboard .memory-card .stat-value {
-                font-size: 18px;
-                letter-spacing: -0.04em;
-            }
-
-            .stat-icon { width: 32px; height: 32px; border-radius: 8px; }
-            .stat-icon svg { width: 16px; height: 16px; }
-            .stat-label { font-size: 11px; }
-            .stat-value { font-size: 18px; }
-            .stat-sub { font-size: 11px; }
-            .progress-bar { margin-top: 4px; }
-
-            .section-header { flex-direction: column; align-items: flex-start; gap: 12px; }
-            .section-header .btn { width: 100%; }
-            .clients-toolbar { display: flex !important; flex-direction: column !important; align-items: stretch !important; gap: 8px !important; margin-bottom: 16px !important; justify-content: flex-start !important; }
-            .clients-tb-links-btn { order: 1 !important; width: 100% !important; }
-            .clients-tb-actions { order: 2 !important; width: 100% !important; display: flex !important; flex-direction: column !important; gap: 8px !important; }
-            .clients-tb-actions .btn { width: 100% !important; }
-            .panel-search-wrapper { order: 3 !important; width: 100% !important; max-width: 100% !important; margin-top: 4px !important; flex: none !important; }
-            .group-dlg-actions { display: flex !important; flex-direction: column !important; align-items: stretch !important; gap: 8px !important; margin-bottom: 12px !important; }
-            .group-dlg-actions .group-act-btn, .group-dlg-actions .btn { width: 100% !important; height: 38px !important; justify-content: center !important; }
-            .group-admin-row { width: 100% !important; display: flex !important; gap: 6px !important; align-items: center !important; }
-            .group-admin-row #groupAdminLinkBtn { flex: 1 1 0 !important; width: auto !important; height: 38px !important; }
-            .group-admin-row .group-regen-btn { width: 38px !important; min-width: 38px !important; height: 38px !important; flex-shrink: 0 !important; }
-            .group-search-wrapper { width: 100% !important; min-width: 0 !important; margin-top: 4px !important; flex: none !important; }
-            .group-search-input { width: 100% !important; height: 38px !important; padding: 0 28px 0 38px !important; }
-            .group-search-input:focus { width: 100% !important; }
-            .dlg-row { flex-direction: column; gap: 0; }
-            dialog { padding: 20px 16px; width: calc(100% - 24px); }
-            .dlg-actions { flex-direction: row; flex-wrap: wrap; gap: 8px !important; }
-            .dlg-actions .btn { flex: 1 1 0; width: auto; font-size: 13px !important; padding: 12px 4px !important; font-weight: 600; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .toggle-row { gap: 8px; padding: 10px; }
-            .toggle-row > label:first-child { font-size: 12px; flex-shrink: 0; }
-            #edit_copyLinkBtn { width: 34px; min-width: 34px; height: 34px; padding: 0 !important; gap: 0 !important; font-size: 0 !important; }
-            .vk-hashes-toggle > div > label:first-child { font-size: 12px; flex-shrink: 0; }
-            .switch { width: 56px; height: 32px; }
-            .slider:before { height: 26px; width: 26px; left: 3px; bottom: 3px; }
-            input:checked + .slider:before { transform: translateX(24px); }
-            .setting-card { padding: 16px; }
-
-            .table-wrapper { background: transparent; border: none; }
-            table, thead, tbody, th, td, tr { display: block; width: 100%; }
-            thead { display: none; }
-            tbody { display: flex; flex-direction: column; gap: 12px; }
-
-            tr {
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: 16px;
-                padding: 16px;
-                margin-bottom: 0;
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-                display: flex;
-                flex-direction: column;
-                gap: 10px;
-            }
-            tr:hover td { background: transparent; }
-
-            td {
-                border: none;
-                padding: 0;
-                min-height: auto;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                text-align: left;
-                width: 100%;
-            }
-
-            td::before {
-                content: attr(data-label) ":";
-                font-size: 11px;
-                font-weight: 600;
-                color: var(--text-muted);
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                display: inline-block;
-            }
-
-            td[data-label="Пользователь"] {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 4px;
-                border-bottom: 1px solid var(--border);
-                padding-bottom: 8px;
-                margin-bottom: 2px;
-            }
-            td[data-label="Пользователь"]::before {
-                display: none;
-            }
-            td[data-label="Пользователь"] .client-name {
-                font-size: 15px;
-                font-weight: 700;
-                width: 100%;
-                justify-content: space-between;
-            }
-            td[data-label="Пользователь"] .client-hash {
-                font-size: 11px;
-                width: 100%;
-                margin-top: 2px;
-            }
-
-            td[data-label="Действия"] {
-                border-top: 1px solid var(--border);
-                padding-top: 8px;
-                margin-top: 2px;
-                justify-content: flex-end;
-            }
-            td[data-label="Действия"]::before {
-                display: none;
-            }
-            .actions {
-                width: 100%;
-                justify-content: flex-end;
-                gap: 6px;
-                margin-top: 0;
-            }
-        }
-        @media(max-width: 480px) {
-            dialog { padding: 20px 12px !important; width: calc(100% - 16px) !important; }
-        }
-        .log-line { margin-bottom: 4px; padding: 2px 4px; border-radius: 4px; color: #e2e8f0; }
-        .log-line:hover { background: rgba(255, 255, 255, 0.05); }
-        #logConsole ::selection { background: rgba(0, 119, 255, 0.3); color: #ffffff; }
-        .log-time { color: var(--text-muted); margin-right: 8px; }
-        .log-lvl { font-weight: 700; margin-right: 8px; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
-        .log-lvl.log-info { color: #38bdf8; background: rgba(56, 189, 248, 0.1); }
-        .log-lvl.log-err { color: #f87171; background: rgba(248, 113, 113, 0.1); }
-        .log-mod { color: #34d399; background: rgba(52, 211, 153, 0.1); padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-right: 8px; }
-
-        #logConsole::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-        #logConsole::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.03);
-            border-radius: 10px;
-        }
-        #logConsole::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.12);
-            border-radius: 10px;
-        }
-        #logConsole::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.22);
-        }
-
-        select {
-            background: var(--surface);
-            color: var(--text-main);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 6px 12px;
-            font-size: 13px;
-            font-weight: 500;
-            outline: none;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        select:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(0, 119, 255, 0.15);
-        }
-
-        input[type=number]::-webkit-outer-spin-button,
-        input[type=number]::-webkit-inner-spin-button {
-            -webkit-appearance: none;
-            margin: 0;
-        }
-        input[type=number] {
-            -moz-appearance: textfield;
-        }
-
-        .dlg-row {
-            display: flex;
-            gap: 8px !important;
-            width: 100%;
-        }
-        .dlg-row .input-group {
-            flex: 1 1 0% !important;
-            min-width: 0;
-            margin-bottom: 0;
-        }
-        .dlg-row input {
-            text-align: center;
-            font-size: 13px !important;
-            padding: 0 4px !important;
-            font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;
-        }
-        .night-switch {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            background: var(--surface-hover);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            cursor: pointer;
-            user-select: none;
-            font-size: 13px;
-            font-weight: 500;
-            height: 32px;
-            padding: 2px;
-            z-index: 1;
-            box-sizing: border-box;
-            width: 110px;
-        }
-        .night-switch::before {
-            content: "";
-            position: absolute;
-            top: 2px;
-            bottom: 2px;
-            left: 2px;
-            width: calc(50% - 2px);
-            border-radius: 6px;
-            transition: all 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
-            z-index: -1;
-        }
-        .night-switch.is-on::before {
-            transform: translateX(100%);
-            background: #0077ff;
-        }
-        .night-switch.is-off::before {
-            transform: translateX(0);
-            background: #0077ff;
-        }
-        .night-switch .ns-side {
-            flex: 1;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--text-muted);
-            transition: color 0.3s;
-        }
-        .night-switch.is-on .ns-on { color: #ffffff; }
-        .night-switch.is-off .ns-off { color: #ffffff; }
-    </style>
+"##,
+    include_str!("web_panel.css"),
+    r##"    </style>
 </head>
 <body>
+    "##,
+    icon_sprite!(),
+    r##"
     <header>
         <div class="header-container">
             <div class="brand" aria-label="CSQTT">
-                <svg class="brand-logo" viewBox="0 0 760 184" role="img" aria-label="CSQTT">
-                    <defs>
-                        <linearGradient id="csqttLogoGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="68" y2="340">
-                            <stop offset="0" stop-color="#3DBFFD"></stop><stop offset="0.32" stop-color="#299BFD"></stop><stop offset="0.66" stop-color="#1475FD"></stop><stop offset="1" stop-color="#0450FC"></stop>
-                        </linearGradient>
-                    </defs>
-                    <path fill="url(#csqttLogoGradient)" fill-rule="evenodd" d="M79,11 L66,15 L48,25 L40,32 L27,49 L21,62 L17,78 L17,98 L19,108 L22,117 L33,136 L40,144 L56,156 L66,161 L84,166 L108,166 L118,164 L127,161 L143,152 L157,139 L160,135 L160,133 L137,116 L135,116 L123,128 L113,133 L106,135 L100,135 L99,136 L87,135 L73,130 L67,126 L57,116 L51,105 L48,93 L48,83 L51,71 L58,59 L67,50 L83,42 L105,41 L115,44 L129,53 L136,61 L160,44 L160,42 L155,35 L144,25 L135,19 L124,14 L108,10 Z M219,13 L208,18 L201,23 L191,35 L186,49 L186,66 L188,73 L193,82 L200,89 L208,94 L219,98 L248,103 L264,108 L270,113 L272,117 L272,125 L267,132 L260,136 L255,137 L234,137 L220,133 L212,129 L199,119 L181,141 L199,155 L212,161 L222,164 L232,165 L233,166 L257,166 L276,161 L285,156 L292,150 L298,142 L302,132 L303,112 L297,97 L287,87 L276,81 L258,76 L234,72 L224,68 L218,63 L216,58 L217,50 L222,44 L228,41 L237,39 L248,39 L258,41 L268,45 L279,53 L281,53 L299,32 L285,21 L270,14 L259,11 L233,10 Z M354,25 L344,34 L333,49 L328,60 L324,74 L324,79 L323,80 L324,103 L329,119 L336,132 L349,147 L360,155 L372,161 L391,166 L414,166 L430,162 L442,156 L460,174 L478,156 L462,140 L469,131 L474,122 L479,109 L481,99 L481,77 L479,68 L474,54 L466,41 L453,27 L441,19 L430,14 L414,10 L385,11 L372,15 Z M389,42 L411,41 L427,47 L442,61 L449,76 L450,96 L447,106 L444,112 L439,118 L421,100 L404,116 L405,119 L418,132 L416,134 L399,136 L385,133 L377,129 L363,116 L355,99 L354,83 L357,71 L361,63 L373,50 L379,46 Z M496,13 L496,44 L536,44 L537,45 L537,163 L568,163 L568,45 L569,44 L609,44 L610,43 L610,13 Z M628,13 L627,14 L627,37 L628,38 L627,43 L628,44 L666,44 L667,45 L667,163 L698,163 L699,162 L699,45 L700,44 L738,44 L738,13 Z"></path>
-                </svg>
-                <svg class="brand-version" viewBox="4 10 146 42" aria-hidden="true" fill="none" stroke="url(#brandVersionGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
-                    <defs><linearGradient id="brandVersionGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="516" y2="64"><stop offset="0" stop-color="#45B7FF"></stop><stop offset="0.45" stop-color="#2087FF"></stop><stop offset="1" stop-color="#075BFF"></stop></linearGradient></defs>
-                    <path d="M8,24 L18,48 L28,24 M34,20 Q38,14 46,14 H50 Q58,14 58,22 Q58,28 52,33 L36,48 H58 M67,47 L67.8,47 M101,19 Q97,14 90,14 Q78,14 78,31 Q78,48 90,48 Q102,48 102,38 Q102,28 90,28 Q80,28 78,35 M110,47 L110.8,47 M134,14 Q122,14 122,31 Q122,48 134,48 Q146,48 146,31 Q146,14 134,14 Z"></path>
-                </svg>
+                "##,
+    brand_logo!(),
+    r##"
+                "##,
+    brand_version!(),
+    r##"
             </div>
             <div class="header-actions">
-                <button class="btn btn-api" onclick="openApiDocsDlg()" title="API Документация">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <polyline points="16 18 22 12 16 6"></polyline>
-                        <polyline points="8 6 2 12 8 18"></polyline>
-                    </svg>
+                <button class="btn-api" onclick="openApiDocsDlg()" title="API Документация">
+                    <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
                     <span>API</span>
                 </button>
-                <button class="btn btn-ghost btn-icon" onclick="openImportExportDlg()" title="Импорт / Экспорт конфигурации">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
-                    </svg>
-                </button>
-                <button class="btn btn-ghost btn-icon" onclick="toggleTheme()" title="Сменить тему">
-                    <svg id="themeIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                <button class="ib sm" onclick="openImportExportDlg()" title="Импорт / Экспорт конфигурации" aria-label="Импорт и экспорт"><svg class="ic" aria-hidden="true"><use href="#i-updown"></use></svg></button>
+                <button class="ib sm" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему">
+                    <svg id="themeIcon" class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
                 </button>
                 <div class="version-badge">
                     <svg class="version-logo" viewBox="152 0 362 64" role="img" aria-label="v2.6.0 by amurcanov" fill="none" stroke="url(#versionLogoGradient)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
-                        <defs><linearGradient id="versionLogoGradient" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="516" y2="64"><stop offset="0" stop-color="#45B7FF"></stop><stop offset="0.45" stop-color="#2087FF"></stop><stop offset="1" stop-color="#075BFF"></stop></linearGradient></defs>
-                        <path d="M158,12 V48 M158,31 Q163,24 170,24 Q180,24 180,36 Q180,48 170,48 Q163,48 158,41 M190,24 L200,47 M210,24 L200,47 L196,57 Q194,60 189,58 M250,30 Q246,24 239,24 Q228,24 228,36 Q228,48 239,48 Q246,48 250,42 M250,24 V48 M260,48 V24 M260,31 Q264,24 270,24 Q277,24 277,32 V48 M277,31 Q281,24 287,24 Q294,24 294,32 V48 M304,24 V39 Q304,48 314,48 Q324,48 324,39 V24 M334,48 V24 M334,32 Q338,24 348,24 M382,29 Q378,24 370,24 Q360,24 360,36 Q360,48 370,48 Q378,48 382,43 M414,30 Q410,24 403,24 Q392,24 392,36 Q392,48 403,48 Q410,48 414,42 M414,24 V48 M424,48 V24 M424,32 Q429,24 436,24 Q446,24 446,35 V48 M467,24 Q456,24 456,36 Q456,48 467,48 Q478,48 478,36 Q478,24 467,24 Z M488,24 L498,48 L508,24"></path>
+                        "##,
+    brand_by_art!(),
+    r##"
                     </svg>
                     <span class="version-build">сборка SanityProtocol</span>
                 </div>
             </div>
         </div>
     </header>
-    <div id="restartRequiredBanner" class="restart-required-banner">Для применения изменений необходимо перезагрузить CSQTT на сервере (перейдите в настройки)</div>
+    <nav class="tabs-container" aria-label="Разделы">
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="monitoring" onclick="switchTab('monitoring')"><svg class="ic" aria-hidden="true"><use href="#i-activity"></use></svg><span>Мониторинг</span></button>
+            <button class="tab-btn" data-tab="clients" onclick="switchTab('clients')"><svg class="ic" aria-hidden="true"><use href="#i-users"></use></svg><span>Клиенты</span></button>
+            <button class="tab-btn" data-tab="logs" onclick="switchTab('logs')"><svg class="ic" aria-hidden="true"><use href="#i-terminal"></use></svg><span>Логи</span></button>
+            <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')"><svg class="ic" aria-hidden="true"><use href="#i-settings"></use></svg><span>Настройки</span></button>
+        </div>
+    </nav>
+    <div id="restartRequiredBanner" class="restart-required-banner" role="status">
+        <svg class="ic" aria-hidden="true"><use href="#i-alert"></use></svg><span class="grow">Изменения применятся после перезапуска CSQTT.</span>
+        <button class="btn btn-sm" onclick="document.getElementById('rebootDlg').showModal()"><svg class="ic" aria-hidden="true"><use href="#i-refresh"></use></svg>Перезапустить</button>
+    </div>
 
     <main>
-        <div class="tabs-container">
-            <div class="tabs">
-                <button class="tab-btn active" data-tab="monitoring" onclick="switchTab('monitoring')">Мониторинг</button>
-                <button class="tab-btn" data-tab="clients" onclick="switchTab('clients')">Клиенты</button>
-                <button class="tab-btn" data-tab="logs" onclick="switchTab('logs')">Логи</button>
-                <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Настройки</button>
-            </div>
-        </div>
-
         <div id="monitoring-section" style="display: none;">
-            <div class="section-header" style="justify-content: flex-end; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-direction: row !important;">
-                <label for="updateIntervalSelect" style="color: var(--text-secondary); font-size: 14px;" title="С какой периодичностью панель будет обновлять данные мониторинга, потоков и трафика">Обновление:</label>
-                <select id="updateIntervalSelect" class="input" style="width: auto; padding: 4px 10px; min-height: 32px;" onchange="changeUpdateInterval()">
-                    <option value="1000">1 сек</option>
-                    <option value="3000" selected>3 сек</option>
-                    <option value="5000">5 сек</option>
-                    <option value="10000">10 сек</option>
-                    <option value="15000">15 сек</option>
-                    <option value="30000">30 сек</option>
-                    <option value="60000">60 сек</option>
-                    <option value="90000">90 сек</option>
-                    <option value="120000">120 сек</option>
-                </select>
-            </div>
-            <section class="dashboard">
-                <div class="glass-panel stat-card">
-                    <div class="stat-header">
-                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></div>
-                        <div class="stat-label">Сервер</div>
+            <div class="page">
+                <div class="wh">
+                    <h1>Мониторинг</h1>
+                    <div class="wh-side">
+                        <label for="updateIntervalSelect" class="s" title="С какой периодичностью панель обновляет данные мониторинга, потоков и трафика">Обновление</label>
+                        <select id="updateIntervalSelect" class="sm" onchange="changeUpdateInterval()">
+                            <option value="1000">1 сек</option>
+                            <option value="3000" selected>3 сек</option>
+                            <option value="5000">5 сек</option>
+                            <option value="10000">10 сек</option>
+                            <option value="15000">15 сек</option>
+                            <option value="30000">30 сек</option>
+                            <option value="60000">60 сек</option>
+                            <option value="90000">90 сек</option>
+                            <option value="120000">120 сек</option>
+                        </select>
                     </div>
-                    <div>
+                </div>
+                <section class="dashboard">
+                    <div class="card stat-card">
+                        <div class="stat-header"><svg class="ic" aria-hidden="true"><use href="#i-server"></use></svg><span class="stat-label">Сервер</span></div>
                         <div class="stat-value" id="status_val">...</div>
                         <div class="stat-sub" id="status_uptime">Загрузка...</div>
                     </div>
-                </div>
-
-                <div class="glass-panel stat-card">
-                    <div class="stat-header">
-                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg></div>
-                        <div class="stat-label">Сессии</div>
-                    </div>
-                    <div>
+                    <div class="card stat-card">
+                        <div class="stat-header"><svg class="ic" aria-hidden="true"><use href="#i-activity"></use></svg><span class="stat-label">Потоки</span></div>
                         <div class="stat-value" id="active_val">0</div>
-                        <div class="stat-sub">Активные сессии</div>
+                        <div class="stat-sub">активных по всем ключам</div>
                     </div>
-                </div>
-
-                <div class="glass-panel stat-card cpu-card">
-                    <div class="stat-header">
-                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg></div>
-                        <div class="stat-label">CPU</div>
-                    </div>
-                    <div>
+                    <div class="card stat-card cpu-card">
+                        <div class="stat-header"><svg class="ic" aria-hidden="true"><use href="#i-cpu"></use></svg><span class="stat-label">CPU</span></div>
                         <div class="stat-value" id="cpu_val">0% / 100%</div>
                         <div class="progress-bar"><div class="progress-fill" id="cpu_bar" style="width: 0%"></div></div>
+                        <div class="stat-sub">нагрузка сервера</div>
                     </div>
-                </div>
-
-                <div class="glass-panel stat-card memory-card">
-                    <div class="stat-header">
-                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9h20v6H2z"></path><path d="M5 15v2M8 15v2M11 15v2M14 15v2M17 15v2M20 15v2"></path><rect x="4" y="10" width="3" height="4" rx="0.5"></rect><rect x="9" y="10" width="3" height="4" rx="0.5"></rect><rect x="14" y="10" width="3" height="4" rx="0.5"></rect><rect x="19" y="10" width="3" height="4" rx="0.5"></rect></svg></div>
-                        <div class="stat-label">ОЗУ</div>
-                    </div>
-                    <div>
+                    <div class="card stat-card memory-card">
+                        <div class="stat-header"><svg class="ic" aria-hidden="true"><use href="#i-drive"></use></svg><span class="stat-label">ОЗУ</span></div>
                         <div class="stat-value" id="ram_val">0 MB</div>
                         <div class="stat-sub" id="ram_detail">Использование памяти</div>
                     </div>
-                </div>
-
-                <div class="glass-panel stat-card traffic-card">
-                    <div class="stat-header">
-                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg></div>
-                        <div class="stat-label">Трафик</div>
-                    </div>
-                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                        <div class="stat-value" style="font-size: 20px; color: var(--primary);" id="traffic_up">↑ 0 B</div>
-                        <div class="stat-value" style="font-size: 20px; color: var(--primary);" id="traffic_down">↓ 0 B</div>
+                    <div class="card stat-card traffic-card">
+                        <div class="stat-header"><svg class="ic" aria-hidden="true"><use href="#i-updown"></use></svg><span class="stat-label">Трафик</span></div>
+                        <div class="stat-value"><span id="traffic_up">↑ 0 B</span> · <span id="traffic_down">↓ 0 B</span></div>
                         <div class="stat-sub" id="traffic_ingress">RX 0 · TX 0</div>
                     </div>
-                </div>
-            </section>
+                </section>
+            </div>
         </div>
 
         <div id="clients-section" style="display: none;">
-            <section>
-                <div class="clients-toolbar">
-                    <button class="btn btn-ghost clients-tb-links-btn" onclick="openLinksAndTokensDlg()">Настройка ссылок</button>
-                    <div class="panel-search-wrapper">
-                        <input type="text" id="mainSearchInput" class="panel-search-input" placeholder="Поиск групп и пользователей..." oninput="handleMainSearch(this.value)">
-                        <svg style="position: absolute; left: 10px; top: 11px; color: var(--text-muted); pointer-events: none;" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                        <button id="mainSearchClearBtn" onclick="clearMainSearch()" style="display: none; position: absolute; right: 8px; top: 10px; background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0;" title="Очистить">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                        </button>
+            <div class="page">
+                <div class="wh">
+                    <h1>Клиенты</h1>
+                    <span class="s" id="clientsCount"></span>
+                </div>
+                <div class="wbar">
+                    <div class="search">
+                        <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+                        <input type="text" id="mainSearchInput" placeholder="Поиск клиентов и групп" aria-label="Поиск клиентов и групп" oninput="handleMainSearch(this.value)">
+                        <button class="ib sm" id="mainSearchClearBtn" onclick="clearMainSearch()" style="display: none;" title="Очистить" aria-label="Очистить"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
                     </div>
-                    <div class="clients-tb-actions">
-                        <button class="btn btn-ghost" style="color: var(--primary); border: 1px solid rgba(0, 119, 255, 0.4); white-space: nowrap;" onclick="openRoutingRulesDlg()">Управление маршрутизацией</button>
-                        <button class="btn btn-primary" onclick="openNewGroupDlg()">Создать группу</button>
-                        <button class="btn btn-primary" onclick="openNewClientDlg()">Создать доступ</button>
-                    </div>
+                    <button class="btn" onclick="openLinksAndTokensDlg()"><svg class="ic" aria-hidden="true"><use href="#i-link"></use></svg>Настройка ссылок</button>
+                    <button class="btn" onclick="openRoutingRulesDlg()"><svg class="ic" aria-hidden="true"><use href="#i-list"></use></svg>Маршруты</button>
+                    <button class="btn" onclick="openNewGroupDlg()"><svg class="ic" aria-hidden="true"><use href="#i-users"></use></svg>Создать группу</button>
+                    <button class="btn btn-primary" onclick="openNewClientDlg()"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg>Создать доступ</button>
                 </div>
                 <div id="clientsCards" class="client-cards-grid"></div>
-            </section>
+            </div>
         </div>
 
         <div id="logs-section" style="display: none;">
-            <section style="display: flex; flex-direction: column; gap: 16px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
-                    <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow: hidden;">
-                        <span style="font-size: 12px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 0;" id="logFilePath" title="Путь: /etc/csqtt/csqtt.log">Путь: /etc/csqtt/csqtt.log</span>
-                        <a class="btn btn-primary" id="downloadLogBtn" href="/api/logs/download" style="padding: 4px 10px; font-size: 11px; text-decoration: none; border-radius: 8px; height: 28px; min-height: auto; display: inline-flex; align-items: center; flex-shrink: 0; white-space: nowrap;" download>Скачать</a>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px; user-select: none; white-space: nowrap; flex-shrink: 0;">
-                        <label for="loggingActiveToggle" style="font-size: 13px; font-weight: 600; color: var(--text-muted);">Логирование</label>
+            <div class="page">
+                <div class="wh">
+                    <h1>Логи</h1>
+                    <div class="wh-side">
+                        <label for="loggingActiveToggle" class="s">Логирование</label>
                         <label class="switch">
                             <input type="checkbox" id="loggingActiveToggle" onchange="toggleLoggingActive()">
                             <span class="slider"></span>
                         </label>
                     </div>
                 </div>
-                <div class="glass-panel" style="padding: 16px; background: #0a0b0d; border: 1px solid var(--border); border-radius: 16px; position: relative; width: 100%;">
-                    <button onclick="clearLogs()" title="Очистить логи" style="position: absolute; top: 12px; right: 12px; background: #1c1215; border: 1px solid rgba(239, 68, 68, 0.25); color: #ef4444; width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s; outline: none; z-index: 10;" onmouseover="this.style.background='#2a1519';this.style.borderColor='rgba(239,68,68,0.4)'" onmouseout="this.style.background='#1c1215';this.style.borderColor='rgba(239,68,68,0.25)'">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                    </button>
-                    <div id="logConsole" style="height: 450px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; font-size: 12px; line-height: 1.6; color: #e2e8f0; white-space: pre-wrap; word-break: break-all; scroll-behavior: smooth; padding-right: 32px;"></div>
+                <div class="wbar">
+                    <span class="s mono ell log-path" id="logFilePath" title="Путь: /etc/csqtt/csqtt.log">Путь: /etc/csqtt/csqtt.log</span>
+                    <span class="btns">
+                        <a class="btn btn-sm" id="downloadLogBtn" href="/api/logs/download" download><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg>Скачать</a>
+                        <button class="btn btn-sm danger" onclick="clearLogs()" title="Очистить логи"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg>Очистить</button>
+                    </span>
                 </div>
-            </section>
+                <div id="logConsole"></div>
+            </div>
         </div>
 
         <div id="settings-section" style="display: none;">
-            <section>
-                <div class="settings-actions-grid">
-                    <button class="settings-action-btn reboot" onclick="document.getElementById('rebootDlg').showModal()">Перезагрузить</button>
-                    <button class="settings-action-btn danger" onclick="logout()">Выйти</button>
+            <div class="page">
+                <div class="wh">
+                    <h1>Настройки</h1>
+                    <button class="btn btn-sm" onclick="logout()"><svg class="ic" aria-hidden="true"><use href="#i-power"></use></svg>Выйти</button>
                 </div>
                 <div class="settings-grid">
-                    <div class="glass-panel setting-card" style="display: flex; flex-direction: column; justify-content: space-between;">
-                        <div class="input-group" style="margin-bottom: 0;"><label for="mainpass">Главный пароль</label><input id="mainpass"></div>
-                        <button id="saveMainPasswordBtn" class="btn btn-primary" style="width: 100%; margin-top: 22px;" onclick="saveMainPassword()" disabled>Сохранить главный пароль</button>
+                    <div class="card setting-card">
+                        <h3>Главный пароль</h3>
+                        <div class="input-group">
+                            <label for="mainpass">Пароль владельца</label>
+                            <div class="field-row">
+                                <input id="mainpass" type="password" autocomplete="off" spellcheck="false">
+                                <button class="ib sm" type="button" onclick="togglePasswordReveal('mainpass', this)" title="Показать пароль" aria-label="Показать пароль"><svg class="ic" aria-hidden="true"><use href="#i-eye"></use></svg></button>
+                            </div>
+                        </div>
+                        <div class="dlg-actions">
+                            <button id="saveMainPasswordBtn" class="btn btn-tonal btn-wide" onclick="saveMainPassword()" disabled>Сохранить</button>
+                        </div>
                     </div>
-                    <div class="glass-panel setting-card" style="display: flex; flex-direction: column; justify-content: space-between;">
-                        <div class="input-group" style="margin-bottom: 0;">
-                            <label for="dns_provider">DNS Адреса</label>
+                    <div class="card setting-card">
+                        <h3>DNS для клиентов</h3>
+                        <div class="input-group">
+                            <label for="dns_provider">Адреса</label>
                             <div id="dns_selection" class="dns-selection">
                             <select id="dns_provider">
                                 <option value="custom">Ручной DNS</option>
@@ -9347,560 +7658,478 @@ const PANEL_HTML: &str = r##"
                             <input id="dns_manual" class="dns-manual-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="ipv4,ipv4" aria-label="Ручной DNS">
                             </div>
                         </div>
-                        <button id="saveDnsBtn" class="btn btn-primary" style="width: 100%; margin-top: 22px;" onclick="saveDnsSettings()" disabled>Применить DNS</button>
+                        <div class="dlg-actions">
+                            <button id="saveDnsBtn" class="btn btn-tonal btn-wide" onclick="saveDnsSettings()" disabled>Применить</button>
+                        </div>
                     </div>
-                    <div class="glass-panel setting-card" style="display: flex; flex-direction: column; justify-content: space-between;">
-                        <div class="input-group" style="margin-bottom: 0;">
-                            <label for="auto_restart_interval">Интервал перезагрузок</label>
+                    <div class="card setting-card">
+                        <h3>Автоперезапуск сервера</h3>
+                        <div class="input-group">
+                            <label for="auto_restart_interval">Интервал</label>
                             <select id="auto_restart_interval">
-                                <option value="0" selected>Отключено (по умолчанию)</option>
+                                <option value="0" selected>Отключено</option>
                                 <option value="12">12 часов</option>
                                 <option value="24">24 часа</option>
                                 <option value="48">48 часов</option>
                                 <option value="72">72 часа</option>
                             </select>
                         </div>
-                        <button id="saveAutoRestartIntervalBtn" class="btn btn-primary" style="width: 100%; margin-top: 22px;" onclick="saveAutoRestartInterval()" disabled>Сохранить интервал</button>
-                    </div>
-                </div>
-            </section>
-
-            <section style="margin-top: 20px;">
-                <div class="glass-panel routing-panel local-proxy-panel" style="padding: 24px;">
-                    <div class="routing-header" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; gap: 12px;">
-                        <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
-                            <h3 style="margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap;">
-                                <span class="hide-mobile">Локальный прокси SOCKS5 UDP</span><span class="show-mobile">SOCKS5 UDP</span>
-                            </h3>
-                            <button class="proxy-info-btn" type="button" aria-label="Что такое локальный SOCKS5 UDP" title="Что такое локальный SOCKS5 UDP" onclick="document.getElementById('localProxyInfoDlg').showModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></button>
-                        </div>
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <button class="proxy-add-btn" type="button" aria-label="Добавить профиль" title="Добавить профиль" onclick="openProfileDlg()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+                        <div class="dlg-actions">
+                            <button class="btn btn-sm" onclick="document.getElementById('rebootDlg').showModal()"><svg class="ic" aria-hidden="true"><use href="#i-refresh"></use></svg>Перезапустить сейчас</button>
+                            <button id="saveAutoRestartIntervalBtn" class="btn btn-tonal btn-wide" onclick="saveAutoRestartInterval()" disabled>Сохранить</button>
                         </div>
                     </div>
-                    <div id="proxyProfilesList" class="proxy-profiles"></div>
+                    <div class="card setting-card local-proxy-panel">
+                        <div class="ch">
+                            <h3>Локальный прокси SOCKS5 UDP</h3>
+                            <span class="btns">
+                                <button class="ib sm" type="button" aria-label="Что такое локальный SOCKS5 UDP" title="Что такое локальный SOCKS5 UDP" onclick="document.getElementById('localProxyInfoDlg').showModal()"><svg class="ic" aria-hidden="true"><use href="#i-help"></use></svg></button>
+                                <button class="ib sm" type="button" aria-label="Добавить профиль" title="Добавить профиль" onclick="openProfileDlg()"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg></button>
+                            </span>
+                        </div>
+                        <span class="s">Трафик клиентов уходит через SOCKS5 на этом сервере, например в 3x-ui.</span>
+                        <div id="proxyProfilesList" class="cells proxy-profiles"></div>
+                    </div>
+                    <div class="card about-card">
+                        <h3>О панели</h3>
+                        <span class="s">Веб-панель сервера csqtt, сборка SanityProtocol. На основе csqtt от amurcanov.</span>
+                        <div class="cells">
+                            <a class="cell" href="https://github.com/amurcanov" target="_blank" rel="noopener noreferrer">
+                                <svg class="ic" aria-hidden="true"><use href="#i-user"></use></svg><span class="grow"><span class="t">amurcanov</span><span class="s">создатель csqtt: протокол, сервер, приложение</span></span><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg>
+                            </a>
+                            <a class="cell" href="https://github.com/SanityProtocol/csqtt" target="_blank" rel="noopener noreferrer">
+                                <svg class="ic" aria-hidden="true"><use href="#i-code"></use></svg><span class="grow"><span class="t">Исходный код на GitHub</span><span class="s">SanityProtocol/csqtt · эта сборка</span></span><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg>
+                            </a>
+                            <a class="cell" href="https://t.me/swgPanel" target="_blank" rel="noopener noreferrer">
+                                <svg class="ic" aria-hidden="true"><use href="#i-send"></use></svg><span class="grow"><span class="t">Telegram</span><span class="s">t.me/swgPanel</span></span><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg>
+                            </a>
+                        </div>
+                    </div>
                 </div>
-            </section>
-
-            <section style="margin-top: 20px;">
-                <div class="glass-panel support-card">
-                    <h3 class="support-card-title">Поддержать разработчика Amurcanov</h3>
-                    <a class="telegram-button" href="https://t.me/amurcanov_telegram" target="_blank" rel="noopener noreferrer" aria-label="Telegram: amurcanov_telegram" title="Telegram: amurcanov_telegram">
-                        <svg class="tg-plane-icon" viewBox="0 0 24 24" width="22" height="22" fill="#ffffff" aria-hidden="true">
-                            <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/>
-                        </svg>
-                        <span>t.me/amurcanov_telegram</span>
-                    </a>
-                    <button class="crypto-button" type="button" onclick="openCryptoDonateDlg()" aria-label="Поддержать криптовалютой" title="CRYPTO">
-                        <svg class="crypto-logo" viewBox="0 0 320 60" aria-hidden="true">
-                            <g transform="translate(160, 30) scale(0.9) translate(-160, -30)">
-                                <path fill="#FFFFFF" d="M35,30 C35,17 45,8 60,8 C70,8 78,13 82,21 L70,28 C68,23 64,20 60,20 C52,20 47,24 47,30 C47,36 52,40 60,40 C64,40 68,37 70,32 L82,39 C78,47 70,52 60,52 C45,52 35,43 35,30 Z M92,10 L115,10 C126,10 133,16 133,24 C133,30 129,35 122,37 L135,50 L120,50 L109,38 L104,38 L104,50 L92,50 L92,10 Z M104,20 L104,29 L114,29 C118,29 121,27 121,24 C121,21 118,20 114,20 L104,20 Z M148,10 L160,29 L172,10 L186,10 L167,36 L167,50 L153,50 L153,36 L134,10 L148,10 Z M196,10 L219,10 C231,10 238,17 238,26 C238,35 231,42 219,42 L208,42 L208,50 L196,50 L196,10 Z M208,20 L208,32 L218,32 C223,32 226,30 226,26 C226,22 223,20 218,20 L208,20 Z M243,10 L279,10 L279,21 L267,21 L267,50 L255,50 L255,21 L243,21 L243,10 Z M285,30 C285,17 296,8 310,8 C324,8 335,17 335,30 C335,43 324,52 310,52 C296,52 285,43 285,30 Z M297,30 C297,37 302,41 310,41 C318,41 323,37 323,30 C323,23 318,19 310,19 C302,19 297,23 297,30 Z"></path>
-                            </g>
-                        </svg>
-                    </button>
-                </div>
-            </section>
+            </div>
         </div>
     </main>
 
-    <dialog id="confirmDlg">
-        <h2 id="confirmTitle" style="font-size: 18px; margin-bottom: 12px;">Подтверждение</h2>
-        <p id="confirmMessage" style="font-size: 14px; color: var(--text-muted); margin-bottom: 24px; line-height: 1.5;"></p>
-        <div class="dlg-actions" style="margin-top: 0;">
+    <dialog id="confirmDlg" class="w440">
+        <h2 id="confirmTitle">Подтверждение</h2>
+        <p id="confirmMessage"></p>
+        <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('confirmDlg').close()">Отмена</button>
             <button class="btn btn-primary" id="confirmActionBtn">Подтвердить</button>
         </div>
     </dialog>
 
-    <dialog id="cryptoDonateDlg">
-        <h2 style="font-size: 20px; margin-bottom: 8px;">Поддержать криптовалютой</h2>
-        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px; line-height: 1.5;">Переведите криптовалюту на один из указанных адресов кошельков.</p>
-
-        <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 14px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <span style="font-size: 13px; font-weight: 700; color: #31A1F5;">GRAM (Сеть TON)</span>
-            </div>
-            <div style="font-family: monospace; font-size: 13px; word-break: break-all; color: var(--text-main); line-height: 1.4; user-select: all;" id="gramWalletAddr">UQCsHSj_Bev5AG3vCz-84TQC7BSWjNdNdOjP9M2gWUEmbyD7</div>
-            <div style="margin-top: 8px; text-align: right;">
-                <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;" onclick="copyText('UQCsHSj_Bev5AG3vCz-84TQC7BSWjNdNdOjP9M2gWUEmbyD7', this)">Скопировать</button>
-            </div>
-        </div>
-
-        <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 14px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <span style="font-size: 13px; font-weight: 700; color: #50AF95;">USDT (Сеть TON)</span>
-            </div>
-            <div style="font-family: monospace; font-size: 13px; word-break: break-all; color: var(--text-main); line-height: 1.4; user-select: all;" id="usdtTonWalletAddr">UQCsHSj_Bev5AG3vCz-84TQC7BSWjNdNdOjP9M2gWUEmbyD7</div>
-            <div style="margin-top: 8px; text-align: right;">
-                <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;" onclick="copyText('UQCsHSj_Bev5AG3vCz-84TQC7BSWjNdNdOjP9M2gWUEmbyD7', this)">Скопировать</button>
-            </div>
-        </div>
-
-        <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 20px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <span style="font-size: 13px; font-weight: 700; color: #50AF95;">USDT (Сеть TRC20)</span>
-            </div>
-            <div style="font-family: monospace; font-size: 13px; word-break: break-all; color: var(--text-main); line-height: 1.4; user-select: all;" id="usdtTrcWalletAddr">TD1oiQiHmjqsRDPxfUjUbSWxEmcr4k7Lob</div>
-            <div style="margin-top: 8px; text-align: right;">
-                <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;" onclick="copyText('TD1oiQiHmjqsRDPxfUjUbSWxEmcr4k7Lob', this)">Скопировать</button>
-            </div>
-        </div>
-
-        <div class="dlg-actions" style="margin-top: 0;">
-            <button class="btn btn-primary" onclick="document.getElementById('cryptoDonateDlg').close()">Хорошо</button>
-        </div>
-    </dialog>
-
     <dialog id="localProxyInfoDlg">
-        <h2 style="font-size: 20px; margin-bottom: 20px;">SOCKS5 UDP</h2>
+        <h2>SOCKS5 UDP</h2>
         <ul class="proxy-info-list">
             <li><strong>Зачем нужно?</strong> Маршрутизировать трафик из CSQTT в Xray, 3x-ui и другие панели. Это нужно, чтобы маршрутизировать трафик через geoip/geodat и работать с любыми возможностями ваших панелей.</li>
             <li><strong>Как работает?</strong> CSQTT передаёт TCP и UDP в локальный SOCKS5. Если прокси недоступен, используется прямой выход через основной VPS.</li>
             <li><strong>Как настроить?</strong> В соответствующем ядре или веб-панели заранее создайте инбаунд SOCKS5-прокси (в некоторых панелях он может называться mixed) с предпочитаемым портом и включите UDP в настройках прокси. Затем укажите в панели CSQTT тот же самый порт.</li>
         </ul>
-        <div class="dlg-actions" style="margin-top: 24px;">
-            <button class="btn btn-primary" onclick="document.getElementById('localProxyInfoDlg').close()">Понятно</button>
+        <div class="dlg-actions">
+            <button class="btn btn-wide" onclick="document.getElementById('localProxyInfoDlg').close()">Понятно</button>
         </div>
     </dialog>
 
     <dialog id="vkHashesInfoDlg">
-        <h2 style="font-size: 20px; margin-bottom: 16px;">VK хеши в ссылке</h2>
-        <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin: 0;">Укажите от 1 до 6 VK-хешей через запятую без пробелов. Вставляйте только сами значения хешей. Они будут добавлены в ссылку CSQTT v2, и пользователю не придётся вводить их вручную.</p>
-        <div class="dlg-actions" style="margin-top: 24px;">
-            <button class="btn btn-primary" onclick="document.getElementById('vkHashesInfoDlg').close()">Понятно</button>
+        <h2>VK хеши в ссылке</h2>
+        <p>Укажите от 1 до 6 VK-хешей через запятую без пробелов. Вставляйте только сами значения хешей. Они будут добавлены в ссылку CSQTT v2, и пользователю не придётся вводить их вручную.</p>
+        <div class="dlg-actions">
+            <button class="btn btn-wide" onclick="document.getElementById('vkHashesInfoDlg').close()">Понятно</button>
         </div>
     </dialog>
 
     <dialog id="vkTokenSettingsDlg">
-        <h2 style="font-size: 20px; margin-bottom: 16px;">VK токен</h2>
-        <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin: 0 0 18px;">Сервер больше не хранит VK токен: ссылка расшифровывается любым участником, и токен владельца в ней был бы виден. Клиенты в режиме «токен» получают VK хеши владельца — хеши группы, иначе хеши сервера по умолчанию.</p>
-        <div class="dlg-actions" style="margin-top: 20px;">
-            <button class="btn btn-primary" onclick="document.getElementById('vkTokenSettingsDlg').close()">Понятно</button>
+        <h2>VK токен</h2>
+        <p>Сервер больше не хранит VK токен: ссылка расшифровывается любым участником, и токен владельца в ней был бы виден. Клиенты в режиме «токен» получают VK хеши владельца — хеши группы, иначе хеши сервера по умолчанию.</p>
+        <div class="dlg-actions">
+            <button class="btn btn-wide" onclick="document.getElementById('vkTokenSettingsDlg').close()">Понятно</button>
         </div>
     </dialog>
 
-    <dialog id="profileDlg">
-        <h2 id="profileDlgTitle" style="font-size: 18px; margin-bottom: 18px;">Новый профиль</h2>
+    <dialog id="profileDlg" class="sheet">
+        <div class="dlg-header">
+            <h2 id="profileDlgTitle">Новый профиль</h2>
+            <button class="close-btn" onclick="document.getElementById('profileDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+        </div>
         <div class="input-group"><label for="profileDlgName">Имя</label><input id="profileDlgName" maxlength="64" placeholder="3x-ui VLESS"></div>
-        <div class="input-group"><label for="profileDlgHost">Адрес SOCKS5</label><input id="profileDlgHost" value="127.0.0.1" placeholder="127.0.0.1" inputmode="decimal" autocomplete="off" spellcheck="false"></div>
-        <div class="input-group"><label for="profileDlgPort">Порт SOCKS5</label><input type="number" id="profileDlgPort" min="1" max="65535" value="45000" inputmode="numeric"></div>
-        <div class="input-group"><label for="profileDlgUser">Логин (необязательно)</label><input id="profileDlgUser" maxlength="255" autocomplete="off"></div>
-        <div class="input-group"><label for="profileDlgPass">Пароль (необязательно)</label><input type="password" id="profileDlgPass" maxlength="255" autocomplete="new-password"></div>
-        <div class="input-group" style="margin-bottom: 0;"><label for="profileDlgFailClosed">Если SOCKS5 недоступен</label><select id="profileDlgFailClosed"><option value="1">Блокировать трафик клиентов</option><option value="0">Пускать напрямую с сервера</option></select></div>
-        <div class="dlg-actions" style="margin-top: 20px;">
+        <div class="g21">
+            <div class="input-group"><label for="profileDlgHost">Адрес SOCKS5</label><input id="profileDlgHost" value="127.0.0.1" placeholder="127.0.0.1" inputmode="decimal" autocomplete="off" spellcheck="false"></div>
+            <div class="input-group"><label for="profileDlgPort">Порт</label><input type="number" id="profileDlgPort" min="1" max="65535" value="45000" inputmode="numeric"></div>
+        </div>
+        <div class="grid2">
+            <div class="input-group"><label for="profileDlgUser">Логин</label><input id="profileDlgUser" maxlength="255" autocomplete="off" placeholder="необязательно"></div>
+            <div class="input-group"><label for="profileDlgPass">Пароль</label><input type="password" id="profileDlgPass" maxlength="255" autocomplete="new-password" placeholder="необязательно"></div>
+        </div>
+        <div class="input-group"><label for="profileDlgFailClosed">Если SOCKS5 недоступен</label><select id="profileDlgFailClosed"><option value="1">Блокировать трафик клиентов</option><option value="0">Пускать напрямую с сервера</option></select></div>
+        <div class="hr"></div>
+        <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('profileDlg').close()">Отмена</button>
-            <button class="btn btn-primary" id="profileDlgSave" onclick="saveProfileDlg()">Создать</button>
+            <button class="btn btn-primary btn-wide" id="profileDlgSave" onclick="saveProfileDlg()">Создать</button>
         </div>
     </dialog>
 
-    <dialog id="newDlg">
-        <h2>Создание доступа</h2>
-        <div id="newDlgGroupNotice" style="display: none; font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-            Группа: <span id="newDlgGroupName" style="font-weight: 600; color: var(--text-muted);"></span>
+    <dialog id="newDlg" class="sheet">
+        <div class="dlg-header">
+            <h2>Создание доступа</h2>
+            <button class="close-btn" onclick="document.getElementById('newDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+        </div>
+        <div id="newDlgGroupNotice" style="display: none;">
+            <div class="ctx"><svg class="ic" aria-hidden="true"><use href="#i-users"></use></svg><span class="grow"><b>Группа «<span id="newDlgGroupName"></span>»</b><span class="s">ключ войдёт в группу</span></span></div>
         </div>
         <input type="hidden" id="newDlgGroupId" value="">
         <div class="input-group">
             <label for="cname">Имя клиента</label>
-            <input id="cname" maxlength="128">
+            <input id="cname" maxlength="128" placeholder="Например: Маша">
         </div>
         <div class="input-group">
-            <label for="days">Срок действия (0 = Бессрочно, 1-365 Ручной лимит)</label>
+            <label for="days">Срок действия, дней</label>
             <input type="number" id="days" value="30" min="0" max="365">
+            <span class="hint">0 — бессрочно · до 365</span>
         </div>
-        <div class="input-group">
-            <label for="new_workers">Число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
-            <input type="number" id="new_workers" min="0" max="100" value="0" placeholder="0 (Клиентские)">
+        <div class="grid2">
+            <div class="input-group">
+                <label for="new_workers">Потоки</label>
+                <select id="new_workers" class="workers-select"></select>
+                <span class="hint">клиент может взять меньше</span>
+            </div>
+            <div class="input-group">
+                <label for="new_device_limit">Подключений одновременно</label>
+                <input type="number" id="new_device_limit" min="1" max="100" value="3">
+                <span class="hint">устройств на этот ключ, <span class="nb">1–100</span></span>
+            </div>
         </div>
-        <div class="input-group">
-            <label for="new_device_limit">Подключений одновременно (1-100 устройств на этот ключ)</label>
-            <input type="number" id="new_device_limit" min="1" max="100" value="3">
-        </div>
-
+        <div class="hr"></div>
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('newDlg').close()">Отмена</button>
-            <button class="btn btn-primary" onclick="createClient()" id="createBtn">Создать</button>
+            <button class="btn btn-primary btn-wide" onclick="createClient()" id="createBtn">Создать</button>
         </div>
     </dialog>
 
-    <dialog id="editDlg">
+    <dialog id="editDlg" class="sheet">
         <div class="dlg-header">
-            <h2>Управление доступом</h2>
-            <button class="close-btn" onclick="document.getElementById('editDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <h2 id="editDlgTitle">Доступ</h2>
+            <button class="close-btn" onclick="document.getElementById('editDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-
-        <div class="input-group">
+        <p id="edit_owner_note" style="display: none;">Главный пароль сервера. Он не удаляется и не выключается; меняется в «Настройках».</p>
+        <div class="input-group" id="edit_name_group">
             <label for="edit_name">Имя клиента</label>
             <input id="edit_name" maxlength="128">
         </div>
-
-        <div class="input-group">
+        <div class="input-group" id="edit_group_group">
             <label for="edit_group">Группа</label>
             <select id="edit_group">
                 <option value="">Без группы</option>
             </select>
         </div>
-
         <div class="input-group">
             <label for="edit_pass">Пароль (ключ)</label>
-            <div style="display: flex; gap: 8px; align-items: center;">
-                <input id="edit_pass" readonly style="background: var(--surface-hover); color: var(--text-muted); cursor: not-allowed; flex: 1; font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; height: 48px;">
-                <button class="btn btn-ghost" onclick="copyPasswordText()" style="width: 48px; height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="Копировать"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
-                <button class="btn btn-ghost" onclick="openQrModalForActiveClient()" style="width: 48px; height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="QR-код"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M7 7h.01M17 7h.01M7 17h.01M17 17h.01"></path></svg></button>
+            <div class="field-row">
+                <input id="edit_pass" class="mono" readonly>
+                <button class="ib sm" type="button" onclick="copyPasswordText()" title="Копировать" aria-label="Копировать"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+                <button class="ib sm" type="button" onclick="openQrModalForActiveClient()" title="QR-код" aria-label="QR-код"><svg class="ic" aria-hidden="true"><use href="#i-qr"></use></svg></button>
             </div>
         </div>
-
-        <div class="input-group">
-            <label for="edit_days">Срок действия (0 = Бессрочно, 1-365 Ручной лимит)</label>
+        <div class="input-group" id="edit_days_group">
+            <label for="edit_days">Срок действия, дней</label>
             <input type="number" id="edit_days" min="0" max="365">
+            <span class="hint" id="edit_days_hint">0 — бессрочно · до 365</span>
         </div>
-
-        <div class="input-group">
-            <label for="edit_workers">Число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
-            <input type="number" id="edit_workers" min="0" max="100" value="0" placeholder="0 (Клиентские)">
+        <div class="grid2" id="edit_limits">
+            <div class="input-group">
+                <label for="edit_workers">Потоки</label>
+                <select id="edit_workers" class="workers-select"></select>
+                <span class="hint">клиент может взять меньше</span>
+            </div>
+            <div class="input-group" id="edit_device_limit_group">
+                <label for="edit_device_limit">Подключений одновременно</label>
+                <input type="number" id="edit_device_limit" min="1" max="100" value="3">
+                <span class="hint">устройств на этот ключ, <span class="nb">1–100</span></span>
+            </div>
         </div>
-
-        <div class="input-group" id="edit_device_limit_group">
-            <label for="edit_device_limit">Подключений одновременно (1-100 устройств на этот ключ)</label>
-            <input type="number" id="edit_device_limit" min="1" max="100" value="3">
+        <div class="facts">
+            <div id="edit_owner_devices" style="display: none;"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg><span>Подключений одновременно: без ограничения</span></div>
+            <div><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg><span>IP <span id="edit_ip_info">—</span> · трафик <span id="edit_traffic_info">↑ 0 B / ↓ 0 B</span></span></div>
         </div>
-
-        <!-- Info Section -->
-        <div style="border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-top: 16px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
-            <div style="display: flex; justify-content: space-between;"><span style="color: var(--text-muted);">IP-адрес:</span><span id="edit_ip_info" style="font-weight: 500;">—</span></div>
-            <div style="display: flex; justify-content: space-between;"><span style="color: var(--text-muted);">Трафик:</span><span id="edit_traffic_info" style="font-weight: 500; font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;">↑ 0 B / ↓ 0 B</span></div>
-        </div>
-
-        <div class="dlg-actions" style="margin-top: 16px;">
-            <button class="btn btn-ghost" id="edit_deleteBtn" style="color: #ef4444;" onclick="executeDelete()"><span class="hide-mobile">Удалить</span><span class="show-mobile">Удал.</span></button>
-            <button class="btn btn-ghost" id="edit_statusBtn" style="color: var(--primary);" onclick="executeToggle()">Выкл</button>
-            <button class="btn btn-primary" onclick="saveClientChanges()" id="edit_saveBtn"><span class="hide-mobile">Сохранить</span><span class="show-mobile">Сохр.</span></button>
+        <div class="hr"></div>
+        <div class="dlg-actions split">
+            <button class="btn btn-ghost danger" id="edit_deleteBtn" onclick="executeDelete()">Удалить</button>
+            <span>
+                <button class="btn btn-ghost" id="edit_closeBtn" style="display: none;" onclick="document.getElementById('editDlg').close()">Закрыть</button>
+                <button class="btn btn-tonal" id="edit_statusBtn" onclick="executeToggle()">Выключить</button>
+                <button class="btn btn-primary btn-wide" onclick="saveClientChanges()" id="edit_saveBtn">Сохранить</button>
+            </span>
         </div>
     </dialog>
 
-    <dialog id="newGroupDlg">
+    <dialog id="newGroupDlg" class="w440">
         <div class="dlg-header">
             <h2>Создание группы</h2>
-            <button class="close-btn" onclick="document.getElementById('newGroupDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button class="close-btn" onclick="document.getElementById('newGroupDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
         <div class="input-group">
             <label for="groupNameInput">Имя группы</label>
-            <input id="groupNameInput" maxlength="128" placeholder="Введите название группы">
+            <input id="groupNameInput" maxlength="128" placeholder="Например: Семья">
         </div>
+        <div class="hr"></div>
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('newGroupDlg').close()">Отмена</button>
-            <button class="btn btn-primary" onclick="createGroup()" id="createGroupBtn">Создать</button>
+            <button class="btn btn-primary btn-wide" onclick="createGroup()" id="createGroupBtn">Создать</button>
         </div>
     </dialog>
 
-    <dialog id="groupDlg" style="max-width: 720px; width: min(720px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
-        <div class="dlg-header" style="align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;">
-            <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
-                <h2 id="groupDlgTitle" style="font-size: 22px; margin: 0; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Группа</h2>
-                <input id="groupDlgTitleInput" style="display: none; font-size: 18px; font-weight: 700; height: 32px; padding: 0 8px; border-radius: 8px; width: 200px; max-width: 100%;" maxlength="128">
-                <button id="groupDlgEditBtn" onclick="toggleGroupInlineEdit()" style="background: none; border: 1px solid var(--border); cursor: pointer; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; transition: all 0.2s;" title="Переименовать">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                </button>
+    <dialog id="groupDlg" class="sheet">
+        <div class="dlg-header">
+            <div class="dlg-title">
+                <h2 id="groupDlgTitle" class="ell">Группа</h2>
+                <input id="groupDlgTitleInput" style="display: none;" maxlength="128" aria-label="Имя группы">
+                <button class="ib sm" id="groupDlgEditBtn" onclick="toggleGroupInlineEdit()" title="Переименовать" aria-label="Переименовать"><svg class="ic" aria-hidden="true"><use href="#i-pencil"></use></svg></button>
             </div>
-            <button class="close-btn" onclick="document.getElementById('groupDlg').close()" style="margin: 0; flex-shrink: 0;">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button class="close-btn" onclick="document.getElementById('groupDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-
-        <div class="group-dlg-actions">
-            <button class="btn btn-primary group-act-btn" onclick="createClientInCurrentGroup()">Создать пароль</button>
-            <div class="group-admin-row">
-                <button id="groupAdminLinkBtn" class="btn group-act-btn" onclick="createOrCopyGroupAdminLink()">Создать админа</button>
-                <button id="groupAdminDeleteBtn" class="btn btn-ghost group-regen-btn" style="display: none; color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.4);" onclick="deleteGroupAdminLink()" title="Удалить ссылку админа"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></svg></button>
-            </div>
-            <button id="groupDeleteBtn" class="btn group-act-btn group-delete-btn" onclick="deleteCurrentGroup()" title="Удалить группу">Удалить группу</button>
-            <div class="group-search-wrapper">
-                <input type="text" id="groupSearchInput" class="group-search-input" placeholder="Поиск в группе..." oninput="handleGroupSearch(this.value)">
-                <svg class="group-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                <button id="groupSearchClearBtn" onclick="clearGroupSearch()" style="display: none; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px;" title="Очистить">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                </button>
-            </div>
+        <div class="btns">
+            <button class="btn btn-primary grow" onclick="createClientInCurrentGroup()"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg>Создать доступ</button>
+            <button id="groupAdminLinkBtn" class="btn grow" onclick="createOrCopyGroupAdminLink()">Создать админа</button>
+            <button id="groupAdminDeleteBtn" class="ib danger" style="display: none;" onclick="deleteGroupAdminLink()" title="Удалить ссылку админа" aria-label="Удалить ссылку админа"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
-
-        <div id="groupClientsCards" class="client-cards-grid" style="margin-top: 12px;"></div>
+        <span class="sec">Для всех ключей группы</span>
+        <div class="input-group">
+            <label for="group_workers">Потоки</label>
+            <select id="group_workers" class="workers-select"></select>
+            <span class="hint">клиент может взять меньше · ключ со своим значением сохраняет его</span>
+        </div>
+        <span class="sec" id="groupMembersTitle">Участники</span>
+        <div class="search">
+            <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+            <input type="text" id="groupSearchInput" placeholder="Поиск в группе" aria-label="Поиск в группе" oninput="handleGroupSearch(this.value)">
+            <button class="ib sm" id="groupSearchClearBtn" onclick="clearGroupSearch()" style="display: none;" title="Очистить" aria-label="Очистить"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+        </div>
+        <div id="groupClientsCards" class="cells"></div>
+        <div class="hr"></div>
+        <div class="dlg-actions split">
+            <button id="groupDeleteBtn" class="btn btn-ghost danger" onclick="deleteCurrentGroup()">Удалить группу</button>
+            <button class="btn btn-primary btn-wide" id="groupSaveBtn" onclick="saveGroupSettings()">Сохранить</button>
+        </div>
     </dialog>
 
-    <dialog id="routingRulesDlg" style="max-width: 680px; width: min(680px, calc(100% - 24px)); max-height: 85vh; overflow-y: auto;">
-        <div class="dlg-header" style="align-items: center; justify-content: space-between; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                <h2 style="margin: 0;">Управление маршрутизацией</h2>
-                <button class="btn btn-primary" style="font-size: 13px; padding: 4px 12px; height: 32px; white-space: nowrap;" onclick="openEditRoutingRuleDlg(null)">+ Создать правило</button>
-            </div>
-            <button class="close-btn" onclick="document.getElementById('routingRulesDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+    <dialog id="routingRulesDlg" class="w720">
+        <div class="dlg-header">
+            <h2>Маршруты для клиентов</h2>
+            <button class="close-btn" onclick="document.getElementById('routingRulesDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-        <p style="font-size: 13px; color: var(--text-muted); margin: 8px 0 16px; line-height: 1.5;">
-            Правила маршрутизации автоматически передаются клиенту Android при подключении (через TUNCONF). При назначении правила клиенту вкладка «Исключения» в приложении скрывается, а правила применяются сервером.
-        </p>
-        <div id="routingRulesList" style="display: flex; flex-direction: column; gap: 12px;"></div>
+        <p>Правило приходит клиенту с сервера и заменяет его собственные списки, пока действует.</p>
+        <div id="routingRulesList" class="cells"></div>
+        <div class="dlg-actions">
+            <button class="btn btn-primary" onclick="openEditRoutingRuleDlg(null)"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg>Создать правило</button>
+        </div>
     </dialog>
 
-    <dialog id="editRoutingRuleDlg" style="max-width: 620px; width: min(620px, calc(100% - 24px)); max-height: 85vh; overflow-y: auto;">
+    <dialog id="editRoutingRuleDlg" class="sheet">
         <div class="dlg-header">
             <h2 id="editRoutingRuleTitle">Правило маршрутизации</h2>
-            <button class="close-btn" onclick="document.getElementById('editRoutingRuleDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button class="close-btn" onclick="document.getElementById('editRoutingRuleDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
         <input type="hidden" id="ruleId">
         <div class="input-group">
             <label for="ruleName">Имя правила</label>
             <input id="ruleName" maxlength="128" placeholder="Например: Обход блокировок">
         </div>
-        <div class="input-group">
-            <label for="ruleMode">Приложения</label>
-            <select id="ruleMode" onchange="onRuleModeChange()">
-                <option value="blacklist">Все через VPN, кроме списка</option>
-                <option value="whitelist">Только список через VPN</option>
-            </select>
-            <div id="ruleModeWhitelistHint" style="display: none; margin-top: 6px; font-size: 12px; color: var(--warning, #b45309);"></div>
+        <span class="sec">Приложения · через туннель</span>
+        <div class="seg" data-for="ruleMode" role="radiogroup" aria-label="Приложения через туннель">
+            <button type="button" role="radio" data-value="blacklist">Всё, кроме списка</button>
+            <button type="button" role="radio" data-value="whitelist">Только список</button>
         </div>
+        <select id="ruleMode" onchange="onRuleModeChange()" hidden>
+            <option value="blacklist">Всё, кроме списка</option>
+            <option value="whitelist">Только список</option>
+        </select>
+        <span id="ruleModeWhitelistHint" class="hint" style="display: none; color: var(--warn);"></span>
         <div class="input-group">
-            <label for="rulePackages">Список пакетов приложений</label>
-            <textarea id="rulePackages" oninput="onRuleModeChange()" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
+            <label for="rulePackages">Список пакетов</label>
+            <textarea id="rulePackages" oninput="onRuleModeChange()" rows="3" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
         </div>
-        <div class="input-group">
-            <label for="ruleDomainsMode">Домены</label>
-            <select id="ruleDomainsMode" onchange="onRuleDomainsModeChange()">
-                <option value="blacklist">Все через VPN, кроме списка</option>
-                <option value="whitelist">Только список через VPN</option>
-            </select>
+        <span class="sec">Домены · через туннель</span>
+        <div class="seg" data-for="ruleDomainsMode" role="radiogroup" aria-label="Домены через туннель">
+            <button type="button" role="radio" data-value="blacklist">Всё, кроме списка</button>
+            <button type="button" role="radio" data-value="whitelist">Только список</button>
         </div>
+        <select id="ruleDomainsMode" onchange="onRuleDomainsModeChange()" hidden>
+            <option value="blacklist">Всё, кроме списка</option>
+            <option value="whitelist">Только список</option>
+        </select>
         <div class="input-group">
             <label for="ruleDomains">Список доменов</label>
-            <textarea id="ruleDomains" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="gosuslugi.ru&#10;*.ru&#10;vk.com"></textarea>
+            <textarea id="ruleDomains" rows="3" placeholder="gosuslugi.ru&#10;*.ru&#10;vk.com"></textarea>
         </div>
-        <div class="toggle-row" id="ruleTemplateDomainsRow" style="margin-bottom: 16px;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <label for="ruleTemplateDomains" style="cursor: pointer;">Готовый список RU доменов</label>
-                <button type="button" class="btn-icon" style="padding: 2px; border: none; background: transparent; cursor: pointer; color: var(--primary); display: flex; align-items: center;" onclick="openTemplateDomainsDlg()" title="Посмотреть список RU доменов">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                </button>
-            </div>
+        <div class="toggle-row" id="ruleTemplateDomainsRow">
+            <span class="grow"><label for="ruleTemplateDomains" class="t">Готовый список RU доменов</label><span class="s">домены списка идут напрямую</span></span>
+            <button type="button" class="ib sm" onclick="openTemplateDomainsDlg()" title="Посмотреть список RU доменов" aria-label="Посмотреть список RU доменов"><svg class="ic" aria-hidden="true"><use href="#i-help"></use></svg></button>
             <label class="switch">
                 <input type="checkbox" id="ruleTemplateDomains">
                 <span class="slider"></span>
             </label>
         </div>
-        <div class="input-group">
-            <label for="ruleIpMode">Адреса</label>
-            <select id="ruleIpMode">
-                <option value="blacklist">Все через VPN, кроме списка</option>
-                <option value="whitelist">Только список через VPN</option>
-            </select>
+        <span class="sec">Адреса · через туннель</span>
+        <div class="seg" data-for="ruleIpMode" role="radiogroup" aria-label="Адреса через туннель">
+            <button type="button" role="radio" data-value="blacklist">Всё, кроме списка</button>
+            <button type="button" role="radio" data-value="whitelist">Только список</button>
         </div>
+        <select id="ruleIpMode" hidden>
+            <option value="blacklist">Всё, кроме списка</option>
+            <option value="whitelist">Только список</option>
+        </select>
         <div class="input-group">
             <label for="ruleIps">Список адресов</label>
-            <textarea id="ruleIps" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="1.2.3.4/32&#10;1.2.3.4&#10;1.2.3.4-1.2.3.255"></textarea>
+            <textarea id="ruleIps" rows="3" placeholder="1.2.3.4/32&#10;1.2.3.4&#10;1.2.3.4-1.2.3.255"></textarea>
         </div>
-        <div class="input-group">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; flex-wrap: wrap; gap: 6px;">
-                <label style="margin: 0;">Применить правило к:</label>
-                <div style="display: flex; gap: 6px;">
-                    <button type="button" class="btn btn-ghost" style="font-size: 11px; height: 26px; padding: 0 8px; border: 1px solid var(--border);" onclick="selectAllRuleTargets(true)">Выбрать все</button>
-                    <button type="button" class="btn btn-ghost" style="font-size: 11px; height: 26px; padding: 0 8px; border: 1px solid var(--border);" onclick="selectAllRuleTargets(false)">Снять все</button>
-                </div>
-            </div>
-            <div id="ruleTargetsContainer" class="rule-targets-container" style="user-select: none; -webkit-user-select: none; touch-action: pan-y;"></div>
+        <div class="sec">
+            <span>Применить к</span>
+            <span class="btns">
+                <button type="button" class="btn btn-ghost btn-sm" onclick="selectAllRuleTargets(true)">Выбрать все</button>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="selectAllRuleTargets(false)">Снять все</button>
+            </span>
         </div>
-        <div class="dlg-actions">
-            <button class="btn btn-ghost" onclick="document.getElementById('editRoutingRuleDlg').close()">Отмена</button>
-            <button class="btn btn-ghost" id="ruleDeleteBtn" style="color: #ef4444; display: none;" onclick="deleteCurrentRoutingRule()">Удалить</button>
-            <button class="btn btn-primary" onclick="saveRoutingRule()" id="ruleSaveBtn">Сохранить</button>
+        <div id="ruleTargetsContainer" class="cells scroll rule-targets-container" style="user-select: none; -webkit-user-select: none; touch-action: pan-y;"></div>
+        <div class="hr"></div>
+        <div class="dlg-actions split">
+            <button class="btn btn-ghost danger" id="ruleDeleteBtn" style="display: none;" onclick="deleteCurrentRoutingRule()">Удалить</button>
+            <span>
+                <button class="btn btn-ghost" onclick="document.getElementById('editRoutingRuleDlg').close()">Отмена</button>
+                <button class="btn btn-primary btn-wide" onclick="saveRoutingRule()" id="ruleSaveBtn">Сохранить</button>
+            </span>
         </div>
     </dialog>
 
-    <dialog id="templateDomainsDlg" style="max-width: 540px; width: min(540px, calc(100% - 24px)); max-height: 80vh; overflow-y: auto;">
+    <dialog id="templateDomainsDlg">
         <div class="dlg-header">
             <h2>Список RU доменов</h2>
-            <button class="close-btn" onclick="document.getElementById('templateDomainsDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button class="close-btn" onclick="document.getElementById('templateDomainsDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.5;">
-            Эти <span id="templateDomainsCount">503</span> домена направляются напрямую без VPN при включении функции:
-        </p>
-        <div style="margin-bottom: 10px;">
-            <input id="templateDomainsFilter" placeholder="Быстрый поиск по доменам..." style="width: 100%; height: 38px; font-size: 13px; padding: 0 12px;" oninput="filterTemplateDomains(this.value)">
+        <p><span id="templateDomainsCount">503 домена идут</span> напрямую, когда список включён в правиле.</p>
+        <div class="search">
+            <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+            <input id="templateDomainsFilter" placeholder="Быстрый поиск по доменам" aria-label="Быстрый поиск по доменам" oninput="filterTemplateDomains(this.value)">
         </div>
-        <div id="templateDomainsList" style="max-height: 320px; overflow-y: auto; background: var(--bg-color); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--text-main);"></div>
-        <div class="dlg-actions" style="margin-top: 16px;">
-            <button class="btn btn-primary" onclick="document.getElementById('templateDomainsDlg').close()">Понятно</button>
+        <div id="templateDomainsList" class="cells scroll mono"></div>
+        <div class="dlg-actions">
+            <button class="btn btn-wide" onclick="document.getElementById('templateDomainsDlg').close()">Понятно</button>
         </div>
     </dialog>
 
-    <dialog id="linksAndTokensDlg" style="max-width: 820px; width: min(820px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+    <dialog id="linksAndTokensDlg" class="w820">
         <div class="dlg-header">
             <h2>Настройка ссылок</h2>
-            <button class="close-btn" onclick="document.getElementById('linksAndTokensDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button class="close-btn" onclick="document.getElementById('linksAndTokensDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-
-        <!-- Top bulk settings panel -->
-        <div class="hub-bulk-panel">
-            <div class="hub-field-block">
-                <label class="hub-field-label">Общий VK токен</label>
-                <div class="hub-field-row">
-                    <span class="hub-field-input" style="display:flex;align-items:center;color:var(--text-muted);font-size:13px;line-height:1.4;">VK-токен на сервере больше не хранится: клиенты в режиме «токен» получают VK хеши владельца (поле ниже).</span>
-                    <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Выдать хеши владельца</span><span class="show-mobile">Хеши владельца</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Выключить режим «токен»</span><span class="show-mobile">Выключить</span></button>
-                    </div>
+        <div class="settings-grid">
+            <div class="card">
+                <h3>Хеши VK</h3>
+                <span class="s">Токен VK на сервере не хранится: клиенты в режиме «токен» получают хеши владельца.</span>
+                <div class="btns">
+                    <button class="btn btn-sm" onclick="applyHubVkTokenDirect()">Хеши владельца</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-token')">Выключить «токен»</button>
+                </div>
+                <div class="input-group">
+                    <label for="hubVkHashesInput">Хеши VK для выбранных (через запятую)</label>
+                    <input id="hubVkHashesInput" placeholder="hash1,hash2,...,hash6" onchange="autoSaveHubVkHashes()" onblur="autoSaveHubVkHashes()">
+                </div>
+                <div class="btns">
+                    <button class="btn btn-tonal btn-sm" onclick="applyHubVkHashesDirect()">Применить</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-hashes')">Очистить</button>
                 </div>
             </div>
-
-            <div class="hub-field-block">
-                <label class="hub-field-label">VK хеши (через запятую)</label>
-                <div class="hub-field-row">
-                    <input id="hubVkHashesInput" class="hub-field-input" placeholder="hash1,hash2,...,hash6" onchange="autoSaveHubVkHashes()" onblur="autoSaveHubVkHashes()">
-                    <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkHashesDirect()"><span class="hide-mobile">Применить VK хеши</span><span class="show-mobile">Применить хеши</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-hashes')"><span class="hide-mobile">Очистить хеши</span><span class="show-mobile">Очистить</span></button>
-                    </div>
+            <div class="card">
+                <h3>Потоки для выбранных</h3>
+                <div class="input-group">
+                    <label for="hubWorkersInput">Потоки</label>
+                    <select id="hubWorkersInput" class="workers-select"></select>
+                    <span class="hint">клиент может взять меньше · 3–100</span>
                 </div>
-            </div>
-
-            <div class="hub-field-block">
-                <label class="hub-field-label">Установить число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
-                <div class="hub-field-row hub-workers-row">
-                    <input type="number" id="hubWorkersInput" class="hub-field-input hub-workers-input" min="0" max="100" value="0" placeholder="0 (Клиентские)">
-                    <div class="hub-field-actions">
-                        <button class="btn btn-primary hub-btn-apply" onclick="applyHubWorkersDirect()"><span class="hide-mobile">Установить число потоков</span><span class="show-mobile">Установить</span></button>
-                        <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-workers')"><span class="hide-mobile">Сбросить число потоков</span><span class="show-mobile">Сбросить</span></button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="hub-bulk-footer">
-                <div style="display: flex; align-items: center; gap: 8px; font-size: 13px;">
-                    <input type="checkbox" id="hubSelectAll" onchange="toggleSelectAllHubClients(this.checked)" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary);">
-                    <label for="hubSelectAll" style="cursor: pointer; font-weight: 600;">Выбрать всех</label>
-                    <span id="hubSelectedCount" style="color: var(--text-muted); font-size: 12px;">(0 выбрано)</span>
-                </div>
-                <div class="hub-search-container" style="position: relative; width: 280px; max-width: 100%;">
-                    <input type="text" id="hubSearchInput" class="hub-search-input" placeholder="Клиент (группа)..." oninput="handleHubSearch(this.value)" style="padding-left: 44px !important; padding-right: 32px !important;">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                    <button id="hubSearchClearBtn" onclick="clearHubSearch()" style="display: none; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; align-items: center; justify-content: center;" title="Очистить">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                    </button>
+                <div class="btns">
+                    <button class="btn btn-tonal btn-sm" onclick="applyHubWorkersDirect()">Установить</button>
+                    <button class="btn btn-sm" onclick="promptBatchAction('clear-workers')">Сбросить</button>
                 </div>
             </div>
         </div>
-
-        <!-- Clients links list -->
-        <div id="hubClientsList" style="display: flex; flex-direction: column; gap: 10px;"></div>
+        <div class="wbar">
+            <label class="btns" for="hubSelectAll">
+                <input type="checkbox" id="hubSelectAll" onchange="toggleSelectAllHubClients(this.checked)">
+                <span class="t">Выбрать всех</span>
+                <span class="s" id="hubSelectedCount">(0 выбрано)</span>
+            </label>
+            <div class="search">
+                <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+                <input type="text" id="hubSearchInput" placeholder="Клиент (группа)" aria-label="Клиент или группа" oninput="handleHubSearch(this.value)">
+                <button class="ib sm" id="hubSearchClearBtn" onclick="clearHubSearch()" style="display: none;" title="Очистить" aria-label="Очистить"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+        </div>
+        <div id="hubClientsList" class="cells"></div>
     </dialog>
 
-    <dialog id="qrDlg" style="max-width: 440px; width: min(440px, calc(100% - 24px)); text-align: center;">
-        <div class="dlg-header" style="justify-content: space-between;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M7 7h.01M17 7h.01M7 17h.01M17 17h.01"></path></svg>
-                <h2 id="qrDlgTitle" style="font-size: 18px; margin: 0;">QR-код клиента</h2>
-            </div>
-            <button class="close-btn" onclick="document.getElementById('qrDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+    <dialog id="qrDlg" class="w440">
+        <div class="dlg-header">
+            <h2 id="qrDlgTitle">QR-код клиента</h2>
+            <button class="close-btn" onclick="document.getElementById('qrDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-        <div style="display: flex; flex-direction: column; align-items: center; gap: 16px; margin: 16px 0;">
-            <div id="qrCodeContainer"></div>
-            <div style="width: 100%; display: flex; gap: 8px; align-items: center;">
-                <input id="qrDlgLink" readonly style="flex: 1; height: 42px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; padding: 0 10px; background: var(--surface-hover); color: var(--text-muted); border-radius: 8px;" onclick="this.select()">
-                <button class="btn btn-ghost" id="qrDlgCopyBtn" onclick="copyQrDlgLink(this)" style="height: 42px; width: 44px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px;" title="Копировать ссылку">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                </button>
+        <div id="qrCodeContainer"></div>
+        <div class="input-group">
+            <label for="qrDlgLink">Ссылка</label>
+            <div class="field-row">
+                <input id="qrDlgLink" class="mono" readonly onclick="this.select()">
+                <button class="ib sm" id="qrDlgCopyBtn" onclick="copyQrDlgLink(this)" title="Копировать ссылку" aria-label="Копировать ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
             </div>
         </div>
-        <div class="dlg-actions" style="justify-content: center;">
-            <button class="btn btn-primary" style="width: 100%;" onclick="document.getElementById('qrDlg').close()">Закрыть</button>
+        <div class="dlg-actions">
+            <button class="btn btn-wide" onclick="document.getElementById('qrDlg').close()">Закрыть</button>
         </div>
     </dialog>
 
     <!-- Confirmation Dialog for Batch Operations -->
-    <dialog id="batchConfirmDlg" style="max-width: 440px; width: min(440px, calc(100% - 24px));">
-        <h2 id="batchConfirmTitle" style="font-size: 20px; margin-bottom: 12px;">Подтверждение</h2>
-        <p id="batchConfirmMessage" style="font-size: 14px; color: var(--text-muted); line-height: 1.5; margin-bottom: 24px;"></p>
+    <dialog id="batchConfirmDlg" class="w440">
+        <h2 id="batchConfirmTitle">Подтверждение</h2>
+        <p id="batchConfirmMessage"></p>
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('batchConfirmDlg').close()">Отмена</button>
-            <button class="btn btn-primary" id="batchConfirmSubmitBtn">Применить</button>
+            <button class="btn btn-primary btn-wide" id="batchConfirmSubmitBtn">Применить</button>
         </div>
     </dialog>
 
-    <dialog id="importExportDlg" style="max-width: 640px; width: min(640px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+    <dialog id="importExportDlg">
         <div class="dlg-header">
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <div style="width: 36px; height: 36px; border-radius: 10px; background: var(--icon-bg); color: var(--primary); display: grid; place-items: center;">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
-                    </svg>
-                </div>
-                <div>
-                    <h2 style="font-size: 20px; font-weight: 700; margin: 0;">Импорт и Экспорт</h2>
-                    <p style="font-size: 12px; color: var(--text-muted); margin: 0;">Резервная копия, перенос клиентов и настроек</p>
-                </div>
+            <div>
+                <h2>Импорт и экспорт</h2>
+                <span class="s">Резервная копия, перенос клиентов и настроек</span>
             </div>
-            <button class="close-btn" onclick="document.getElementById('importExportDlg').close()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button class="close-btn" onclick="document.getElementById('importExportDlg').close()" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
         </div>
-
-        <div style="display: flex; gap: 8px; margin-bottom: 16px;">
-            <button id="btnTabExport" class="btn btn-primary" style="flex: 1;" onclick="switchImportExportTab('export')">Экспорт</button>
-            <button id="btnTabImport" class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border);" onclick="switchImportExportTab('import')">Импорт</button>
+        <div class="seg">
+            <button id="btnTabExport" class="btn btn-primary" onclick="switchImportExportTab('export')">Экспорт</button>
+            <button id="btnTabImport" class="btn btn-ghost" onclick="switchImportExportTab('import')">Импорт</button>
         </div>
-
-        <div style="display: flex; gap: 8px; margin-bottom: 16px; align-items: center;">
-            <label style="flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; font-weight: 500;">
-                <input type="checkbox" id="ieOptClients" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary);">
-                <span>Клиенты</span>
-            </label>
-            <label style="flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; font-weight: 500;">
-                <input type="checkbox" id="ieOptSettings" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary);">
-                <span>Настройки</span>
-            </label>
+        <div class="btns">
+            <label class="btns grow"><input type="checkbox" id="ieOptClients" checked><span class="t">Клиенты</span></label>
+            <label class="btns grow"><input type="checkbox" id="ieOptSettings" checked><span class="t">Настройки</span></label>
         </div>
-
         <div id="iePaneExport" style="display: flex; flex-direction: column; gap: 12px;">
-            <div style="display: flex; gap: 10px;">
-                <button class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); gap: 8px; justify-content: center;" onclick="executeExportDownload()">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                    <span>Скачать</span>
-                </button>
-                <button class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); gap: 8px; justify-content: center;" onclick="executeExportCopy()">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                    <span>Копировать</span>
-                </button>
+            <div class="btns">
+                <button class="btn grow" onclick="executeExportDownload()"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg>Скачать</button>
+                <button class="btn grow" onclick="executeExportCopy()"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg>Копировать</button>
             </div>
         </div>
-
         <div id="iePaneImport" style="display: none; flex-direction: column; gap: 12px;">
-            <div style="display: flex; gap: 10px;">
-                <label class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); cursor: pointer; gap: 8px; justify-content: center; display: inline-flex; align-items: center;">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
-                    <span>Загрузить файл</span>
+            <div class="btns">
+                <label class="btn grow">
+                    <svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg><span>Загрузить файл</span>
                     <input type="file" id="ieFileInput" accept=".json" style="display: none;" onchange="handleImportFile(event)">
                 </label>
-                <button class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); gap: 8px; justify-content: center;" onclick="executeImportFromClipboard()">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
-                    <span>Вставить из буфера</span>
-                </button>
+                <button class="btn grow" onclick="executeImportFromClipboard()"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg>Вставить из буфера</button>
             </div>
             <div id="ieImportStatus" style="font-size: 13px; font-weight: 600; display: none; text-align: center;"></div>
         </div>
     </dialog>
 
     <!-- API Documentation Modal -->
-    <dialog id="apiDocsDlg" style="max-width: 940px; width: min(940px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+    <dialog id="apiDocsDlg" class="w940">
         <div class="dlg-header">
             <div style="display: flex; align-items: center; gap: 10px;">
                 <div style="width: 36px; height: 36px; border-radius: 10px; background: var(--icon-bg); color: var(--primary); display: grid; place-items: center;">
@@ -10256,7 +8485,7 @@ const PANEL_HTML: &str = r##"
                     <span class="api-desc">Каскадное удаление группы</span>
                 </div>
                 <div class="api-card-body">
-                    <p style="font-size: 12px; color: #ef4444; font-weight: 500;">
+                    <p style="font-size: 12px; color: var(--danger); font-weight: 500;">
                         Внимание: удаляет группу и безвозвратно удаляет всех входящих в неё клиентов.
                     </p>
                 </div>
@@ -10318,7 +8547,7 @@ const PANEL_HTML: &str = r##"
 
         <!-- TAB 3: Subscriptions -->
         <div id="apiPaneSubs" style="display: none; flex-direction: column; gap: 12px; margin-bottom: 20px;">
-            <div style="background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 10px; padding: 10px 14px; font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+            <div style="background: var(--accent-soft); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 12px; color: var(--text-muted); line-height: 1.5;">
                 <strong style="color: #60a5fa;">Изоляция доступа:</strong> эндпоинты подписок и управления группами открываются напрямую от корня со своим персональным секретным UUID (без префикса главной админки). Это предотвращает утечку пути главной панели администратора.
             </div>
 
@@ -10638,9 +8867,9 @@ const PANEL_HTML: &str = r##"
         </div>
     </dialog>
 
-    <dialog id="rebootDlg">
+    <dialog id="rebootDlg" class="w440">
         <h2>Перезапуск сервера</h2>
-        <p style="color: var(--text-muted); font-size: 15px; margin-bottom: 24px;">Вы уверены, что хотите перезапустить CSQTT? Активные соединения будут прерваны на несколько секунд.</p>
+        <p>Вы уверены, что хотите перезапустить CSQTT? Активные соединения будут прерваны на несколько секунд.</p>
         <div class="dlg-actions">
             <button class="btn btn-ghost" onclick="document.getElementById('rebootDlg').close()">Отмена</button>
             <button class="btn btn-primary" onclick="executeReboot()">Перезапустить</button>
@@ -10663,9 +8892,6 @@ const PANEL_HTML: &str = r##"
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register((basePath || '') + '/sw.js', { scope: (basePath || '') + '/' }).catch(() => {});
             });
-        }
-        function openCryptoDonateDlg() {
-            document.getElementById('cryptoDonateDlg').showModal();
         }
         async function copyText(text, btn) {
             if (await copyToClipboard(text)) {
@@ -10715,6 +8941,44 @@ const PANEL_HTML: &str = r##"
                 return false;
             }
         }
+
+        const ic = name => `<svg class="ic" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+        // 1 ключ, 2 ключа, 5 ключей
+        function countText(n, one, few, many) {
+            const d = n % 10, h = n % 100;
+            return n + ' ' + (d === 1 && h !== 11 ? one : d >= 2 && d <= 4 && (h < 12 || h > 14) ? few : many);
+        }
+        // «Потоки»: no limit first, then 3–100; the value 0 is what the server reads as no limit
+        document.querySelectorAll('select.workers-select').forEach(select => {
+            select.innerHTML = '<option value="0">Без ограничения</option>'
+                + Array.from({ length: 98 }, (_, i) => `<option value="${i + 3}">${i + 3}</option>`).join('');
+        });
+        function togglePasswordReveal(id, btn) {
+            const input = document.getElementById(id);
+            const show = input.type === 'password';
+            input.type = show ? 'text' : 'password';
+            const label = show ? 'Скрыть пароль' : 'Показать пароль';
+            btn.title = label;
+            btn.setAttribute('aria-label', label);
+            btn.innerHTML = ic(show ? 'eye-off' : 'eye');
+        }
+        // a two-way choice drawn over its select: the select stays the value the rest of the script reads and sets
+        function syncSegs() {
+            document.querySelectorAll('.seg[data-for]').forEach(seg => {
+                const value = document.getElementById(seg.dataset.for).value;
+                seg.querySelectorAll('button').forEach(b => {
+                    const on = b.dataset.value === value;
+                    b.classList.toggle('on', on);
+                    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+                });
+            });
+        }
+        document.querySelectorAll('.seg[data-for] button').forEach(b => b.addEventListener('click', () => {
+            const select = document.getElementById(b.parentElement.dataset.for);
+            select.value = b.dataset.value;
+            select.dispatchEvent(new Event('change'));
+            syncSegs();
+        }));
 
         let apiNetworkToastShown = false;
         async function api(u, o = {}) {
@@ -10784,15 +9048,7 @@ const PANEL_HTML: &str = r##"
             toast.className = 'toast ' + (type === 'error' ? 'toast-error' : 'toast-success');
             const icon = document.createElement('div');
             icon.className = 'toast-icon';
-            if (type === 'error') {
-                icon.style.color = '#ef4444';
-                icon.style.background = 'rgba(239, 68, 68, 0.15)';
-                icon.textContent = '✗';
-            } else {
-                icon.style.color = 'var(--primary)';
-                icon.style.background = 'var(--icon-bg)';
-                icon.textContent = '✓';
-            }
+            icon.textContent = type === 'error' ? '✗' : '✓';
             const message = document.createElement('span');
             message.textContent = String(text);
             toast.append(icon, message);
@@ -10842,7 +9098,7 @@ const PANEL_HTML: &str = r##"
                 let r = await api("/api/stats"); if(!r.ok) return; let x = await r.json();
                 if (x.peer_port) window.serverDefaultPeerPort = Number(x.peer_port);
                 if (x.public_ip) window.serverPublicIp = x.public_ip;
-                document.getElementById('status_val').textContent = x.status === "Active" ? "Активно" : x.status;
+                document.getElementById('status_val').textContent = x.status === "Active" ? "Работает" : x.status;
                 document.getElementById('status_uptime').textContent = "Аптайм: " + uptime(x.uptime);
                 document.getElementById('active_val').textContent = x.active;
                 const cpuTotal = Number(x.cpu_total) || 0;
@@ -10956,29 +9212,26 @@ const PANEL_HTML: &str = r##"
             if (!container) return;
             const { profiles, active_profile_id, route_active, port_listening, health_error, tcp_sessions, udp_flows } = localProxyData;
             if (!profiles.length) {
-                container.innerHTML = '<div class="proxy-empty">Нет профилей. Нажмите кнопку <strong>+</strong> чтобы добавить.</div>';
+                container.innerHTML = '<div class="proxy-empty">Профилей нет. Добавьте первый кнопкой «+».</div>';
                 return;
             }
-            const playIcon = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.5 4.9v14.2a1 1 0 0 0 1.53.85l11.3-7.1a1 1 0 0 0 0-1.7L9.03 4.05a1 1 0 0 0-1.53.85z"/></svg>';
-            const stopIcon = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5.5" y="5.5" width="13" height="13" rx="2"/></svg>';
-            const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>';
-            const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>';
             container.innerHTML = profiles.map(p => {
                 const isActive = p.id === active_profile_id;
                 let badge = '';
                 if (isActive) {
                     if (route_active) {
-                        badge = `<span style="font-size:11px;font-weight:600;color:#10b981;margin-left:6px;">Активен</span>`;
+                        badge = `<span class="proxy-state" style="color: var(--ok);">Активен</span>`;
                     } else if (port_listening === false) {
-                        badge = `<span style="font-size:11px;font-weight:600;color:#ef4444;margin-left:6px;">Порт не слушается</span>`;
+                        badge = `<span class="proxy-state" style="color: var(--danger);">Порт не слушается</span>`;
                     } else if (health_error) {
-                        badge = `<span style="font-size:11px;font-weight:600;color:#ef4444;margin-left:6px;" title="${esc(health_error)}">Проба не прошла (Direct)</span>`;
+                        badge = `<span class="proxy-state" style="color: var(--danger);" title="${esc(health_error)}">Проба не прошла (Direct)</span>`;
                     } else {
-                        badge = `<span style="font-size:11px;font-weight:600;color:#f59e0b;margin-left:6px;">Подключение...</span>`;
+                        badge = `<span class="proxy-state" style="color: var(--warn);">Подключение...</span>`;
                     }
                 }
                 const where = p.host && p.host !== '127.0.0.1' ? `${esc(p.host)}:${p.port}` : `${p.port}`;
-                let meta = p.username ? `${where} · ${p.username}` : where;
+                let meta = p.username ? `${where} · ${esc(p.username)}` : where;
+                meta += ` · при недоступности: ${p.fail_closed === false ? 'напрямую с сервера' : 'блокировать трафик'}`;
                 if (isActive) {
                     if (route_active) {
                         meta += ` · ${tcp_sessions} TCP · ${udp_flows} UDP`;
@@ -10987,18 +9240,17 @@ const PANEL_HTML: &str = r##"
                     }
                 }
                 const toggleBtn = isActive
-                    ? `<button title="Деактивировать" onclick="deactivateProxy()">${stopIcon}</button>`
-                    : `<button title="Активировать" onclick="activateProxy('${esc(p.id)}')">${playIcon}</button>`;
+                    ? `<button class="ib sm" title="Деактивировать" aria-label="Деактивировать" onclick="deactivateProxy()">${ic('stop')}</button>`
+                    : `<button class="ib sm" title="Активировать" aria-label="Активировать" onclick="activateProxy('${esc(p.id)}')">${ic('play')}</button>`;
                 return `<div class="proxy-profile-card${isActive ? ' is-active' : ''}" data-id="${esc(p.id)}">
-                    <div class="proxy-profile-dot"></div>
                     <div class="proxy-profile-body">
                         <div class="proxy-profile-name">${esc(p.name)}${badge}</div>
                         <div class="proxy-profile-meta">${meta}</div>
                     </div>
                     <div class="proxy-profile-actions">
                         ${toggleBtn}
-                        <button title="Редактировать" onclick="openProfileDlg('${esc(p.id)}')">${editIcon}</button>
-                        <button class="danger" title="Удалить" onclick="deleteProxy('${esc(p.id)}','${esc(p.name)}')">${trashIcon}</button>
+                        <button class="ib sm" title="Редактировать" aria-label="Редактировать" onclick="openProfileDlg('${esc(p.id)}')">${ic('pencil')}</button>
+                        <button class="ib sm danger" title="Удалить" aria-label="Удалить" onclick="deleteProxy('${esc(p.id)}','${esc(p.name)}')">${ic('trash')}</button>
                     </div>
                 </div>`;
             }).join('');
@@ -11148,44 +9400,55 @@ const PANEL_HTML: &str = r##"
             return 'Клиент' + Math.floor(100 + Math.random() * 900);
         }
 
+        const shortDate = seconds => new Date(seconds * 1000)
+            .toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }).replace(/\.| г\./g, '');
+        // what a key is, in one word: the owner's, working, switched off, or past its term
+        function clientState(x) {
+            if (x.is_owner) return ['acc', 'владелец'];
+            if (x.active) return ['ok', 'активен'];
+            if (x.expires && x.expires * 1000 <= Date.now()) return ['warn', 'срок истёк'];
+            return ['', 'выключен'];
+        }
+        function stateChip(x) {
+            const [kind, text] = clientState(x);
+            return `<span class="chip ${kind}">${kind === 'ok' ? '<span class="dot"></span>' : ''}${text}</span>`;
+        }
+        function termText(x) {
+            if (!x.expires) return 'бессрочно';
+            return (x.expires * 1000 <= Date.now() ? 'истёк ' : 'до ') + shortDate(x.expires);
+        }
+
         function renderClientCard(x) {
-            const isMain = x.name === "Главный пароль";
-            const expiryStr = isMain ? "—" : (x.expires ? new Date(x.expires * 1000).toLocaleDateString() : "∞ Бессрочно");
             return `
-            <div class="client-card" onclick="openEditClientDlgByPassword('${esc(x.password)}')">
+            <div class="client-card${x.is_owner ? ' owner' : ''}" onclick="openEditClientDlgByPassword('${esc(x.password)}')">
                 <div class="client-card-header">
-                    <div class="client-card-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0;"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                        <span>${esc(x.name || 'Клиент')}</span>
-                    </div>
-                    <span class="badge ${x.active ? "active" : "inactive"}">${x.active ? "Участник" : "Неактивно"}</span>
+                    <span class="client-card-title">${esc(x.name || 'Клиент')}</span>
+                    ${stateChip(x)}
                 </div>
-                <div class="client-card-body">
-                    <div class="client-card-row">
-                        <span class="client-card-label">IP:</span>
-                        <span class="client-card-value">${esc(x.ip || '—')}</span>
-                    </div>
-                    <div class="client-card-row">
-                        <span class="client-card-label">Срок действия:</span>
-                        <span class="client-card-value">${expiryStr}</span>
-                    </div>
-                    <div class="client-card-row">
-                        <span class="client-card-label">Трафик:</span>
-                        <span class="client-card-value" style="font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;">↑ ${size(x.up)} / ↓ ${size(x.down)}</span>
-                    </div>
-                    <div class="client-card-row">
-                        <span class="client-card-label">Потоки:</span>
-                        <span class="client-card-value">${x.active_sessions}</span>
-                    </div>
-                    ${x.sub_uuid ? `
-                    <button class="btn btn-ghost client-sub-btn" onclick="event.stopPropagation(); copyClientSubLink('${x.sub_uuid}', this)" title="Скопировать ссылку подписки">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                        <span>Скопировать ссылку подписки</span>
-                    </button>
-                    ` : ''}
+                <div class="kv">
+                    <span>Потоки</span><span><b>${x.active_sessions || 0}</b> / ${x.workers ? x.workers : '∞'}</span>
+                    <span>Устройства</span><span>${x.device_limit == null ? 'без ограничения' : 'до ' + x.device_limit}</span>
+                    <span>IP</span><span class="mono">${esc(x.ip || '—')}</span>
+                    <span>Срок</span><span>${termText(x)}</span>
+                    <span>Трафик</span><span class="mono">↑ ${size(x.up)} · ↓ ${size(x.down)}</span>
+                </div>
+                <div class="btns">
+                    <button class="btn btn-sm" onclick="event.stopPropagation(); openQrModalForClient('${esc(x.password)}')">${ic('qr')}QR-код</button>
+                    ${x.sub_uuid ? `<button class="btn btn-sm" onclick="event.stopPropagation(); copyClientSubLink('${x.sub_uuid}', this)" title="Скопировать ссылку подписки">${ic('copy')}Ссылка подписки</button>` : ''}
                 </div>
             </div>
             `;
+        }
+
+        // a key inside its group's dialog: one row
+        function renderMemberRow(x) {
+            const line = x.active
+                ? `${esc(x.ip || '—')} · потоки ${x.active_sessions || 0} · ${termText(x)}`
+                : `${clientState(x)[1]} · ${termText(x)}`;
+            return `<button type="button" class="cell" onclick="openEditClientDlgByPassword('${esc(x.password)}')">
+                <span class="grow"><span class="t">${esc(x.name || 'Клиент')}</span><span class="s">${line}</span></span>
+                ${stateChip(x)}
+            </button>`;
         }
 
         function renderGroupCard(g, st) {
@@ -11193,38 +9456,28 @@ const PANEL_HTML: &str = r##"
             return `
             <div class="client-card group-card" onclick="openGroupDlg('${esc(g.id)}')">
                 <div class="client-card-header">
-                    <div class="client-card-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0;"><circle cx="12" cy="7" r="3.5"></circle><path d="M6 21v-2a4 4 0 0 1 8 0v2"></path><path d="M5.5 10a3 3 0 0 1 0-6"></path><path d="M2 21v-1.5a3.5 3.5 0 0 1 3-3.4"></path><path d="M18.5 4a3 3 0 0 1 0 6"></path><path d="M19 16.1a3.5 3.5 0 0 1 3 3.4V21"></path></svg>
-                        <span>${esc(g.name || 'Без названия')}</span>
-                    </div>
-                    <span class="badge active">Группа</span>
+                    <span class="client-card-title">${esc(g.name || 'Без названия')}</span>
+                    <span class="chip acc">группа</span>
                 </div>
-                <div class="client-card-body">
-                    <div class="client-card-row">
-                        <span class="client-card-label">Участники:</span>
-                        <span class="client-card-value">${stats.count}</span>
-                    </div>
-                    <div class="client-card-row">
-                        <span class="client-card-label">Срок действия:</span>
-                        <span class="client-card-value">—</span>
-                    </div>
-                    <div class="client-card-row">
-                        <span class="client-card-label">Трафик:</span>
-                        <span class="client-card-value" style="font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;">↑ ${size(stats.up)} / ↓ ${size(stats.down)}</span>
-                    </div>
-                    <div class="client-card-row">
-                        <span class="client-card-label">Потоки:</span>
-                        <span class="client-card-value">${stats.active_sessions}</span>
-                    </div>
-                    ${g.sub_uuid ? `
-                    <button class="btn btn-ghost" style="width: 100%; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; padding: 7px 10px; border: 1px solid var(--primary); color: var(--primary); border-radius: 8px; font-weight: 500;" onclick="event.stopPropagation(); copyGroupSubLink('${g.sub_uuid}', this)" title="Скопировать ссылку подписки">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                        <span>Скопировать ссылку подписки</span>
-                    </button>
-                    ` : ''}
+                <div class="kv">
+                    <span>Участники</span><span><b>${stats.count}</b></span>
+                    <span>Потоки</span><span><b>${stats.active_sessions}</b></span>
+                    <span>Трафик</span><span class="mono">↑ ${size(stats.up)} · ↓ ${size(stats.down)}</span>
+                </div>
+                <div class="btns">
+                    ${g.admin_uuid ? `<button class="btn btn-sm" onclick="event.stopPropagation(); copyGroupAdminLink('${esc(g.admin_uuid)}')" title="Скопировать ссылку админа">${ic('link')}Ссылка админа</button>` : ''}
+                    ${g.sub_uuid ? `<button class="btn btn-sm" onclick="event.stopPropagation(); copyGroupSubLink('${g.sub_uuid}', this)" title="Скопировать ссылку подписки">${ic('copy')}Ссылка подписки</button>` : ''}
                 </div>
             </div>
             `;
+        }
+
+        async function copyGroupAdminLink(adminUuid) {
+            if (await copyToClipboard(window.location.origin + '/' + adminUuid + '/admin')) {
+                showToast("Ссылка админа скопирована");
+            } else {
+                showToast("Не удалось скопировать", "error");
+            }
         }
 
         function calcMatchScore(text, query) {
@@ -11264,6 +9517,13 @@ const PANEL_HTML: &str = r##"
         function renderMainClientsCards() {
             const container = document.getElementById('clientsCards');
             if (!container) return;
+
+            const countEl = document.getElementById('clientsCount');
+            if (countEl) {
+                const keys = (window.clientsData || []).length, groups = (window.groupsData || []).length;
+                countEl.textContent = countText(keys, 'ключ', 'ключа', 'ключей')
+                    + (groups ? ' · ' + countText(groups, 'группа', 'группы', 'групп') : '');
+            }
 
             const groupStats = {};
             for (const g of (window.groupsData || [])) {
@@ -11408,7 +9668,7 @@ const PANEL_HTML: &str = r##"
             if (btnEl) {
                 btnEl.title = "Переименовать";
                 btnEl.style.color = "var(--text-muted)";
-                btnEl.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`;
+                btnEl.innerHTML = ic('pencil');
             }
         }
 
@@ -11427,7 +9687,7 @@ const PANEL_HTML: &str = r##"
                 inputEl.select();
                 btnEl.title = "Сохранить";
                 btnEl.style.color = "var(--primary)";
-                btnEl.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+                btnEl.innerHTML = ic('check');
             } else {
                 const newName = inputEl.value.trim();
                 if (!newName) {
@@ -11485,7 +9745,7 @@ const PANEL_HTML: &str = r##"
             const deleteAdminBtn = document.getElementById('groupAdminDeleteBtn');
             if (adminBtn) {
                 if (group.admin_uuid) {
-                    adminBtn.textContent = 'Скопировать ссылку админа';
+                    adminBtn.textContent = 'Ссылка админа';
                     if (deleteAdminBtn) deleteAdminBtn.style.display = 'inline-flex';
                 } else {
                     adminBtn.textContent = 'Создать админа';
@@ -11505,17 +9765,20 @@ const PANEL_HTML: &str = r##"
                 statsEl.textContent = `Участники: ${groupClients.length} · Трафик: ↑ ${size(sumUp)} / ↓ ${size(sumDown)} · Потоки: ${sumSessions}`;
             }
 
+            const membersTitle = document.getElementById('groupMembersTitle');
+            if (membersTitle) membersTitle.textContent = 'Участники · ' + groupClients.length;
+
             const container = document.getElementById('groupClientsCards');
             if (!container) return;
 
             if (groupClients.length === 0) {
-                container.innerHTML = `<div class="empty-state" style="grid-column: 1/-1; padding: 24px;">В группе пока нет клиентов. Нажмите «Создать пароль», чтобы добавить.</div>`;
+                container.innerHTML = `<div class="empty-state" >В группе пока нет клиентов. Нажмите «Создать доступ», чтобы добавить.</div>`;
                 return;
             }
 
             const query = (document.getElementById('groupSearchInput')?.value || '').trim();
             if (!query) {
-                container.innerHTML = groupClients.map(c => renderClientCard(c)).join('');
+                container.innerHTML = groupClients.map(c => renderMemberRow(c)).join('');
                 return;
             }
 
@@ -11523,12 +9786,12 @@ const PANEL_HTML: &str = r##"
             for (const c of groupClients) {
                 const sc = calcMatchScore(c.name, query);
                 if (sc > 0) {
-                    matched.push({ score: sc, html: renderClientCard(c) });
+                    matched.push({ score: sc, html: renderMemberRow(c) });
                 }
             }
 
             if (matched.length === 0) {
-                container.innerHTML = `<div class="empty-state" style="grid-column: 1/-1; padding: 24px;">По запросу «<b>${esc(query)}</b>» в группе ничего не найдено.</div>`;
+                container.innerHTML = `<div class="empty-state" >По запросу «<b>${esc(query)}</b>» в группе ничего не найдено.</div>`;
                 return;
             }
 
@@ -11544,6 +9807,8 @@ const PANEL_HTML: &str = r##"
             const gClear = document.getElementById('groupSearchClearBtn');
             if (gClear) gClear.style.display = 'none';
             refreshCurrentGroupDlgView();
+            const openedGroup = (window.groupsData || []).find(g => g.id === groupId);
+            document.getElementById('group_workers').value = (openedGroup && openedGroup.workers) || 0;
             const inputEl = document.getElementById('groupDlgTitleInput');
             if (inputEl) {
                 inputEl.onkeydown = (e) => {
@@ -11552,6 +9817,29 @@ const PANEL_HTML: &str = r##"
                 };
             }
             document.getElementById('groupDlg').showModal();
+        }
+
+        async function saveGroupSettings() {
+            const groupId = window.currentViewingGroupId;
+            if (!groupId) return;
+            const btn = document.getElementById('groupSaveBtn');
+            btn.disabled = true;
+            try {
+                const workers = parseInt(document.getElementById('group_workers').value, 10) || 0;
+                let r = await api("/api/groups/" + encodeURIComponent(groupId), {
+                    method: "PUT",
+                    body: JSON.stringify({ workers })
+                });
+                if (r.ok) {
+                    showToast("Изменения сохранены");
+                    document.getElementById('groupDlg').close();
+                    loadClients();
+                } else {
+                    showToast(await r.text(), "error");
+                }
+            } finally {
+                btn.disabled = false;
+            }
         }
 
         function createClientInCurrentGroup() {
@@ -11567,8 +9855,8 @@ const PANEL_HTML: &str = r##"
             const url = window.location.origin + '/' + subUuid + '/sub';
             if (await copyToClipboard(url)) {
                 if (btn) {
-                    btn.style.color = '#3b82f6';
-                    btn.style.borderColor = '#3b82f6';
+                    btn.style.color = 'var(--accent-text)';
+                    btn.style.borderColor = 'var(--accent-text)';
                     setTimeout(() => { btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
                 }
                 showToast("Ссылка подписки скопирована");
@@ -11585,8 +9873,8 @@ const PANEL_HTML: &str = r##"
             const url = window.location.origin + '/' + subUuid + '/sub-group';
             if (await copyToClipboard(url)) {
                 if (btn) {
-                    btn.style.color = '#3b82f6';
-                    btn.style.borderColor = '#3b82f6';
+                    btn.style.color = 'var(--accent-text)';
+                    btn.style.borderColor = 'var(--accent-text)';
                     setTimeout(() => { btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
                 }
                 showToast("Ссылка подписки группы скопирована");
@@ -11700,37 +9988,28 @@ const PANEL_HTML: &str = r##"
         function renderRoutingRulesList() {
             const container = document.getElementById('routingRulesList');
             if (!window.routingRulesData || window.routingRulesData.length === 0) {
-                container.innerHTML = `<div class="empty-state" style="padding: 24px;">Нет созданных правил маршрутизации.</div>`;
+                container.innerHTML = `<div class="empty-state">Правил пока нет.</div>`;
                 return;
             }
+            // «всё, кроме 2» or «только 3»; a list with nothing in it changes nothing
+            const listText = (mode, n) => n ? (mode === 'whitelist' ? 'только ' : 'всё, кроме ') + n : '—';
             container.innerHTML = window.routingRulesData.map(rule => {
-                const isWhite = rule.mode === 'whitelist';
-                const modeText = isWhite ? 'Приложения: только список' : 'Приложения: все, кроме списка';
-                const modeBadge = `<span class="badge ${isWhite ? 'active' : 'inactive'}" style="font-size: 11px;">${modeText}</span>`;
-                const appsCount = (rule.packages || []).length;
-                const domainsCount = (rule.domains || []).length;
-                const targetGroups = (rule.target_group_ids || []).length;
-                const targetClients = (rule.target_client_passwords || []).length;
+                const names = (rule.target_group_ids || []).map(id => ((window.groupsData || []).find(g => g.id === id) || {}).name)
+                    .concat((rule.target_client_passwords || []).map(p => ((window.clientsData || []).find(c => c.password === p) || {}).name))
+                    .filter(Boolean);
+                const chips = names.length
+                    ? names.slice(0, 3).map(n => `<span class="chip sm">${esc(n)}</span>`).join('')
+                        + (names.length > 3 ? `<span class="chip sm">+${names.length - 3}</span>` : '')
+                    : '<span class="chip sm">никому</span>';
                 return `
-                <div class="rule-card">
-                    <div class="rule-card-header">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <div class="rule-card-title">${esc(rule.name || 'Без имени')}</div>
-                            ${modeBadge}
-                        </div>
-                        <div style="display: flex; gap: 6px;">
-                            <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px; height: 30px;" onclick="openEditRoutingRuleDlg('${esc(rule.id)}')">Изменить</button>
-                            <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px; height: 30px; color: #ef4444;" onclick="deleteRoutingRule('${esc(rule.id)}')">Удалить</button>
-                        </div>
-                    </div>
-                    <div style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px;">
-                        <span class="rule-chip">Приложений: ${appsCount}</span>
-                        <span class="rule-chip">Доменов: ${domainsCount}</span>
-                        <span class="rule-chip">Адресов: ${(rule.ips || []).length}</span>
-                        <span class="rule-chip">Шаблоны: ${rule.template_domains ? 'Вкл' : 'Выкл'}</span>
-                        <span class="rule-chip">Целей: ${targetGroups} групп, ${targetClients} клиентов</span>
-                    </div>
-                </div>
+                <button type="button" class="cell wrap-tags" onclick="openEditRoutingRuleDlg('${esc(rule.id)}')">
+                    <span class="grow">
+                        <span class="t b">${esc(rule.name || 'Без имени')}</span>
+                        <span class="s">Приложения: ${listText(rule.mode, (rule.packages || []).length)} · Домены: ${listText(rule.domains_mode, (rule.domains || []).length)}${rule.template_domains ? ' + список RU' : ''} · Адреса: ${listText(rule.ip_mode, (rule.ips || []).length)}</span>
+                    </span>
+                    <span class="tags">${chips}</span>
+                    ${ic('chevron-right')}
+                </button>
                 `;
             }).join('');
         }
@@ -11835,16 +10114,14 @@ const PANEL_HTML: &str = r##"
 
             const groups = window.groupsData || [];
             if (groups.length > 0) {
-                targetsHtml += '<div class="rule-target-section-title">Группы:</div>';
+                targetsHtml += '<div class="cell-title">Группы</div>';
                 targetsHtml += groups.map(g => {
                     const checked = rule && rule.target_group_ids && rule.target_group_ids.includes(g.id);
                     return `
-                    <div class="rule-target-item" onclick="toggleRuleTargetItem(event, this)">
+                    <div class="cell pick rule-target-item" onclick="toggleRuleTargetItem(event, this)">
                         <input type="checkbox" class="rule-target-group-cb" value="${esc(g.id)}" ${checked ? 'checked' : ''}>
-                        <div class="rule-target-info">
-                            <span class="rule-target-name">${esc(g.name || 'Без названия')}</span>
-                            <span class="rule-target-badge">Группа</span>
-                        </div>
+                        <span class="grow t">${esc(g.name || 'Без названия')}</span>
+                        <span class="chip sm acc">группа</span>
                     </div>
                     `;
                 }).join('');
@@ -11852,23 +10129,21 @@ const PANEL_HTML: &str = r##"
 
             const clients = (window.clientsData || []).filter(c => !c.group_id);
             if (clients.length > 0) {
-                targetsHtml += '<div class="rule-target-section-title" style="margin-top: 8px;">Отдельные клиенты:</div>';
+                targetsHtml += '<div class="cell-title">Отдельные клиенты</div>';
                 targetsHtml += clients.map(c => {
                     const checked = rule && rule.target_client_passwords && rule.target_client_passwords.includes(c.password);
                     return `
-                    <div class="rule-target-item" onclick="toggleRuleTargetItem(event, this)">
+                    <div class="cell pick rule-target-item" onclick="toggleRuleTargetItem(event, this)">
                         <input type="checkbox" class="rule-target-client-cb" value="${esc(c.password)}" ${checked ? 'checked' : ''}>
-                        <div class="rule-target-info">
-                            <span class="rule-target-name">${esc(c.name || 'Клиент')}</span>
-                            <span class="rule-target-meta">${esc(c.password)}</span>
-                        </div>
+                        <span class="grow t">${esc(c.name || 'Клиент')}</span>
                     </div>
                     `;
                 }).join('');
             }
 
-            targetsCont.innerHTML = targetsHtml || '<div style="color: var(--text-muted); font-size: 12px; padding: 12px; text-align: center;">Нет доступных групп или клиентов</div>';
+            targetsCont.innerHTML = targetsHtml || '<div class="empty-state">Нет доступных групп или клиентов</div>';
             bindTargetDragSelection(targetsCont);
+            syncSegs();
             document.getElementById('editRoutingRuleDlg').showModal();
         }
 
@@ -11878,8 +10153,8 @@ const PANEL_HTML: &str = r##"
             // the client reads an empty whitelist as "every app" (a device-wide domain/address rule)
             const empty = !document.getElementById('rulePackages').value.trim();
             hint.textContent = empty
-                ? 'Список пуст: через VPN идут все приложения, а списки доменов и адресов ниже действуют для всех.'
-                : 'Остальные приложения идут мимо VPN. Списки доменов и адресов ниже действуют только для перечисленных приложений.';
+                ? 'Список пуст: через туннель идут все приложения, а списки доменов и адресов ниже действуют для всех.'
+                : 'Остальные приложения идут мимо туннеля. Списки доменов и адресов ниже действуют только для перечисленных приложений.';
             hint.style.display = white ? 'block' : 'none';
         }
 
@@ -11929,7 +10204,7 @@ const PANEL_HTML: &str = r##"
             if (hadGarbage) {
                 const domainsEl = document.getElementById('ruleDomains');
                 if (domainsEl) {
-                    domainsEl.style.borderColor = '#ef4444';
+                    domainsEl.style.borderColor = 'var(--danger)';
                     setTimeout(() => { if (domainsEl) domainsEl.style.borderColor = ''; }, 2000);
                 }
             }
@@ -12156,13 +10431,13 @@ const PANEL_HTML: &str = r##"
             try {
                 const text = await navigator.clipboard.readText();
                 if (!text || !text.trim()) {
-                    statusEl.style.color = '#ef4444';
+                    statusEl.style.color = 'var(--danger)';
                     statusEl.textContent = 'Буфер обмена пуст';
                     return;
                 }
                 await processImportJson(text.trim());
             } catch (e) {
-                statusEl.style.color = '#ef4444';
+                statusEl.style.color = 'var(--danger)';
                 statusEl.textContent = 'Ошибка чтения буфера: ' + (e.message || e);
             }
         }
@@ -12174,7 +10449,7 @@ const PANEL_HTML: &str = r##"
             try {
                 parsed = JSON.parse(text);
             } catch (e) {
-                statusEl.style.color = '#ef4444';
+                statusEl.style.color = 'var(--danger)';
                 statusEl.textContent = 'Ошибка: невалидный JSON';
                 return;
             }
@@ -12196,7 +10471,7 @@ const PANEL_HTML: &str = r##"
                     throw new Error(err || r.statusText);
                 }
                 const res = await r.json();
-                statusEl.style.color = '#10b981';
+                statusEl.style.color = 'var(--ok)';
                 statusEl.textContent = 'Успешно! Добавлено новых клиентов: ' + (res.added_clients || 0) + ' ✓';
                 if (typeof loadClients === 'function') loadClients();
                 if (typeof loadSettings === 'function') loadSettings();
@@ -12204,7 +10479,7 @@ const PANEL_HTML: &str = r##"
                     document.getElementById('importExportDlg').close();
                 }, 1500);
             } catch (e) {
-                statusEl.style.color = '#ef4444';
+                statusEl.style.color = 'var(--danger)';
                 statusEl.textContent = 'Ошибка: ' + (e.message || 'Не удалось импортировать');
             }
         }
@@ -12217,7 +10492,7 @@ const PANEL_HTML: &str = r##"
             if (filterEl) filterEl.value = '';
             document.getElementById('templateDomainsDlg').showModal();
             if (!templateDomainsCache) {
-                listEl.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">Загрузка...</div>';
+                listEl.innerHTML = '<div class="empty-state">Загрузка...</div>';
                 try {
                     const r = await api('/api/template-domains');
                     if (r.ok) {
@@ -12232,7 +10507,7 @@ const PANEL_HTML: &str = r##"
                     templateDomainsCache = [];
                 }
             }
-            if (countEl) countEl.textContent = templateDomainsCache.length;
+            if (countEl) countEl.textContent = countText(templateDomainsCache.length, 'домен идёт', 'домена идут', 'доменов идут');
             renderTemplateDomainsList(templateDomainsCache);
         }
 
@@ -12240,10 +10515,10 @@ const PANEL_HTML: &str = r##"
             const listEl = document.getElementById('templateDomainsList');
             if (!listEl) return;
             if (!list || list.length === 0) {
-                listEl.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 10px;">Ничего не найдено</div>';
+                listEl.innerHTML = '<div class="empty-state">Ничего не найдено</div>';
                 return;
             }
-            listEl.innerHTML = list.map(d => `<div style="padding: 2px 0;">${esc(d)}</div>`).join('');
+            listEl.innerHTML = list.map(d => `<div class="cell dense">${esc(d)}</div>`).join('');
         }
 
         function filterTemplateDomains(query) {
@@ -12337,17 +10612,26 @@ const PANEL_HTML: &str = r##"
 
         function openEditClientDlg(c) {
             activeClient = c;
-            const isMain = c.name === "Главный пароль";
+            // the owner's main key: the server neither renames, deletes nor switches it off (404), and it has no term
+            const owner = Boolean(c.is_owner);
+            const show = (id, on, display) => { document.getElementById(id).style.display = on ? (display || '') : 'none'; };
+
+            document.getElementById('editDlgTitle').textContent = owner ? 'Владелец сервера' : `Доступ «${c.name || 'Клиент'}»`;
+            show('edit_owner_note', owner);
+            show('edit_name_group', !owner);
+            show('edit_group_group', !owner);
+            show('edit_days_group', !owner);
+            show('edit_device_limit_group', !owner);
+            show('edit_owner_devices', owner, 'flex');
+            document.getElementById('edit_limits').classList.toggle('one', owner);
 
             document.getElementById('edit_name').value = c.name || '';
-            document.getElementById('edit_name').disabled = isMain;
             const groupSelect = document.getElementById('edit_group');
             if (groupSelect) {
                 groupSelect.innerHTML = '<option value="">Без группы</option>' + (window.groupsData || []).map(g =>
                     `<option value="${esc(g.id)}">${esc(g.name || 'Без названия')}</option>`
                 ).join('');
                 groupSelect.value = c.group_id || "";
-                groupSelect.disabled = isMain;
             }
             document.getElementById('edit_pass').value = c.password || '';
 
@@ -12356,25 +10640,22 @@ const PANEL_HTML: &str = r##"
                 remainingDays = Math.max(0, Math.ceil((c.expires * 1000 - Date.now()) / 86400000));
             }
             document.getElementById('edit_days').value = c.expires ? remainingDays : 0;
-            document.getElementById('edit_days').disabled = isMain;
+            document.getElementById('edit_days_hint').textContent = (c.expires ? termText(c) + ' · ' : '') + '0 — бессрочно · до 365';
 
             const editWorkers = document.getElementById('edit_workers');
             if (editWorkers) {
                 editWorkers.value = c.workers || 0;
-                editWorkers.disabled = isMain;
             }
-            // the owner's main key has no device limit: the list sends it none (the name check above misses «Владелец»)
+            // the owner's main key has no device limit: the list sends it none
             document.getElementById('edit_device_limit').value = c.device_limit || 3;
-            document.getElementById('edit_device_limit_group').style.display = c.device_limit == null ? 'none' : '';
 
             document.getElementById('edit_ip_info').textContent = c.ip || '—';
             document.getElementById('edit_traffic_info').textContent = `↑ ${size(c.up)} / ↓ ${size(c.down)}`;
 
-            document.getElementById('edit_statusBtn').innerHTML = c.active ? 'Выкл' : 'Вкл';
-            document.getElementById('edit_statusBtn').style.display = isMain ? 'none' : 'inline-block';
-
-            document.getElementById('edit_deleteBtn').style.display = isMain ? 'none' : 'inline-block';
-            document.getElementById('edit_saveBtn').style.display = isMain ? 'none' : 'inline-block';
+            document.getElementById('edit_statusBtn').textContent = c.active ? 'Выключить' : 'Включить';
+            show('edit_statusBtn', !owner);
+            show('edit_deleteBtn', !owner);
+            show('edit_closeBtn', owner);
 
             document.getElementById('editDlg').showModal();
         }
@@ -12647,39 +10928,23 @@ const PANEL_HTML: &str = r##"
                 const c = item.client;
                 const groupName = item.groupName;
                 const link = c.link || '';
-                let badge = '';
                 const hashes = String(c.vk_hashes || c.vk_hash || '').trim();
-                if (c.vk_token) {
-                    badge = '<span class="badge active" style="font-size: 11px;">VK Токен</span>';
-                } else if (hashes) {
-                    badge = '<span class="badge active" style="font-size: 11px;">VK Хеши</span>';
-                } else {
-                    badge = '<span class="badge inactive" style="font-size: 11px;">Прямой</span>';
-                }
+                let chips = `<span class="chip sm">${c.vk_token ? 'хеши владельца' : hashes ? 'свои хеши' : 'без хешей'}</span>`;
                 if (c.workers && c.workers >= 3) {
-                    badge += ` <span class="badge active" style="font-size: 11px;">Потоки: ${c.workers}</span>`;
+                    chips += `<span class="chip sm">потоки ${c.workers}</span>`;
                 }
                 const isChecked = hubSelectedPasswords.has(c.password);
-                const displayName = groupName ? `${c.name || 'Клиент'} (${groupName})` : (c.name || 'Клиент');
 
                 return `
-                <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <input type="checkbox" class="hub-client-cb" value="${esc(c.password)}" ${isChecked ? 'checked' : ''} onchange="handleHubClientCbChange(this)" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary);">
-                            <span style="font-weight: 600; font-size: 14px; color: var(--text-main);">${esc(displayName)}</span>
-                            ${badge}
-                        </div>
-                    </div>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <input readonly value="${esc(link)}" style="flex: 1; height: 40px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; padding: 0 10px; background: var(--surface-hover); color: var(--text-muted); border-radius: 8px;" onclick="this.select()">
-                        <button class="btn btn-ghost" style="height: 40px; width: 44px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px;" onclick="copyHubClientLink('${esc(c.password)}', this)" title="Копировать ссылку">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary);"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                        </button>
-                        <button class="btn btn-ghost" style="height: 40px; width: 44px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px;" onclick="openQrModalForClient('${esc(c.password)}')" title="QR-код">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary);"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M7 7h.01M17 7h.01M7 17h.01M17 17h.01"></path></svg>
-                        </button>
-                    </div>
+                <div class="cell wrap-tags hub-row">
+                    <input type="checkbox" class="hub-client-cb" value="${esc(c.password)}" ${isChecked ? 'checked' : ''} onchange="handleHubClientCbChange(this)" aria-label="${esc(c.name || 'Клиент')}">
+                    <span class="grow">
+                        <span class="t">${esc(c.name || 'Клиент')}${groupName ? ` <span class="s inline">· ${esc(groupName)}</span>` : ''}</span>
+                        <span class="s mono ell">${esc(link)}</span>
+                    </span>
+                    <span class="tags">${chips}</span>
+                    <button class="ib sm" onclick="copyHubClientLink('${esc(c.password)}', this)" title="Копировать ссылку" aria-label="Копировать ссылку">${ic('copy')}</button>
+                    <button class="ib sm" onclick="openQrModalForClient('${esc(c.password)}')" title="QR-код" aria-label="QR-код">${ic('qr')}</button>
                 </div>
                 `;
             }).join('');
@@ -12729,7 +10994,7 @@ const PANEL_HTML: &str = r##"
                 showToast("Ссылка скопирована");
                 if (btn) {
                     const orig = btn.innerHTML;
-                    btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+                    btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color: var(--ok);" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
                     setTimeout(() => { btn.innerHTML = orig; }, 1500);
                 }
             } else {
@@ -12791,12 +11056,12 @@ const PANEL_HTML: &str = r##"
                     return;
                 }
                 titleEl.textContent = "Установить число потоков";
-                msgEl.textContent = `Установить число потоков (${w === 0 ? 'Клиентские настройки (0)' : w}) для выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = `Установить потоки (${w === 0 ? 'без ограничения' : w}) для выбранных клиентов (${count} шт.)?`;
                 submitBtn.textContent = "Установить число потоков";
                 submitBtn.className = "btn btn-primary";
             } else if (action === 'clear-workers') {
                 titleEl.textContent = "Сбросить число потоков";
-                msgEl.textContent = `Сбросить число потоков до клиентских настроек (0) для выбранных клиентов (${count} шт.)?`;
+                msgEl.textContent = `Снять ограничение потоков у выбранных клиентов (${count} шт.)?`;
                 submitBtn.textContent = "Сбросить число потоков";
                 submitBtn.className = "btn btn-danger";
             } else if (action === 'clear') {
@@ -12975,7 +11240,7 @@ const PANEL_HTML: &str = r##"
             const result = await response.json();
             savedMainPassword = value;
             setRestartRequired(result.restart_required);
-            await animateSavedButton(button, 'Сохранить главный пароль');
+            await animateSavedButton(button, 'Сохранить');
         }
 
         async function saveDnsSettings() {
@@ -13022,7 +11287,7 @@ const PANEL_HTML: &str = r##"
                 ? [payload.dns_primary, payload.dns_secondary].filter(Boolean).join(',')
                 : savedManualDns;
             setRestartRequired(result.restart_required);
-            await animateSavedButton(button, 'Применить DNS');
+            await animateSavedButton(button, 'Применить');
         }
         async function saveAutoRestartInterval() {
             const button = document.getElementById('saveAutoRestartIntervalBtn');
@@ -13043,7 +11308,7 @@ const PANEL_HTML: &str = r##"
                 return;
             }
             savedAutoRestartInterval = hours;
-            await animateSavedButton(button, 'Сохранить интервал');
+            await animateSavedButton(button, 'Сохранить');
         }
         async function executeReboot() {
             document.getElementById('rebootDlg').close();
@@ -13174,7 +11439,7 @@ const PANEL_HTML: &str = r##"
                 window.qrSvgCache[text] = svg;
                 return svg;
             } catch (e) {
-                return '<div style="color: #ef4444; padding: 16px;">Ошибка генерации QR</div>';
+                return '<div style="color: var(--danger); padding: 16px;">Ошибка генерации QR</div>';
             }
         }
 
@@ -13202,7 +11467,7 @@ const PANEL_HTML: &str = r##"
             const link = document.getElementById('qrDlgLink')?.value || '';
             if (await copyToClipboard(link)) {
                 if (btn) {
-                    btn.style.color = '#10b981';
+                    btn.style.color = 'var(--ok)';
                     setTimeout(() => { btn.style.color = ''; }, 1500);
                 }
                 showToast("Ссылка скопирована");
@@ -13214,7 +11479,8 @@ const PANEL_HTML: &str = r##"
 </body>
 </html>
 
-"##;
+"##,
+);
 
 #[cfg(test)]
 mod tests {
@@ -13239,7 +11505,7 @@ mod tests {
     }
 
     use super::{
-        DNS_PROVIDERS, LOGIN_HTML, MAX_CLIENT_NAME_BYTES, PANEL_HTML, PWA_ICON_192_PNG,
+        DNS_PROVIDERS, GROUP_ADMIN_HTML, LOGIN_HTML, MAX_CLIENT_NAME_BYTES, PANEL_HTML, PWA_ICON_192_PNG,
         PWA_ICON_512_PNG, PWA_MANIFEST, PWA_SERVICE_WORKER, count_active_sessions,
         decrypt_csqtt_link, deploy_dns_profile_or_yandex, dns_provider_by_id, dns_provider_id,
         encrypt_csqtt_link, make_client_link, manual_dns, normalize_client_vk_hashes,
@@ -13305,7 +11571,7 @@ mod tests {
 
     #[test]
     fn panel_uses_the_complete_dns_provider_list_without_network_checks() {
-        assert!(PANEL_HTML.contains("DNS Адреса"));
+        assert!(PANEL_HTML.contains("DNS для клиентов"));
         assert!(PANEL_HTML.contains("id=\"dns_provider\""));
         assert!(PANEL_HTML.contains("<option value=\"custom\">Ручной DNS</option>"));
         assert!(PANEL_HTML.contains("id=\"dns_manual\""));
@@ -13402,7 +11668,7 @@ mod tests {
 
     #[test]
     fn participant_cards_contain_ip_info() {
-        assert!(PANEL_HTML.contains("IP:"));
+        assert!(PANEL_HTML.contains("<span>IP</span><span class=\"mono\">${esc(x.ip || '—')}</span>"));
     }
 
     #[test]
@@ -13608,5 +11874,299 @@ mod tests {
         assert!(validate_workers(Some(1)).is_err());
         assert!(validate_workers(Some(2)).is_err());
         assert!(validate_workers(Some(101)).is_err());
+    }
+
+    // ---- the panel in the app's design (P3 B10): the look changed, what the pages ask the server for did not
+
+    /// What the router serves: the path of every `.route(` in this file.
+    fn served_routes() -> Vec<String> {
+        let call = [".route", "("].concat();
+        let mut routes = Vec::new();
+        let mut rest = include_str!("web_panel.rs");
+        while let Some(at) = rest.find(&call) {
+            rest = &rest[at + call.len()..];
+            if let Some(body) = rest.trim_start().strip_prefix('"')
+                && let Some(end) = body.find('"')
+            {
+                routes.push(body[..end].to_string());
+            }
+        }
+        routes
+    }
+
+    /// A path with every computed part written `{}`: `/api/clients/{password}/toggle` and the script's
+    /// `"/api/clients/" + encodeURIComponent(p) + "/toggle"` come out the same.
+    fn shape(path: &str) -> String {
+        path.split('/')
+            .map(|part| if part.starts_with('{') { "{}" } else { part })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// The paths a page's script asks for: the first argument of every call of `call`, its string literals kept and
+    /// whatever is computed between them written `{}`. A call whose path is wholly computed (the helper's own
+    /// `fetch(url)`) is left out; a base path in front of the first literal is dropped.
+    fn called_paths(page: &str, call: &str) -> std::collections::BTreeSet<String> {
+        let script = &page[page.rfind("<script>").expect("a page has a script")..];
+        let mut paths = std::collections::BTreeSet::new();
+        let mut rest = script;
+        while let Some(at) = rest.find(call) {
+            let before = rest[..at].chars().next_back();
+            rest = &rest[at + call.len()..];
+            if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                continue; // another function whose name ends the same way
+            }
+            let (mut path, mut literal, mut computed, mut depth) = (String::new(), false, false, 0usize);
+            let mut chars = rest.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' | '\'' | '`' => {
+                        if computed {
+                            path.push_str("{}");
+                            computed = false;
+                        }
+                        literal = true;
+                        while let Some(d) = chars.next() {
+                            if d == c {
+                                break;
+                            }
+                            if c == '`' && d == '$' && chars.peek() == Some(&'{') {
+                                for e in chars.by_ref() {
+                                    if e == '}' {
+                                        break;
+                                    }
+                                }
+                                path.push_str("{}");
+                            } else {
+                                path.push(d);
+                            }
+                        }
+                    }
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' | ',' if depth == 0 => break,
+                    ')' | ']' | '}' => depth -= 1,
+                    c if c.is_alphanumeric() || c == '_' => computed = true,
+                    _ => {}
+                }
+            }
+            if computed {
+                path.push_str("{}");
+            }
+            if literal {
+                paths.insert(path.strip_prefix("{}").unwrap_or(&path).to_string());
+            }
+        }
+        paths
+    }
+
+    /// The values of an attribute over a page: `attribute_values(page, "href")`.
+    fn attribute_values<'a>(page: &'a str, attribute: &str) -> Vec<&'a str> {
+        let open = format!(" {attribute}=\"");
+        page.match_indices(&open)
+            .map(|(at, _)| {
+                let value = &page[at + open.len()..];
+                &value[..value.find('"').unwrap_or(0)]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn panel_html_calls_only_served_routes() {
+        let served: std::collections::BTreeSet<String> = served_routes().iter().map(|route| shape(route)).collect();
+        assert!(served.contains("/api/clients/{}/toggle") && served.contains("/{}/api/data"), "{served:?}");
+        let set = |paths: &[&str]| paths.iter().map(|path| path.to_string()).collect::<std::collections::BTreeSet<_>>();
+
+        // every request of the three pages, by name: one that goes away or a new one changes this list
+        let panel = called_paths(PANEL_HTML, "api(");
+        assert_eq!(
+            panel,
+            set(&[
+                "/api/clients",
+                "/api/clients/{}",
+                "/api/clients/{}/toggle",
+                "/api/clients/{}/unbind",
+                "/api/export",
+                "/api/groups",
+                "/api/groups/{}",
+                "/api/groups/{}/admin-link",
+                "/api/groups/{}/admin-link/regenerate",
+                "/api/import",
+                "/api/local-proxy",
+                "/api/local-proxy/activate/{}",
+                "/api/local-proxy/deactivate",
+                "/api/local-proxy/profiles/{}",
+                "/api/logout",
+                "/api/logs",
+                "/api/logs/clear",
+                "/api/logs/toggle",
+                "/api/reboot",
+                "/api/routing-rules",
+                "/api/routing-rules/{}",
+                "/api/settings",
+                "/api/stats",
+                "/api/template-domains",
+            ])
+        );
+        assert!(called_paths(PANEL_HTML, "fetch(").is_empty(), "the panel asks through api() alone");
+        let group_admin = called_paths(GROUP_ADMIN_HTML, "fetch(");
+        assert_eq!(
+            group_admin,
+            set(&[
+                "/{}/api/clients",
+                "/{}/api/clients/{}",
+                "/{}/api/clients/{}/extend",
+                "/{}/api/clients/{}/reset-traffic",
+                "/{}/api/clients/{}/toggle",
+                "/{}/api/clients/{}/unbind",
+                "/{}/api/data",
+                "/{}/api/settings",
+            ])
+        );
+        let login = called_paths(LOGIN_HTML, "fetch(");
+        assert_eq!(login, set(&["/api/login"]));
+        for path in panel.iter().chain(&group_admin).chain(&login) {
+            assert!(served.contains(path), "the router does not serve {path}");
+        }
+
+        // what the markup itself points at on this server
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML, LOGIN_HTML] {
+            for local in attribute_values(page, "href")
+                .into_iter()
+                .chain(attribute_values(page, "src"))
+                .filter(|value| value.starts_with('/'))
+            {
+                assert!(served.contains(local), "the router does not serve {local}");
+            }
+        }
+        assert!(attribute_values(PANEL_HTML, "href").contains(&"/api/logs/download"));
+
+        // and elsewhere: «О панели» alone, the author's page and ours; no donation, no support link
+        let outside = |page: &'static str| {
+            attribute_values(page, "href")
+                .into_iter()
+                .filter(|value| value.starts_with("http"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            outside(PANEL_HTML),
+            ["https://github.com/amurcanov", "https://github.com/SanityProtocol/csqtt", "https://t.me/swgPanel"]
+        );
+        assert!(outside(GROUP_ADMIN_HTML).is_empty() && outside(LOGIN_HTML).is_empty());
+    }
+
+    #[test]
+    fn panel_scripts_find_every_element_and_handler_they_name() {
+        // The pages were redrawn around scripts that look their elements up by id and are called from the markup by
+        // name: an id or a function lost in the redrawing is a button that does nothing.
+        for (page, never_in_the_page) in [(PANEL_HTML, &["groupDlgStatsSummary"][..]), (GROUP_ADMIN_HTML, &[][..])] {
+            let script = &page[page.rfind("<script>").unwrap()..];
+            // an id is asked for by getElementById itself, through the two helpers that take one, and by a segmented
+            // control naming the select it sets
+            let mut asked = 0;
+            for call in ["getElementById(", "show(", "togglePasswordReveal("] {
+                let mut rest = page;
+                while let Some(at) = rest.find(call) {
+                    rest = &rest[at + call.len()..];
+                    let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else { continue };
+                    let Some(end) = rest[1..].find(quote) else { continue };
+                    let id = &rest[1..1 + end];
+                    if !rest[1 + end + 1..].starts_with([')', ',']) || never_in_the_page.contains(&id) {
+                        continue; // an id put together from parts, or one this page never had
+                    }
+                    asked += 1;
+                    assert!(page.contains(&format!(" id=\"{id}\"")), "the script asks for #{id}, which the page lacks");
+                }
+            }
+            for id in attribute_values(page, "data-for") {
+                asked += 1;
+                assert!(page.contains(&format!("<select id=\"{id}\"")), "a control sets #{id}, which is no select of the page");
+            }
+            assert!(asked > 50, "{asked}");
+
+            let mut called = 0;
+            for event in ["onclick", "onchange", "oninput", "onblur"] {
+                for handler in attribute_values(page, event) {
+                    let name: String = handler.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    if ["document", "event", "this"].contains(&name.as_str()) {
+                        continue;
+                    }
+                    called += 1;
+                    assert!(
+                        script.contains(&format!("function {name}(")),
+                        "{event}=\"{handler}\" calls {name}(), which the script lacks"
+                    );
+                }
+            }
+            assert!(called > 15, "{called}");
+        }
+    }
+
+    #[test]
+    fn owner_entry_is_flagged() {
+        let db = crate::model::Database {
+            main_password: "owner-main-password".into(),
+            main_workers: Some(12),
+            ..Default::default()
+        };
+        let owner = super::owner_client_info(&db, "203.0.113.5", 46000, "Владелец", (3, 4), 2);
+        assert!(owner.is_owner);
+        assert_eq!(owner.device_limit, None, "the owner's key has no device limit");
+        assert_eq!((owner.expires, owner.active, owner.up, owner.down, owner.workers), (0, true, 3, 4, Some(12)));
+        let json = serde_json::to_value(&owner).unwrap();
+        assert_eq!(json["is_owner"], true);
+        assert_eq!(json["password"], "owner-main-password");
+
+        // the panel goes by the flag, never by the name: «Владелец» in the list and «Главный пароль» alone were two
+        // names for it, and the page looked for the one the list did not send
+        assert!(PANEL_HTML.contains("const owner = Boolean(c.is_owner);"));
+        assert!(!PANEL_HTML.contains("=== \"Главный пароль\""));
+        // the owner's sheet: no name, no group, no term, no device limit; neither «Удалить» nor «Выключить»
+        for hidden in ["edit_name_group", "edit_group_group", "edit_days_group", "edit_device_limit_group"] {
+            assert!(PANEL_HTML.contains(&format!("show('{hidden}', !owner);")), "{hidden}");
+        }
+        assert!(PANEL_HTML.contains("show('edit_statusBtn', !owner);"));
+        assert!(PANEL_HTML.contains("show('edit_deleteBtn', !owner);"));
+    }
+
+    #[test]
+    fn workers_select_accepts_blank_and_3_to_100() {
+        // what the select can send: 0 for «Без ограничения» (and nothing at all, from an older page), or 3–100
+        assert_eq!(validate_workers(None), Ok(None));
+        assert_eq!(validate_workers(Some(0)), Ok(None));
+        for workers in 3..=100 {
+            assert_eq!(validate_workers(Some(workers)), Ok(Some(workers)));
+        }
+        for refused in [1, 2, 101] {
+            assert!(validate_workers(Some(refused)).is_err(), "{refused}");
+        }
+        // every place that sets streams is that select, in both pages, filled the same way
+        for id in ["new_workers", "edit_workers", "group_workers", "hubWorkersInput"] {
+            assert!(PANEL_HTML.contains(&format!("<select id=\"{id}\" class=\"workers-select\">")), "{id}");
+        }
+        assert!(GROUP_ADMIN_HTML.contains("<select id=\"hubWorkersInput\" class=\"workers-select\">"));
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML] {
+            assert!(page.contains("'<option value=\"0\">Без ограничения</option>'"));
+            assert!(page.contains("Array.from({ length: 98 }, (_, i) => `<option value=\"${i + 3}\">${i + 3}</option>`)"));
+            assert!(!page.contains("3-99") && !page.contains("w > 99"), "the group admin's page said 3–99");
+        }
+        // the owner sets a group's limit through the group's own request
+        let update = |body: &str| serde_json::from_str::<super::UpdateGroupRequest>(body).unwrap().workers;
+        assert_eq!(update(r#"{"workers":0}"#), Some(0));
+        assert_eq!(update(r#"{"workers":20}"#), Some(20));
+        assert_eq!(update(r#"{"name":"Друзья"}"#), None, "a rename leaves the limit alone");
+    }
+
+    #[test]
+    fn the_version_label_is_the_panel_headers_alone() {
+        // The detectors read the header's aria-label (the version, then the author) out of the binary: the drawing is
+        // shared by the group admin's page, the label is not, so the binary carries it once.
+        assert_eq!(PANEL_HTML.matches("by amurcanov\"").count(), 1);
+        assert!(!GROUP_ADMIN_HTML.contains("by amurcanov\"") && !LOGIN_HTML.contains("by amurcanov\""));
+        for page in [PANEL_HTML, GROUP_ADMIN_HTML, LOGIN_HTML] {
+            assert!(page.contains("сборка SanityProtocol"));
+            assert_eq!(page.matches("<style>").count(), 1);
+            assert!(page.contains("--accent: #1A73E8;"), "the pages share the one stylesheet");
+        }
+        assert_eq!(GROUP_ADMIN_HTML.matches("id=\"versionLogoGradient\"").count(), 1);
     }
 }
