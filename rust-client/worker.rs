@@ -285,22 +285,25 @@ impl DemandGate {
         self.count.quota_refusals.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The count since the last one, in a line, and a new count from here; nothing when the phone never slept.
+    /// The count since the last line, in a line, and a new count from here. With no sleep to say there is no line, and
+    /// nothing is taken: the relay's verdict on the wake the screen caused comes seconds after its line, and what that
+    /// wake cost (the streams, the credentials their repair asked VK for) stays for the next line.
     fn count_line(&self) -> Option<String> {
-        let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
         let count = &self.count;
+        if count.sleeps.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
         let (sleeps, long, longest) = (take(&count.sleeps), take(&count.long_sleeps), take(&count.longest_secs));
         let (costly, lost) = (take(&count.costly_sleeps), take(&count.streams_lost));
         let (credentials, quota) = (take(&count.credentials), take(&count.quota_refusals));
-        (sleeps != 0).then(|| {
-            format!(
-                "[СОН] С прошлого включения экрана — снов: {sleeps}, из них дольше 5 минут: {long} (самый долгий \
-                 {} мин {} с), с потерей потоков: {costly}; потоков потеряно: {lost}; запросов кредов VK: \
-                 {credentials}; отказов VK по квоте: {quota}",
-                longest / 60,
-                longest % 60,
-            )
-        })
+        Some(format!(
+            "[СОН] С прошлого включения экрана — снов: {sleeps}, из них дольше 5 минут: {long} (самый долгий {} мин \
+             {} с), с потерей потоков: {costly}; потоков потеряно: {lost}; запросов кредов VK: {credentials}; отказов \
+             VK по квоте: {quota}",
+            longest / 60,
+            longest % 60,
+        ))
     }
 
     /// The app's WAKE: the screen came on. The count of the time it was off is said, and the tunnel is wanted.
@@ -1729,11 +1732,28 @@ mod tests {
             )
         );
         assert_eq!(gate.count_line(), None, "the count was said twice");
-        // the screen: the tunnel is wanted, whatever was counted
-        gate.slept(Duration::from_secs(15));
+        // the screen: its line is said, and the tunnel is wanted, whatever was counted
+        gate.slept(Duration::from_secs(90));
         gate.screen_on();
         assert!(gate.is_wanted());
         assert_eq!(gate.count_line(), None);
+        // the relay's verdict on the wake the screen caused comes after that line, and the repair asks VK for a
+        // credential: with no sleep since, the next coming on of the screen says nothing and keeps them for the line
+        // after the next sleep
+        for _ in 0..3 {
+            assert!(gate.stream_lost_to_sleep());
+        }
+        gate.credential_asked();
+        gate.screen_on();
+        assert_eq!(gate.count_line(), None);
+        gate.slept(Duration::from_secs(20));
+        assert_eq!(
+            gate.count_line().as_deref(),
+            Some(
+                "[СОН] С прошлого включения экрана — снов: 1, из них дольше 5 минут: 0 (самый долгий 0 мин 20 с), с \
+                 потерей потоков: 1; потоков потеряно: 3; запросов кредов VK: 1; отказов VK по квоте: 0"
+            )
+        );
     }
 
     /// §1.9: the app hears of the rest and of its end at once (STATS), not at the next tick.
