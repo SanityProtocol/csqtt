@@ -1044,7 +1044,7 @@ class TunnelService : Service() {
 
     /**
      * A wanted run waits for a network VK answers on as long as it takes, as a running tunnel does when its network goes
-     * (suspendForNoNetwork): «Нет сети — ожидание», ended only by a stop, a Wi-Fi pause or a deploy, which cancel the
+     * (suspendForNoNetwork): «Ожидание сети», ended only by a stop, a Wi-Fi pause or a deploy, which cancel the
      * start job. There was a 60 s limit here: after it 2.5.3 left the service in the foreground saying «Запуск...», and
      * ending the run instead dropped the user's intent on a Wi-Fi auto-pause resume in a lift or the metro.
      * The wait follows the network callbacks; the networks are also looked at again every 15 s the phone is awake, for
@@ -1067,7 +1067,7 @@ class TunnelService : Service() {
                         false,
                         LogLevel.NET,
                     )
-                    withContext(Dispatchers.Main) { if (!isStopping) updateNotification("Нет сети — ожидание") }
+                    withContext(Dispatchers.Main) { if (!isStopping) updateNotification(ConnectionState.WaitingForNetwork.label) }
                     while (isActive) {
                         delay(AWAIT_NETWORK_RESCAN_MS)
                         // the networks looked at again in case a callback was missed

@@ -307,6 +307,16 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val VPS_REF = profileInt("vps_ref")
         // set by «Добавить профиль», so a profile with no address or link yet stays listed and is never reused as free
         private val PROFILE_ADDED = profileBoolean("profile_added")
+        // P3 B1: a profile kept at the top of the lists; one left out of them; when it last carried a working tunnel and
+        // when its slot was first filled, which two of the lists' orders go by
+        private val PROFILE_PINNED = profileBoolean("profile_pinned")
+        private val PROFILE_HIDDEN = profileBoolean("profile_hidden")
+        private val PROFILE_LAST_CONNECTED = profileLong("profile_last_connected")
+        private val PROFILE_ADDED_AT = profileLong("profile_added_at")
+        // P3 B1: Home's layout (absent: one connection), the lists' order, and the user's own order (profile indices)
+        private val HOME_LAYOUT = stringPreferencesKey("home_layout")
+        private val PROFILE_SORT = stringPreferencesKey("profile_sort")
+        private val PROFILE_ORDER = stringPreferencesKey("profile_order")
         // changes whenever a slot's profile is replaced (delete, add, restore): screens key their saved form state on it,
         // so a form edited for the old profile never autosaves into the new one
         private val PROFILE_EPOCH = intPreferencesKey("profile_records_epoch")
@@ -488,6 +498,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         // does not change on the first frames (roles batch review F2)
         @Volatile
         internal var cachedHasServer: Boolean? = null
+        @Volatile
+        internal var cachedHomeLayout: HomeLayout? = null
 
         @Volatile
         internal var cachedWorkersPerHash: Int? = null
@@ -711,6 +723,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
                 THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
                 UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT,
+                HOME_LAYOUT to StoredKind.STRING, PROFILE_SORT to StoredKind.STRING, PROFILE_ORDER to StoredKind.STRING,
             ).associate { (key, kind) -> key.name to kind }
         }
 
@@ -887,10 +900,15 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
          * node in owner mode (2.5.3) loses the peer and password the link now carries; its stored hashes go only when the
          * link carries hashes (2.5.3's rule: a node without hashes left the participant's own hashes there).
          */
-        internal fun writeSubscriptionNode(prefs: MutablePreferences, write: SubscriptionProfileWrite) {
+        internal fun writeSubscriptionNode(
+            prefs: MutablePreferences,
+            write: SubscriptionProfileWrite,
+            now: Long = System.currentTimeMillis(),
+        ) {
             val profile = write.profile
             if (write.link.isBlank()) return
             startCleanIfFree(prefs, profile)
+            stampAdded(prefs, profile, now)
             useParticipantLink(prefs, profile, write.link.trim())
 
             val power = write.power?.coerceIn(1, CsqttConstants.Tunnel.MAX_WORKERS)
@@ -1206,12 +1224,13 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
 
         /** «Добавить профиль»: the first free slot but the active one, cleared, in [linkMode], made active; null if none. */
-        internal fun addProfileKeys(prefs: MutablePreferences, linkMode: Boolean): Int? {
+        internal fun addProfileKeys(prefs: MutablePreferences, linkMode: Boolean, now: Long = System.currentTimeMillis()): Int? {
             val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
             val free = profileIndices.firstOrNull { it != active && !profileInUse(prefs, it) } ?: return null
             clearProfileKeys(prefs, free, CONNECTION)
             prefs[getProfileKey(CSQTT_LINK_MODE, free)] = linkMode
             prefs[getProfileKey(PROFILE_ADDED, free)] = true
+            stampAdded(prefs, free, now)
             prefs[ACTIVE_PROFILE] = free
             bumpProfileEpoch(prefs)
             return free
@@ -1242,6 +1261,55 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         internal fun profileList(prefs: Preferences): List<Pair<Int, String>> {
             val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
             return profileIndices.filter { it == active || profileInUse(prefs, it) }.map { it to profileDisplayName(prefs, it) }
+        }
+
+        /** P3 B1: Home's layout as stored; nothing stored is the default, one connection. */
+        internal fun homeLayout(prefs: Preferences): HomeLayout = HomeLayout.fromStored(prefs[HOME_LAYOUT])
+
+        internal fun setHomeLayout(prefs: MutablePreferences, layout: HomeLayout) {
+            prefs[HOME_LAYOUT] = layout.stored
+        }
+
+        /** The settings export's part of Home (the older of the two backup formats; the full backup has the key itself). */
+        internal fun exportHomeLayout(settings: JSONObject, prefs: Preferences) {
+            settings.put("home_layout", homeLayout(prefs).stored)
+        }
+
+        internal fun importHomeLayout(settings: JSONObject, prefs: MutablePreferences) {
+            if (settings.has("home_layout")) setHomeLayout(prefs, HomeLayout.fromStored(settings.optString("home_layout")))
+        }
+
+        /** P3 B1: the profiles as a list shows them: every slot in use and the active one, a hidden one marked. */
+        internal fun profileEntries(prefs: Preferences): List<ProfileEntry> {
+            val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
+            return profileIndices.filter { it == active || profileInUse(prefs, it) }.map { profile ->
+                val subscription = prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim().orEmpty()
+                ProfileEntry(
+                    index = profile,
+                    name = profileDisplayName(prefs, profile),
+                    kind = when {
+                        subscription.isNotEmpty() -> ProfileKind.Subscription
+                        prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true -> ProfileKind.Link
+                        else -> ProfileKind.OwnServer
+                    },
+                    peer = prefs[getProfileKey(PEER, profile)]?.trim().orEmpty(),
+                    link = prefs[getProfileKey(CSQTT_LINK, profile)]?.trim().orEmpty(),
+                    subscriptionTitle = prefs[getProfileKey(SUBSCRIPTION_TITLE, profile)]?.trim().orEmpty(),
+                    pinned = prefs[getProfileKey(PROFILE_PINNED, profile)] == true,
+                    hidden = prefs[getProfileKey(PROFILE_HIDDEN, profile)] == true,
+                    lastConnectedAt = prefs[getProfileKey(PROFILE_LAST_CONNECTED, profile)] ?: 0L,
+                    addedAt = prefs[getProfileKey(PROFILE_ADDED_AT, profile)] ?: 0L,
+                )
+            }
+        }
+
+        /**
+         * P3 B1: the first time a slot is written as a profile is when that profile was added. A slot's keys are cleared
+         * when its profile is deleted or replaced, so the next one to take the slot gets a date of its own.
+         */
+        internal fun stampAdded(prefs: MutablePreferences, profile: Int, now: Long) {
+            val key = getProfileKey(PROFILE_ADDED_AT, profile)
+            if (prefs[key] == null) prefs[key] = now
         }
 
         /** The name the user gave, else the linked server's (a deploy-only slot's name, #54), else «Профиль N». */
@@ -1666,6 +1734,41 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
     /** Classic's «Профиль конфигурации»: the profiles in use and the active one, with their names (M-97). */
     internal val profileList: Flow<List<Pair<Int, String>>> = dataStore.data.map(::profileList)
+
+    /** P3 B1: Home's layout; [cachedHomeLayout] is the last one read in this process. */
+    internal val homeLayout: Flow<HomeLayout> = dataStore.data.map(::homeLayout)
+        .distinctUntilChanged().onEach { cachedHomeLayout = it }
+
+    internal suspend fun saveHomeLayout(layout: HomeLayout) {
+        dataStore.edit { setHomeLayout(it, layout) }
+    }
+
+    /** P3 B1: the profiles as the lists show them, with how they are ordered and the user's own order. */
+    internal val profileEntries: Flow<List<ProfileEntry>> = dataStore.data.map(::profileEntries).distinctUntilChanged()
+    internal val profileSort: Flow<ProfileSort> = dataStore.data.map { ProfileSort.fromStored(it[PROFILE_SORT]) }.distinctUntilChanged()
+    internal val profileOrder: Flow<List<Int>> = dataStore.data.map { ProfileOrder.decode(it[PROFILE_ORDER]) }.distinctUntilChanged()
+
+    internal suspend fun saveProfileSort(sort: ProfileSort) {
+        dataStore.edit { it[PROFILE_SORT] = sort.stored }
+    }
+
+    internal suspend fun saveProfileOrder(order: List<Int>) {
+        dataStore.edit { it[PROFILE_ORDER] = ProfileOrder.encode(order) }
+    }
+
+    internal suspend fun setProfilePinned(profile: Int, pinned: Boolean) {
+        dataStore.edit { prefs ->
+            val key = getProfileKey(PROFILE_PINNED, profile)
+            if (pinned) prefs[key] = true else prefs.remove(key)
+        }
+    }
+
+    /** A run on [profile] works: «по последнему подключению» goes by it. Nothing is written for a slot no longer in use. */
+    internal suspend fun markProfileConnected(profile: Int, now: Long) {
+        dataStore.edit { prefs ->
+            if (profile in profileIndices && profileInUse(prefs, profile)) prefs[getProfileKey(PROFILE_LAST_CONNECTED, profile)] = now
+        }
+    }
 
     /** Profiles the user has (a peer, link, subscription, VPS record or name): a new one never lands on them (M-39). */
     val occupiedProfiles: Flow<Set<Int>> = dataStore.data.map { prefs ->
@@ -3253,6 +3356,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             settings.put("is_dynamic_color", prefs[IS_DYNAMIC_COLOR] ?: false)
             settings.put("theme_palette", prefs[THEME_PALETTE] ?: "pure_black")
             settings.put("auto_pause_on_wifi", prefs[AUTO_PAUSE_ON_WIFI] ?: false)
+            exportHomeLayout(settings, prefs)
             settings.put("selected_fingerprint", prefs[getProfileKey(SELECTED_FINGERPRINT, p)] ?: "chrome")
             settings.put("selected_turn_subnet", prefs[getProfileKey(SELECTED_TURN_SUBNET, p)] ?: "")
             settings.put("turn_subnet_ip_limit", prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] ?: "ALL")
@@ -3371,6 +3475,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     if (s.has("is_dynamic_color")) mutable[IS_DYNAMIC_COLOR] = s.getBoolean("is_dynamic_color")
                     if (s.has("theme_palette")) mutable[THEME_PALETTE] = s.getString("theme_palette")
                     if (s.has("auto_pause_on_wifi")) mutable[AUTO_PAUSE_ON_WIFI] = s.getBoolean("auto_pause_on_wifi")
+                    importHomeLayout(s, mutable)
                     if (s.has("selected_fingerprint")) mutable[getProfileKey(SELECTED_FINGERPRINT, p)] = s.getString("selected_fingerprint")
                     if (s.has("selected_turn_subnet")) mutable[getProfileKey(SELECTED_TURN_SUBNET, p)] = s.getString("selected_turn_subnet")
                     if (s.has("turn_subnet_ip_limit")) mutable[getProfileKey(TURN_SUBNET_IP_LIMIT, p)] = s.getString("turn_subnet_ip_limit")

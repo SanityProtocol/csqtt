@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -314,6 +315,20 @@ object TunnelManager {
     private val trafficTracker = TrafficTracker()
     /** The workers the running process was started with (`-n`), 0 without a run (L-27). */
     val targetWorkers = MutableStateFlow(0)
+    /**
+     * P3 §1.3a: how far the running process's start is, for the line under «Подключение…»; null without a process. It
+     * follows that process's [TunnelStartupProgress], which only moves forward.
+     */
+    internal val startProgress = MutableStateFlow<TunnelStartupStage?>(null)
+    /** This process sent its TUNCONF: of a start, only the VPN interface is left. */
+    internal val tunconfHere: StateFlow<Boolean> = tunconfThisProcess
+    /** P3 §1.9: at rest, where a stream count is no news. */
+    internal val atRest: StateFlow<Boolean> = dormant
+    /**
+     * Streams that said they are ready since the core's last report (P3 §1.3a). Only what Home shows reads it: the
+     * connection state and the rest keep to the core's own count ([activeWorkers]).
+     */
+    private val readyAhead = MutableStateFlow(0)
     private val vpnIntentGate = VpnIntentGate()
 
     val connectionState: StateFlow<ConnectionState> = combine(
@@ -341,6 +356,28 @@ object TunnelManager {
             ),
         )
     }.stateIn(scope, SharingStarted.Eagerly, ConnectionState.Idle)
+
+    /**
+     * The stream count as Home says it (P3 §1.3a): the core's last report and the streams ready since, so a stream is
+     * counted when it says it is ready and not at the next report, up to half a second later.
+     */
+    internal val shownWorkers: StateFlow<Int> = combine(
+        activeWorkers, readyAhead, targetWorkers, serverAssignedWorkers,
+    ) { active, ahead, target, limit ->
+        streamsShown(active, ahead, StreamsLine.running(target, limit))
+    }.stateIn(scope, SharingStarted.Eagerly, 0)
+
+    /**
+     * When every stream the core runs was last up (elapsedRealtime), null while one is missing: Home says the count for
+     * two seconds more, and a screen made again inside them says it for the rest of them.
+     */
+    internal val streamsFullSince: StateFlow<Long?> = combine(
+        shownWorkers, targetWorkers, serverAssignedWorkers,
+    ) { shown, target, limit ->
+        shown to StreamsLine.running(target, limit)
+    }.scan(null as Long?) { previous, (shown, running) ->
+        StreamsLine.fullSince(previous, shown, running, SystemClock.elapsedRealtime())
+    }.stateIn(scope, SharingStarted.Eagerly, null)
 
     /** The state as of now, for a tap's decision: the flow above follows its inputs a moment later. */
     fun currentConnectionState(): ConnectionState = deriveConnectionState(
@@ -726,6 +763,7 @@ object TunnelManager {
                 // them again now; if it cannot, the recovery a zero count starts takes over, as when the count fell
                 val wokeEmpty = rest.onStats(activeWorkers.value, event.active, event.dormant)
                 activeWorkers.value = event.active
+                readyAhead.value = 0
                 dormant.value = rest.connected
                 if (wokeEmpty) scheduleWorkerZeroRecovery(identity)
                 if (workerRecoveryPolicy.observe(event.active)) {
@@ -752,6 +790,7 @@ object TunnelManager {
             is TunnelEventParser.Event.ActiveZero -> {
                 if (activeWorkers.value != 0) updateProcessLog(identity, "stats", "[СЕТЬ] Активных: 0", 25, false, LogLevel.NET)
                 activeWorkers.value = 0
+                readyAhead.value = 0
                 // a tunnel at rest has lost its streams to the phone's sleep, not to a fault: nothing is restarted (§1.9)
                 if (rest.recovers) scheduleWorkerZeroRecovery(identity)
             }
@@ -760,6 +799,10 @@ object TunnelManager {
             is TunnelEventParser.Event.ServerRestart -> schedulePanelServerRestart(identity)
             is TunnelEventParser.Event.Ready -> {
                 identity.startupProgress.streamReady()
+                if (isCurrent(identity)) {
+                    startProgress.value = identity.startupProgress.stage()
+                    if (event.worker != 0) readyAhead.update { it + 1 }
+                }
                 armServerSilence(identity)
                 if (event.worker == 0 || identity.readyWorkers.add(event.worker)) {
                     updateProcessLog(identity, "ready", "[ВОРКЕР] Поток готов ✓", 20, false, LogLevel.OK)
@@ -869,6 +912,7 @@ object TunnelManager {
             is TunnelEventParser.Event.Progress -> {
                 if (event.kind == "credentials") {
                     identity.startupProgress.credentialReceived()
+                    if (isCurrent(identity)) startProgress.value = identity.startupProgress.stage()
                     // VK gave credentials: a captcha need with no ask live is over (B5h2)
                     ManlCaptchaWebViewManager.onRunProgress()
                 }
@@ -1225,6 +1269,18 @@ object TunnelManager {
         if (observersInitialized) return
         observersInitialized = true
         val appContext = context.applicationContext
+        // P3 B1: the profile a run works on is the one last connected («по последнему подключению»). Written once for a
+        // process on a profile, not at every reconnect: a tunnel on a poor network must not write the store each time
+        scope.launch {
+            var written = -1 to 0L
+            connectionState.map { it is ConnectionState.Connected }.distinctUntilChanged().collect { connected ->
+                val now = sourceProfile to processStartedAtMs
+                if (connected && now.first >= 0 && now != written) {
+                    written = now
+                    runCatching { SettingsStore(appContext).markProfileConnected(now.first, System.currentTimeMillis()) }
+                }
+            }
+        }
         scope.launch {
             connectionState.map { it.label }.distinctUntilChanged().collect {
                 try {
@@ -1418,6 +1474,7 @@ object TunnelManager {
                 tunconfThisProcess.value = false
                 serverSilent.value = false
                 targetWorkers.value = 0
+                startProgress.value = null
                 serverRoutingActive.value = false
                 activeServerRoutingRule.value = null
                 serverAssignedWorkers.value = null
@@ -1609,10 +1666,12 @@ object TunnelManager {
         callRecoveryPending.set(false)
         nativeProcessPid = processIdOf(startedProcess)
         processIdentity = identity
+        startProgress.value = identity.startupProgress.stage()
         running.value = true
         startUptimeTimer()
         wrapAuthTimeoutCount = 0
         activeWorkers.value = 0
+        readyAhead.value = 0
         resetWorkerRecoveryState()
         startLogReader(identity)
         scheduleStartupDiagnostic(identity)
@@ -2242,6 +2301,7 @@ object TunnelManager {
         everConnected.value = false
         serverSilent.value = false
         targetWorkers.value = 0
+        startProgress.value = null
         vpnRebuildPending.set(false)
         serverRoutingActive.value = false
         activeServerRoutingRule.value = null

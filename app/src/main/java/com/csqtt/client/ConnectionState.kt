@@ -30,19 +30,23 @@ sealed class ConnectionState {
         get() = this is Preparing || this is Connecting || this is Reconnecting || this is ServerNotResponding ||
             this is Stopping
 
-    /** The short label of the tile, the widget and classic Home. */
+    /**
+     * The state's word: the one place that names a state. Home takes it through [connectionVisuals]; the notification, the
+     * tile and the widget read it here.
+     */
     val label: String
         get() = when (this) {
             Idle -> "Отключено"
             Preparing, Connecting -> "Подключение…"
             is Connected -> "Подключено"
             Reconnecting -> "Переподключение…"
-            WaitingForNetwork -> "Нет сети — ожидание"
-            PausedOnWifi -> "Пауза: Wi-Fi"
+            WaitingForNetwork -> "Ожидание сети"
+            PausedOnWifi -> "Пауза Wi-Fi"
             Stopping -> "Остановка…"
             CaptchaNeeded -> "Нужна капча"
             ServerNotResponding -> "Сервер не отвечает"
-            is Failed -> "Ошибка"
+            // a run that failed is off: its cause is said beside the state, never in its place
+            is Failed -> "Отключено"
         }
 }
 

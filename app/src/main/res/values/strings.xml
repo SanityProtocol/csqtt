@@ -40,6 +40,14 @@
     <string name="link_not_opened">Не удалось открыть ссылку</string>
     <string name="update_postponed">Обновление отложено на 24 часа</string>
 
+    <!-- «Главная» (B1) -->
+    <string name="home_hint_start">Нажмите, чтобы подключиться</string>
+    <string name="home_hint_paused">нажмите, чтобы отключить VPN</string>
+    <string name="home_hint_captcha">VK просит проверку. Без неё подключение не продолжится.</string>
+    <string name="home_stage_vk">Получение доступа VK…</string>
+    <string name="home_stage_server">Соединение с сервером…</string>
+    <string name="home_stage_vpn">Запуск VPN…</string>
+
     <string name="action_clear">Очистить</string>
     <string name="action_copy">Копировать</string>
     <string name="action_share">Поделиться</string>
