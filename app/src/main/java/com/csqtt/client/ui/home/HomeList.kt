@@ -57,6 +57,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -95,9 +96,12 @@ import com.csqtt.client.ui.design.Type
 import com.csqtt.client.ui.legacy.rememberWifiNameAccess
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import com.csqtt.client.ui.shell.LocalNav
+import com.csqtt.client.ui.shell.LocalOwners
 import com.csqtt.client.ui.shell.LocalStore
 import com.csqtt.client.ui.shell.Tab
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 private val Activity = Type.buttonSmall.copy(fontWeight = FontWeight.Normal, fontFeatureSettings = "tnum")
@@ -137,7 +141,7 @@ private fun StateBlock(view: HomeView) {
     ) {
         CDisc(view.visuals.disc, tapDescription(view), enabled = view.visuals.tap != Tap.Nothing, onClick = view.actions.tap)
         Text(
-            view.visuals.label, style = Type.status, color = colors.text, textAlign = TextAlign.Center,
+            stateLabel(view), style = Type.status, color = colors.text, textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
         )
         // the stage of a start and the streams, one line, there only while it has something to say
@@ -352,6 +356,7 @@ private fun Profiles() {
     val nav = LocalNav.current
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
+    val messages = LocalOwners.current.messages
     val entries by store.profileEntries.collectAsStateWithLifecycle(initialValue = emptyList())
     val sort by store.profileSort.collectAsStateWithLifecycle(initialValue = ProfileSort.Custom)
     val order by store.profileOrder.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -370,10 +375,17 @@ private fun Profiles() {
                     entry = entry,
                     selected = entry.index == active,
                     divided = index > 0,
-                    onPick = { scope.launch { pickProfile(context, store, entry.index, active) } },
+                    // on the app's scope: the reconnect a pick asks for goes out whatever becomes of this screen
+                    onPick = { TunnelManager.scope.launch(Dispatchers.Main) { pickProfile(context, store, entry.index, active) } },
                     onPin = { scope.launch { store.setProfilePinned(entry.index, !entry.pinned) } },
                     onOpenTunnel = {
-                        scope.launch {
+                        // the run stays where it is, and says so: opening a profile's settings is not a pick
+                        val runOn = TunnelManager.connectionState.value.powerIsOn
+                        val runProfile = TunnelManager.runTargetProfile()
+                        if (runOn && runProfile != entry.index) {
+                            rows.firstOrNull { it.index == runProfile }?.let { messages.show(context.getString(R.string.home_run_stays, it.name)) }
+                        }
+                        TunnelManager.scope.launch(Dispatchers.Main) {
                             if (entry.index != active) store.saveActiveProfile(entry.index)
                             nav.select(Tab.Tunnel)
                         }
@@ -398,6 +410,8 @@ private fun SortMenu(sort: ProfileSort, onPick: (ProfileSort) -> Unit) {
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             for ((choice, label) in SortChoices) {
                 DropdownMenuItem(
+                    // TalkBack says which order is the chosen one: the check mark alone is a picture
+                    modifier = Modifier.semantics { selected = choice == sort },
                     text = { Text(stringResource(label), style = Type.body) },
                     leadingIcon = {
                         if (choice == sort) Icon(Icons.check, contentDescription = null, modifier = Modifier.size(18.dp), tint = Csq.colors.muted)
@@ -440,7 +454,10 @@ private fun ProfileRow(
     Box(
         Modifier.fillMaxWidth().draggable(
             orientation = Orientation.Horizontal,
-            state = rememberDraggableState { delta -> scope.launch { slide.snapTo((slide.value + delta).coerceIn(open, 0f)) } },
+            // at once, not queued: a delta that ran after the lift's settle would cancel it and leave the row half open
+            state = rememberDraggableState { delta ->
+                scope.launch(start = CoroutineStart.UNDISPATCHED) { slide.snapTo((slide.value + delta).coerceIn(open, 0f)) }
+            },
             onDragStopped = { slide.animateTo(if (slide.value < open / 2) open else 0f) },
         ),
     ) {

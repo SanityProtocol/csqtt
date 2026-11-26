@@ -130,4 +130,19 @@ class ProfileSortTest {
         assertEquals(1, SettingsStore.addProfileKeys(prefs, linkMode = true, now = 5_000L))
         assertEquals(5_000L, prefs[added])
     }
+
+    @Test
+    fun aSubscriptionsNodeIsDatedWhenItTakesASlotNotWhenItIsRefreshed() {
+        val node = SubscriptionProfileWrite(5, Store253Snapshots.participantLink, null, "msk-1", "Мой VPN", "https://sub.example.invalid/s", null)
+        // a node from before the dates were kept: a refresh writes into its slot and gives it none
+        val old = load("""{"strings": {"csqtt_link_5": "${Store253Snapshots.participantLink}", "subscription_url_5": "https://sub.example.invalid/s"},
+                           "booleans": {"csqtt_link_mode_5": true}, "ints": {"active_profile": 0}}""")
+        SettingsStore.writeSubscriptionNode(old, node, now = 9_000L)
+        assertNull(old[longPreferencesKey("profile_added_at_5")])
+        // a node that takes a free slot is added now, and a later refresh keeps that date
+        val fresh = load("""{"strings": {"peer": "203.0.113.5"}, "ints": {"active_profile": 0}}""")
+        SettingsStore.writeSubscriptionNode(fresh, node, now = 1_000L)
+        SettingsStore.writeSubscriptionNode(fresh, node, now = 9_000L)
+        assertEquals(1_000L, fresh[longPreferencesKey("profile_added_at_5")])
+    }
 }

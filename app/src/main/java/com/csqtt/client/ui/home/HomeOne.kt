@@ -111,7 +111,7 @@ internal fun HomeOne(view: HomeView) {
                 },
             )
             Text(
-                view.visuals.label, style = Status, textAlign = TextAlign.Center,
+                stateLabel(view), style = Status, textAlign = TextAlign.Center,
                 color = when (view.visuals.status) {
                     StatusTone.Accent -> colors.accentText
                     StatusTone.Warn -> colors.warn

@@ -907,8 +907,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         ) {
             val profile = write.profile
             if (write.link.isBlank()) return
+            // a node that takes a free slot is added now; one refreshed in its slot keeps what it has, which for a node
+            // from before the dates were kept is none
+            val taken = !profileInUse(prefs, profile)
             startCleanIfFree(prefs, profile)
-            stampAdded(prefs, profile, now)
+            if (taken) stampAdded(prefs, profile, now)
             useParticipantLink(prefs, profile, write.link.trim())
 
             val power = write.power?.coerceIn(1, CsqttConstants.Tunnel.MAX_WORKERS)

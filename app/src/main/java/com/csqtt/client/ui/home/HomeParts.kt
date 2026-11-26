@@ -29,13 +29,17 @@ import com.csqtt.client.TunnelManager
 import java.util.Locale
 import kotlinx.coroutines.delay
 
+/** The state's word as Home says it. */
+@Composable
+internal fun stateLabel(view: HomeView): String = view.visuals.homeLabel?.let { stringResource(it) } ?: view.visuals.label
+
 /** What TalkBack says of the C: what a tap will do, or the state when a tap does nothing now. */
 @Composable
 internal fun tapDescription(view: HomeView): String = when (view.visuals.tap) {
     Tap.Start -> stringResource(R.string.home_vpn_on)
     Tap.Stop -> stringResource(R.string.home_vpn_off)
     Tap.Captcha -> stringResource(R.string.home_captcha_solve)
-    Tap.Nothing -> if (view.state is ConnectionState.Stopping) stringResource(R.string.home_vpn_stopping) else view.visuals.label
+    Tap.Nothing -> if (view.state is ConnectionState.Stopping) stringResource(R.string.home_vpn_stopping) else stateLabel(view)
 }
 
 /**

@@ -17,15 +17,14 @@ internal enum class Tap { Start, Stop, Captcha, Nothing }
  * [ConnectionState.label], which the notification, the tile and the widget show too.
  */
 internal data class ConnectionVisuals(
+    /** The state's own word; [homeLabel], when set, is a word only Home says in its place. */
     val label: String,
     val disc: Disc,
     val status: StatusTone,
     @StringRes val hint: Int?,
     val tap: Tap,
+    @StringRes val homeLabel: Int? = null,
 )
-
-/** The word of the short wait after a stop, before the next start is taken. */
-internal const val LABEL_COOLDOWN = "Ожидание"
 
 /**
  * [cooldown]: the short wait after a stop is on. [configurationValid]: the profile has what a start needs; when it has
@@ -40,7 +39,8 @@ internal fun connectionVisuals(
     val start = if (cooldown && configurationValid) Tap.Nothing else Tap.Start
     return when (state) {
         ConnectionState.Idle -> if (cooldown) {
-            ConnectionVisuals(LABEL_COOLDOWN, Disc.Dim, StatusTone.Warn, null, start)
+            // the short wait after a stop, before the next start is taken: «Ожидание»
+            ConnectionVisuals(state.label, Disc.Dim, StatusTone.Warn, null, start, homeLabel = R.string.home_state_wait)
         } else {
             // the hint only where a tap connects: with settings missing, the card under the button says what to do
             ConnectionVisuals(state.label, Disc.Off, StatusTone.Muted, R.string.home_hint_start.takeIf { configurationValid }, start)

@@ -1270,14 +1270,17 @@ object TunnelManager {
         observersInitialized = true
         val appContext = context.applicationContext
         // P3 B1: the profile a run works on is the one last connected («по последнему подключению»). Written once for a
-        // process on a profile, not at every reconnect: a tunnel on a poor network must not write the store each time
+        // run on a profile, not at every reconnect or restart of the core: a tunnel on a poor network must not write the
+        // store each time
         scope.launch {
-            var written = -1 to 0L
-            connectionState.map { it is ConnectionState.Connected }.distinctUntilChanged().collect { connected ->
-                val now = sourceProfile to processStartedAtMs
-                if (connected && now.first >= 0 && now != written) {
-                    written = now
-                    runCatching { SettingsStore(appContext).markProfileConnected(now.first, System.currentTimeMillis()) }
+            var written = -1
+            connectionState.collect { state ->
+                val profile = sourceProfile
+                if (!state.powerIsOn) {
+                    written = -1
+                } else if (state is ConnectionState.Connected && profile >= 0 && profile != written) {
+                    written = profile
+                    runCatching { SettingsStore(appContext).markProfileConnected(profile, System.currentTimeMillis()) }
                 }
             }
         }
@@ -2008,6 +2011,9 @@ object TunnelManager {
                         processIdentity = null
                         nativeProcessPid = null
                         activeWorkers.value = 0
+                        // the process is gone, and with it how far its start was and what it had ready
+                        readyAhead.value = 0
+                        startProgress.value = null
                         endRest()
                         clearTrafficSpeed()
                         resetWorkerRecoveryState()

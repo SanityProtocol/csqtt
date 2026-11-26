@@ -77,8 +77,8 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout, onVkAuthRequested: () -
     if (tab == Tab.Home) {
         // «Главная» is the new design's (B1): outside classic's frame, with the system's font scale
         if (auth.isLoaded) {
-            // a start asked for before Android's VPN question belongs to the profile it was asked for
-            forms.SaveableStateProvider("home:${auth.profile}:$epoch") {
+            // one Home for every profile: a pick in its list changes what it shows, it does not make the screen again
+            forms.SaveableStateProvider("home") {
                 HomeTab(
                     auth = auth,
                     layout = homeLayout,

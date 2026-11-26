@@ -1,6 +1,7 @@
 package com.csqtt.client
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -44,10 +45,10 @@ class StartStagesTest {
     }
 
     @Test
-    fun theStreamsAreSaidFromTheTap() {
-        for (state in listOf(ConnectionState.Preparing, connecting)) {
-            assertTrue("$state", StreamsLine.shown(state, dormant = false, active = 0, running = 10, fullSince = null, nowMs = 0))
-        }
+    fun theStreamsAreSaidOnceTheCoreRuns() {
+        assertTrue(StreamsLine.shown(connecting, dormant = false, active = 0, running = 10, fullSince = null, nowMs = 0))
+        // while the service still prepares there is no core, and no count of its streams to say
+        assertFalse(StreamsLine.shown(ConnectionState.Preparing, dormant = false, active = 0, running = 0, fullSince = null, nowMs = 0))
     }
 
     @Test

@@ -70,7 +70,10 @@ class ConnectionVisualsTest {
     @Test
     fun theWaitAfterAStopRefusesAStartOnlyWhenItWouldBeOne() {
         val waiting = connectionVisuals(ConnectionState.Idle, cooldown = true)
-        assertEquals(LABEL_COOLDOWN, waiting.label)
+        // Home's own word for it; the notification, the tile and the widget keep the state's
+        assertEquals(R.string.home_state_wait, waiting.homeLabel)
+        assertEquals(ConnectionState.Idle.label, waiting.label)
+        assertNull(connectionVisuals(ConnectionState.Idle).homeLabel)
         assertEquals(Tap.Nothing, waiting.tap)
         assertEquals(Disc.Dim, waiting.disc)
         assertEquals(StatusTone.Warn, waiting.status)
