@@ -20,12 +20,14 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.csqtt.client.ShellTestKit.recreateFromSavedStateAlone
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -49,6 +51,7 @@ class TunnelFormTest {
         fun noSystemPromptsOverTheApp() = ShellTestKit.noSystemPromptsOverTheApp()
 
         private const val SLOT = 16
+        private const val OTHER = 17
         private const val ADDRESS = "Адрес сервера"
         private const val PORT = "Порт"
         private const val PASSWORD = "Пароль подключения"
@@ -298,6 +301,150 @@ class TunnelFormTest {
             assertEquals("the old text was written back over the new port", 46200, port())
             assertEquals("the old text was written back over the new password", "pw-deployed", password())
         }
+    }
+
+    /**
+     * The verify of the fix round (V1): a draft is written once. A field's text that was written as its screen was
+     * left does not come back with the screen when the store has been put back to the value it was typed over — the
+     * end of a deploy writes the server's own port and password again — and leaving the tab again writes nothing.
+     */
+    @Test
+    fun aFieldWrittenAsItsScreenWasLeftDoesNotComeBackOverTheValueItWasTypedOver() {
+        runBlocking {
+            slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first())
+            store.saveConnectionPassword("pw-server", forProfile = SLOT)
+        }
+        fun leaveAndSettle() {
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitForIdle()
+            Thread.sleep(1_000)
+        }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            // the port, left by a tab tap with the focus still in it: its draft is in the tab's saved state
+            openTunnel()
+            compose.waitUntil(5_000) { typed(PORT) == "46000" }
+            field(PORT).performTextReplacement("46100")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { port() == 46100 }
+            // a deploy's end: the server's own again, the value the port was typed over
+            runBlocking { slot.saveFormPort(46000, store.profileEpoch.first()) }
+            openTunnel()
+            compose.waitUntil(5_000) { typed(PORT) == "46000" }
+            leaveAndSettle()
+            assertEquals("the port typed before was written back over the server's", 46000, port())
+
+            // the password, the same way: its draft is in memory for as long as the process lives, and it is masked
+            openTunnel()
+            field(PASSWORD).performTextReplacement("pw-typed")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { password() == "pw-typed" }
+            runBlocking { store.saveConnectionPassword("pw-server", forProfile = SLOT) }
+            openTunnel()
+            leaveAndSettle()
+            assertEquals("the password typed before was written back over the server's", "pw-server", password())
+
+            // left by the app going to the background: the same
+            openTunnel()
+            field(PORT).performTextReplacement("46300")
+            scenario.moveToState(Lifecycle.State.CREATED)
+            compose.waitUntil(5_000) { port() == 46300 }
+            runBlocking { slot.saveFormPort(46000, store.profileEpoch.first()) }
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            compose.waitUntil(5_000) { typed(PORT) == "46000" }
+            leaveAndSettle()
+            assertEquals("the port typed before the app was left was written back", 46000, port())
+
+            // an address left with its port in it is the two it holds when the screen is back, not the text as typed
+            openTunnel()
+            field(ADDRESS).performTextReplacement("203.0.113.1:5000")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { port() == 5000 }
+            openTunnel()
+            compose.waitUntil(5_000) { typed(ADDRESS) == "203.0.113.1" && typed(PORT) == "5000" }
+        }
+    }
+
+    /**
+     * The verify of the fix round (V3) and the review's F10: the marks of a refused start are the profile's. They are
+     * still there after another profile was deleted beside it, and gone once the profile itself is: the slot it held
+     * does not open full of errors for it.
+     */
+    @Test
+    fun theMarksOfARefusedStartStayWithTheirProfileAndGoWithIt() {
+        val banner = "Запуск не начат: исправьте поля ниже"
+        ActivityScenario.launch(MainActivity::class.java).use {
+            val start = hasContentDescription("Включить VPN")
+            compose.waitUntil(10_000) { compose.onAllNodes(start).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(start).performClick()
+            compose.waitUntil(10_000) { shown(banner) }
+            // the form takes shape: it is a profile now, still short of a password and a hash
+            field(ADDRESS).performTextReplacement("203.0.113.9")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { peer() == "203.0.113.9" }
+
+            // another profile is deleted: every form is made anew, and this one is still marked
+            runBlocking { store.deleteProfile(OTHER) }
+            openTunnel()
+            compose.waitUntil(5_000) { shown(banner) }
+            assertTrue(shown("Укажите пароль подключения"))
+
+            // the profile itself is deleted: its slot, opened again, is an empty form with nothing said of it
+            runBlocking {
+                store.deleteProfile(SLOT)
+                store.saveActiveProfile(SLOT)
+                store.saveCsqttLinkMode(false)
+            }
+            compose.waitUntil(5_000) { typed(ADDRESS) == "" }
+            compose.waitForIdle()
+            Thread.sleep(500)
+            assertFalse("the emptied slot is marked for the profile that was deleted from it", shown(banner))
+            assertFalse(shown("Укажите пароль подключения"))
+        }
+    }
+
+    /**
+     * The review's F3, and its F12: what a start connects with leaves out a hash a check found dead — the one list
+     * the «Потоки» zones count too — is every hash again when a check found them all dead, and takes a dead one back
+     * once what the check said of it is forgotten (it was entered again).
+     */
+    @Test
+    fun aStartLeavesOutAHashACheckFoundDead() = runBlocking {
+        val live = "L".repeat(20)
+        val dead = "D".repeat(20)
+        suspend fun connectsWith() = buildTunnelStartIntent(context, slot)!!.getStringExtra("vk_hashes")
+        slot.saveFormAddress("203.0.113.21", null, store.profileEpoch.first())
+        store.saveConnectionPassword("pw-server", forProfile = SLOT)
+        slot.saveVkHashesOnly("$live,$dead")
+        assertEquals("$live,$dead", connectsWith())
+        slot.mergeVkHashCheckResults(mapOf(dead to VkHashValidationStatus.Invalid))
+        assertEquals(live, connectsWith())
+        slot.mergeVkHashCheckResults(mapOf(live to VkHashValidationStatus.Invalid))
+        assertEquals("every one dead: a start tries them all", "$live,$dead", connectsWith())
+        slot.forgetVkHashCheckResults(setOf(dead))
+        assertEquals("entered again, the dead one is the one to try", dead, connectsWith())
+    }
+
+    /**
+     * The review's F2: a settings file written before «Экстра потоки» went names the switch, and its count comes in
+     * as it ran — 2.5.3's stored default of 18 as the 10 it was. This build's own file names no switch: its count is
+     * the count.
+     */
+    @Test
+    fun aSettingsFileFromBeforeTheSwitchWentBringsTheCountItRan() = runBlocking {
+        val file = JSONObject(store.exportConfigJson(false, true, false, false))
+        suspend fun imported(count: Int, switch: Boolean?): Int {
+            file.getJSONObject("deploy").apply {
+                put("workers_per_hash", count)
+                if (switch == null) remove("extra_workers") else put("extra_workers", switch)
+            }
+            assertTrue(store.importConfigJson(file.toString(), false, true, false, false))
+            return slot.workersPerHash.first()
+        }
+        assertEquals("2.5.3's default ran as 10", 10, imported(18, false))
+        assertEquals(5, imported(8, false))
+        assertEquals("above 70 only the switch ran", 70, imported(95, false))
+        assertEquals(90, imported(95, true))
+        assertEquals("this build's own file", 15, imported(15, null))
     }
 
     @Test

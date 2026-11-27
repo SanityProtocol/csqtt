@@ -1,5 +1,10 @@
 package com.csqtt.client.ui.tunnel
 
+import androidx.datastore.preferences.core.mutablePreferencesOf
+import androidx.datastore.preferences.core.stringPreferencesKey
+import com.csqtt.client.SettingsStore
+import com.csqtt.client.VkHashValidationCodec
+import com.csqtt.client.VkHashValidationStatus
 import com.csqtt.client.measureSubnetRtt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -7,6 +12,21 @@ import org.junit.Test
 
 /** P3 B3: what «Хеши звонков VK» stores of its fields, and what «TURN-подсети» measures of a subnet. */
 class HashesToStoreTest {
+    @Test
+    fun `a hash entered again loses what the last check said of it, and no other does`() {
+        val a = "A".repeat(20); val b = "B".repeat(20); val c = "C".repeat(20)
+        val results = mapOf(a to VkHashValidationStatus.Invalid, b to VkHashValidationStatus.Valid)
+        val key = stringPreferencesKey("vk_hash_check_results_7")
+        fun store() = mutablePreferencesOf(key to VkHashValidationCodec.encode(results))
+        fun left(forget: Set<String>, profile: Int = 7) = store().also { SettingsStore.forgetVkHashCheckResultsKeys(it, profile, forget) }
+            .let { VkHashValidationCodec.decode(it[key] ?: "{}") }
+        assertEquals(mapOf(b to VkHashValidationStatus.Valid), left(setOf(a)))
+        assertEquals(emptyMap<String, VkHashValidationStatus>(), left(setOf(a, b, c)))
+        assertEquals("one the check never spoke of: nothing is rewritten", results, left(setOf(c)))
+        assertEquals(results, left(emptySet()))
+        assertEquals("another profile's are its own", results, left(setOf(a), profile = 8))
+    }
+
     private val a = "A".repeat(20)
     private val b = "B".repeat(20)
 

@@ -53,6 +53,7 @@ import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import com.csqtt.client.ui.legacy.utils.stripVkUrlStatic
 import com.csqtt.client.ui.profiles.copiedText
 import com.csqtt.client.ui.shell.LocalOwners
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 private const val FIELDS = OWN_HASH_FIELDS
@@ -100,6 +101,9 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
     // a field that is edited forgets what the last check said of the hash that stood in it: entered again (its call
     // was started again), the hash is tried, and reads as not checked until it is
     val forgotten = rememberSaveable(saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() })) { mutableStateListOf<String>() }
+    // those of them a check was started for since. The check drops what the last one said of them itself, before it
+    // asks (VkHashCheck.start): when it is done they are checked hashes again, shown and kept as it found them
+    val rechecking = rememberSaveable(saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() })) { mutableStateListOf<String>() }
     val checked = remember(resultsJson) { VkHashValidationCodec.decode(resultsJson) }
     val results = checked - forgotten.toSet()
     val ownerHashes = remember(linkMode, link, received) {
@@ -110,11 +114,20 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
     val checkBusy = check is VkHashCheck.State.Running
     val toCheck = (ownerInUse + fields.map(String::trim)).filter { it.length >= MIN_LENGTH }.distinct()
     val last = (check as? VkHashCheck.State.Done)?.takeIf { it.profile == profile && it.hashes == toCheck }
+    // waited for on the check itself, not on its state as drawn: a check that ends as the one before it did is no
+    // change of that state to see
+    LaunchedEffect(rechecking.size) {
+        if (rechecking.isEmpty()) return@LaunchedEffect
+        VkHashCheck.state.first { it !is VkHashCheck.State.Running }
+        forgotten.removeAll(rechecking)
+        rechecking.clear()
+    }
     // on the app's scope: the fields are stored also when the sheet goes the same moment
     // (nothing to store before the fields were read: an empty list would wipe the stored hashes)
     val save = {
         if (fields.isNotEmpty()) {
-            val gone = forgotten.toSet()
+            // not those a check is running for: it has dropped their old verdicts, and its own are not to follow them
+            val gone = forgotten.toSet() - rechecking.toSet()
             TunnelManager.scope.launch {
                 store.saveVkHashesOnly(hashesToStore(fields.toList()))
                 store.forgetVkHashCheckResults(gone)
@@ -190,7 +203,10 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
                 ownerHashes.isNotEmpty() -> stringResource(R.string.hashes_check_count, toCheck.size)
                 else -> stringResource(R.string.hashes_check)
             },
-            { VkHashCheck.start(context, profile, toCheck, fingerprint, clientIds) },
+            {
+                val again = forgotten.filter { it in toCheck }.toSet()
+                if (VkHashCheck.start(context, profile, toCheck, fingerprint, clientIds, enteredAgain = again)) rechecking.addAll(again)
+            },
             modifier = Modifier.fillMaxWidth(), kind = BtnKind.Tonal, icon = if (checking) Icons.loader else Icons.activity,
             enabled = !checkBusy && toCheck.isNotEmpty(),
         )

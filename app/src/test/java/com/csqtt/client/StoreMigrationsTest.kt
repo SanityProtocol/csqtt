@@ -141,6 +141,27 @@ class StoreMigrationsTest {
     }
 
     @Test
+    fun `step 9 alone takes a count as it ran`() {
+        // a store that had the first eight steps under an earlier 2.6 build: its counts were kept as stored then
+        fun after(stored: Int, switch: Boolean?): Int? {
+            val booleans = if (switch == null) "" else """, "extra_workers_9": $switch"""
+            val prefs = load(
+                """{"strings": {"peer_9": "203.0.113.9"}, "ints": {"store_schema_version": 8, "workers_per_hash_9": $stored},
+                    "booleans": {"default_role_decided": true$booleans}}""",
+            )
+            SettingsStore.migrateStore(prefs)
+            return prefs[intPreferencesKey("workers_per_hash_9")]
+        }
+        for ((stored, runs) in listOf(5 to 5, 8 to 5, 10 to 10, 18 to 10, 25 to 20, 70 to 70, 75 to 70, 100 to 70)) {
+            assertEquals("stored $stored, the switch never touched", runs, after(stored, null))
+            assertEquals("stored $stored, the switch off", runs, after(stored, false))
+        }
+        for ((stored, runs) in listOf(18 to 10, 75 to 70, 95 to 90, 100 to 100)) {
+            assertEquals("stored $stored, the switch on", runs, after(stored, true))
+        }
+    }
+
+    @Test
     fun `a profile that never held a count keeps the 10 it ran, and only a new one starts at 20`() {
         // P3 B3 (the operator, 2026-11-27): a new profile starts at 20 from now on; until then none stored meant 10
         val prefs = load(

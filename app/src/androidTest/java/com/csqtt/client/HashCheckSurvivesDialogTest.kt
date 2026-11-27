@@ -1,10 +1,12 @@
 package com.csqtt.client
 
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -106,5 +108,46 @@ class HashCheckSurvivesDialogTest {
         }
         assertEquals(VkHashCheck.State.Done(SLOT, listOf(HASH), 0), VkHashCheck.state.value)
         assertNull("the profile opened meanwhile got nothing", storedResults(OTHER)[HASH])
+    }
+
+    /**
+     * The verify of P3 B3's fix round (V2): a hash a check found dead and entered again — its call was started again —
+     * reads as not checked. The check asked for next says what it finds of it, and «Сохранить» keeps that: the sheet
+     * forgot the old verdict, not the new one.
+     */
+    @Test
+    fun aHashEnteredAgainIsShownAndKeptAsTheNextCheckFindsIt() {
+        VkHashCheck.validator = { _, hashes, _, _ -> hashes.associateWith { VkHashValidationStatus.Invalid } }
+        runBlocking {
+            store.clearProfile(OTHER)
+            store.clearProfile(SLOT)
+            store.saveActiveProfile(SLOT)
+            store.saveCsqttLinkMode(false)
+            store.saveVkHashesOnly(HASH)
+            SettingsStore(context, ProfileScope.Fixed(SLOT)).mergeVkHashCheckResults(mapOf(HASH to VkHashValidationStatus.Invalid))
+        }
+        val first = hasSetTextAction() and hasText("Хеш 1 (основной) *")
+
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Туннель") }
+            compose.onNodeWithText("Туннель").performClick()
+            compose.waitUntil(10_000) { shown("Хеши звонков VK · добавить") }
+            compose.onNodeWithText("Хеши звонков VK · добавить").performClick()
+            compose.waitUntil(5_000) { shown("Недействителен") }
+
+            // entered again: the field emptied and the same hash typed into it
+            compose.onNode(first).performTextReplacement("")
+            compose.onNode(first).performTextReplacement(HASH)
+            compose.waitUntil(5_000) { shown("Не проверен") && !shown("Недействителен") }
+
+            compose.onNodeWithText("Проверить актив").performScrollTo().performClick()
+            compose.waitUntil(10_000) { shown("Недействителен") }
+            compose.onNodeWithText("Сохранить").performScrollTo().performClick()
+            compose.waitUntil(5_000) { !shown("Проверить актив") }
+            // whatever the sheet's save forgets has landed by now
+            compose.waitForIdle()
+            Thread.sleep(1_000)
+        }
+        assertEquals("the verdict of the check that ran last was forgotten", VkHashValidationStatus.Invalid, storedResults(SLOT)[HASH])
     }
 }

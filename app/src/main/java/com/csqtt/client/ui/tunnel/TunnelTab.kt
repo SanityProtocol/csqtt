@@ -70,6 +70,7 @@ import com.csqtt.client.TunnelIssues
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidationStatus
+import com.csqtt.client.draftLeft
 import com.csqtt.client.draftStands
 import com.csqtt.client.hashesAStartUses
 import com.csqtt.client.linkNote
@@ -125,6 +126,15 @@ internal fun linkDraftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:li
 
 /** Where the stored value a secret's draft was typed over is kept, beside the draft (see [draftStands]). */
 internal fun draftBaseKey(key: String) = "$key:base"
+
+/**
+ * Where the draft an address or a port field left with is noted ([draftLeft]): in memory, beside the secrets' drafts
+ * and under the same profile and epoch. The draft itself is in the tab's saved state, and that is written before the
+ * field's last commit runs when the tab goes: the note is how that copy is known for what it is when it comes back.
+ */
+internal fun addressLeftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:address:left"
+
+internal fun portLeftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:port:left"
 
 /** How many hashes of its own a profile holds: the fields of «Хеши звонков VK», and the «N из 6» of its button. */
 internal const val OWN_HASH_FIELDS = 6
@@ -220,6 +230,10 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
     var addressBase by rememberSaveable { mutableStateOf<String?>(null) }
     var portDraft by rememberSaveable { mutableStateOf<String?>(null) }
     var portBase by rememberSaveable { mutableStateOf<Int?>(null) }
+    val addressNote = addressLeftKey(profile, epoch)
+    val portNote = portLeftKey(profile, epoch)
+    val addressLeft = SecretDrafts.typed(addressNote)
+    val portLeft = SecretDrafts.typed(portNote)
     val passwordKey = passwordDraftKey(profile, epoch)
     val linkKey = linkDraftKey(profile, epoch)
     val passwordDraft = SecretDrafts.typed(passwordKey)
@@ -230,8 +244,9 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
     LaunchedEffect(validationRequest) { if (validationRequest > 0) required = true }
 
     val linkMode = auth.csqttLinkMode
-    val address = addressDraft ?: peer
-    val portText = portDraft ?: port.toString()
+    // a draft that left with its screen, written then, is not shown when the screen is back (draftLeft)
+    val address = addressDraft?.takeUnless { draftLeft(it, addressLeft) } ?: peer
+    val portText = portDraft?.takeUnless { draftLeft(it, portLeft) } ?: port.toString()
     val password = passwordDraft ?: auth.connectionPassword
     val linkText = linkDraft ?: auth.csqttLink
     val shownLink = remember(linkText) { parseCsqttLink(linkText) }
@@ -291,19 +306,22 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
     if (passwordDraft != null && passwordBase == null) SideEffect { SecretDrafts.type(draftBaseKey(passwordKey), auth.connectionPassword) }
     // a draft goes once it no longer stands ([draftStands]): the store holds what it says — it was written when the
     // field was left — or holds what another screen put there since (a deploy's end writes the server it installed, a
-    // link is taken by QR). From then on the field follows the store again
-    LaunchedEffect(addressDraft, addressBase, peer) {
-        if (addressDraft != null && !draftStands(addressDraft, addressBase, peer)) {
+    // link is taken by QR). And it goes when it left with its screen ([draftLeft]): written then, it is not the field's
+    // any more, whatever the store holds by now. From then on the field follows the store again
+    LaunchedEffect(addressDraft, addressBase, peer, addressLeft) {
+        if (addressDraft != null && (draftLeft(addressDraft, addressLeft) || !draftStands(addressDraft, addressBase, peer))) {
             addressDraft = null
             addressBase = null
         }
+        if (addressDraft == null && addressLeft != null) SecretDrafts.clear(addressNote)
     }
-    LaunchedEffect(portDraft, portBase, port) {
+    LaunchedEffect(portDraft, portBase, port, portLeft) {
         val typed = portDraft
-        if (typed != null && !draftStands(typed.toIntOrNull() ?: NO_PORT, portBase, port)) {
+        if (typed != null && (draftLeft(typed, portLeft) || !draftStands(typed.toIntOrNull() ?: NO_PORT, portBase, port))) {
             portDraft = null
             portBase = null
         }
+        if (portDraft == null && portLeft != null) SecretDrafts.clear(portNote)
     }
     LaunchedEffect(passwordDraft, passwordBase, auth.connectionPassword) {
         if (passwordDraft != null && !draftStands(passwordDraft, passwordBase, auth.connectionPassword)) SecretDrafts.clear(passwordKey)
@@ -338,28 +356,40 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
             } else {
                 OwnCard(
                     view = view, address = address, port = portText, storedPassword = auth.connectionPassword, modeAction = modeAction,
+                    // an edit is typed over what the field shows — the stored value, also where a draft that left
+                    // with its screen is still on its way out — and is a new draft: no write was issued for it
                     onAddress = {
-                        if (addressDraft == null) addressBase = peer
+                        if (addressDraft == null || draftLeft(addressDraft, addressLeft)) addressBase = peer
                         addressDraft = it.filterNot(Char::isWhitespace)
+                        SecretDrafts.clear(addressNote)
                     },
                     onPort = {
-                        if (portDraft == null) portBase = port
+                        if (portDraft == null || draftLeft(portDraft, portLeft)) portBase = port
                         portDraft = it.filter(Char::isDigit).take(5)
+                        SecretDrafts.clear(portNote)
                     },
-                    // a commit writes only a draft that still stands: one the store already holds, or one typed over
-                    // a value the store no longer holds, is dropped and nothing is written
-                    commitAddress = {
+                    // a commit writes only a draft that still stands, and writes it once: one the store already holds,
+                    // one typed over a value the store no longer holds and one that left with its screen before are
+                    // dropped, and nothing is written. When it is the screen that goes ([leaving]) the draft is noted
+                    // as it stands, written or dropped: it is dealt with, and the copy of it in the tab's saved state
+                    // does not come back with the screen
+                    commitAddress = { leaving ->
                         val text = addressDraft
                         when {
                             text == null -> Unit
-                            !draftStands(text, addressBase, peer) -> {
+                            draftLeft(text, SecretDrafts.typed(addressNote)) || !draftStands(text, addressBase, peer) -> {
+                                if (leaving) SecretDrafts.type(addressNote, text)
                                 addressDraft = null
                                 addressBase = null
                             }
                             else -> {
                                 // «203.0.113.5:46000» is the two it holds, each in its own field
                                 val apart = splitHostPort(text)
-                                if (apart != null) {
+                                if (leaving) {
+                                    SecretDrafts.type(addressNote, text)
+                                    // the port it brings is the port from now on: a draft of the port field goes with it
+                                    if (apart != null) portDraft?.let { SecretDrafts.type(portNote, it) }
+                                } else if (apart != null) {
                                     addressDraft = apart.first
                                     portDraft = null
                                     portBase = null
@@ -368,17 +398,22 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
                             }
                         }
                     },
-                    commitPort = {
+                    commitPort = { leaving ->
                         val text = portDraft
                         val typed = text?.toIntOrNull()
                         when {
                             text == null -> Unit
                             // an emptied field left as it is means "as it was"
-                            text.isEmpty() || !draftStands(typed ?: NO_PORT, portBase, port) -> {
+                            text.isEmpty() || draftLeft(text, SecretDrafts.typed(portNote)) ||
+                                !draftStands(typed ?: NO_PORT, portBase, port) -> {
+                                if (leaving) SecretDrafts.type(portNote, text)
                                 portDraft = null
                                 portBase = null
                             }
-                            typed != null && typed in 1..65535 -> TunnelManager.scope.launch { store.saveFormPort(typed, epoch) }
+                            typed != null && typed in 1..65535 -> {
+                                if (leaving) SecretDrafts.type(portNote, text)
+                                TunnelManager.scope.launch { store.saveFormPort(typed, epoch) }
+                            }
                         }
                     },
                 )
@@ -392,20 +427,22 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
  * Runs [commit] when the field this is on is left: its focus lost, the app left, or the screen gone. A field of the
  * tunnel form is stored then and not while it is typed: a half-typed address or password in the store is what a running
  * tunnel's next restart would connect with. On the app's scope, so the last field typed before a tab change is stored.
+ * [commit] is told whether it is the screen that goes (the app left, the tab or the screen gone) and not the focus
+ * alone: a draft written then is written for good, and is not the field's when the screen is back ([draftLeft]).
  */
 @Composable
-internal fun Modifier.commitWhenLeft(commit: () -> Unit): Modifier {
+internal fun Modifier.commitWhenLeft(commit: (leaving: Boolean) -> Unit): Modifier {
     val run by rememberUpdatedState(commit)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) run() }
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) run(true) }
         lifecycle.addObserver(observer)
         onDispose {
             lifecycle.removeObserver(observer)
-            run()
+            run(true)
         }
     }
-    return onFocusChanged { if (!it.hasFocus) run() }
+    return onFocusChanged { if (!it.hasFocus) run(false) }
 }
 
 /** The profile the tab is on, and the way to another (the canvas's context row): it opens «Профили». */
@@ -468,8 +505,8 @@ private fun OwnCard(
     modeAction: ProfileModeAction?,
     onAddress: (String) -> Unit,
     onPort: (String) -> Unit,
-    commitAddress: () -> Unit,
-    commitPort: () -> Unit,
+    commitAddress: (leaving: Boolean) -> Unit,
+    commitPort: (leaving: Boolean) -> Unit,
 ) {
     val focus = LocalFocusManager.current
     val key = passwordDraftKey(view.profile, view.epoch)
@@ -500,14 +537,19 @@ private fun OwnCard(
         }
         SecretField(
             stringResource(R.string.tunnel_password), key, stored = storedPassword,
-            modifier = Modifier.commitWhenLeft {
+            modifier = Modifier.commitWhenLeft { leaving ->
                 val typed = SecretDrafts.typed(key)
                 when {
                     typed == null -> Unit
                     // an emptied field left as it is means "as it was": a stored password is never erased by a field.
                     // And a draft that no longer stands is dropped, not written (see the address)
                     typed.isEmpty() || !draftStands(typed, SecretDrafts.typed(draftBaseKey(key)), storedPassword) -> SecretDrafts.clear(key)
-                    isValidTunnelPassword(typed) -> TunnelManager.scope.launch { store.saveFormPassword(typed, epoch) }
+                    isValidTunnelPassword(typed) -> {
+                        TunnelManager.scope.launch { store.saveFormPassword(typed, epoch) }
+                        // written as its screen goes, the draft goes with it (see draftLeft): kept in memory, it stood
+                        // again once the store was put back to the password it was typed over, and was written over it
+                        if (leaving) SecretDrafts.clear(key)
+                    }
                 }
             },
             placeholder = stringResource(R.string.tunnel_password_hint),
@@ -548,7 +590,7 @@ private fun LinkCard(
     // null until the store has answered: the switch is drawn as stored
     val storedAccept by store.acceptServerHashes.collectAsStateWithLifecycle(initialValue = null)
     val storedReceivedAt by store.receivedHashesAt.collectAsStateWithLifecycle(initialValue = null)
-    val commitLink = {
+    val commitLink = { leaving: Boolean ->
         val typed = SecretDrafts.typed(key)
         when {
             typed == null -> Unit
@@ -557,7 +599,11 @@ private fun LinkCard(
             // drop the set the server sent
             !draftStands(typed, SecretDrafts.typed(draftBaseKey(key)), storedLink) -> SecretDrafts.clear(key)
             // M-72: a link is written whole or not at all; an emptied field clears it
-            typed.isEmpty() || parseCsqttLink(typed) != null -> TunnelManager.scope.launch { store.saveFormLink(typed, epoch) }
+            typed.isEmpty() || parseCsqttLink(typed) != null -> {
+                TunnelManager.scope.launch { store.saveFormLink(typed, epoch) }
+                // written as its screen goes, the draft goes with it (see the password)
+                if (leaving) SecretDrafts.clear(key)
+            }
         }
         Unit
     }
@@ -583,7 +629,7 @@ private fun LinkCard(
                         } else {
                             if (SecretDrafts.typed(key) == null) SecretDrafts.type(draftBaseKey(key), storedLink)
                             SecretDrafts.type(key, copied)
-                            commitLink()
+                            commitLink(false)
                         }
                     }, small = true, tint = colors.muted)
                     IconBtn(Icons.qr, stringResource(R.string.tunnel_link_scan), { nav.open(Routes.qrScanner()) }, small = true, tint = colors.muted)

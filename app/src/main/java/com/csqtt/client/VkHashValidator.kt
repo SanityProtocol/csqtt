@@ -151,8 +151,19 @@ internal object VkHashCheck {
     internal var validator: suspend (Context, List<String>, String, String) -> Map<String, VkHashValidationStatus> =
         { context, hashes, fingerprint, clientIds -> VkHashValidator.check(context, hashes, fingerprint, clientIds) }
 
-    /** Checks [hashes] for [profile]; false while a check runs. */
-    fun start(context: Context, profile: Int, hashes: List<String>, fingerprint: String, clientIds: String): Boolean {
+    /**
+     * Checks [hashes] for [profile]; false while a check runs. [enteredAgain] are those of them typed in again since
+     * the last check spoke of them: what it said goes before this one asks, so each ends with what this check says of
+     * it, or — where the check cannot reach it — unchecked, and not as the old check found it.
+     */
+    fun start(
+        context: Context,
+        profile: Int,
+        hashes: List<String>,
+        fingerprint: String,
+        clientIds: String,
+        enteredAgain: Set<String> = emptySet(),
+    ): Boolean {
         if (profile < 0 || hashes.isEmpty()) return false
         val app = context.applicationContext
         synchronized(this) {
@@ -160,8 +171,10 @@ internal object VkHashCheck {
             mutableState.value = State.Running(profile)
         }
         scope.launch {
+            val store = SettingsStore(app, ProfileScope.Fixed(profile))
+            runCatching { store.forgetVkHashCheckResults(enteredAgain) }
             val checked = runCatching { validator(app, hashes, fingerprint, clientIds) }.getOrDefault(emptyMap())
-            runCatching { SettingsStore(app, ProfileScope.Fixed(profile)).mergeVkHashCheckResults(checked) }
+            runCatching { store.mergeVkHashCheckResults(checked) }
             mutableState.value = State.Done(profile, hashes, hashes.size - checked.size)
         }
         return true

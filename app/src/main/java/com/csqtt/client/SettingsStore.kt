@@ -117,12 +117,18 @@ internal data class DeploySettingsSnapshot(
  */
 internal data class VkPoolState(val pool: List<String>, val sent: List<String>, val handOver: HandOverResult?)
 
+/**
+ * The open profile as the shell reads it. [addedAt] and [inUse] say which profile holds the slot: when it was added (0
+ * for one from before that was kept, or one typed into an empty slot) and whether the slot holds anything.
+ */
 internal data class TunnelAuthSnapshot(
     val profile: Int = -1,
     val connectionPassword: String = "",
     val connectionPasswordState: StoredSecretState = StoredSecretState.Missing,
     val csqttLink: String = "",
     val csqttLinkMode: Boolean = false,
+    val addedAt: Long = 0L,
+    val inUse: Boolean = false,
 ) {
     val isLoaded: Boolean
         get() = profile >= 0
@@ -966,6 +972,13 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL, PROFILE_NAME, PROFILE_NAME_OVERRIDE)
                 .any { !prefs[getProfileKey(it, profile)].isNullOrBlank() } ||
                 linkedVps(prefs, profile) != null || prefs[getProfileKey(PROFILE_ADDED, profile)] == true
+
+        /** [profile]'s check results without those of [hashes] (see forgetVkHashCheckResults); the others are kept. */
+        internal fun forgetVkHashCheckResultsKeys(prefs: MutablePreferences, profile: Int, hashes: Set<String>) {
+            val key = getProfileKey(VK_HASH_CHECK_RESULTS, profile)
+            val results = VkHashValidationCodec.decode(prefs[key] ?: "{}")
+            if (hashes.any(results::containsKey)) prefs[key] = VkHashValidationCodec.encode(results - hashes)
+        }
 
         /** A slot's profile was replaced: saved form state of the old one must not reach it (see PROFILE_EPOCH). */
         internal fun bumpProfileEpoch(prefs: MutablePreferences) {
@@ -1882,6 +1895,8 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             connectionPasswordState = connectionPassword.state,
             csqttLink = prefs[getProfileKey(CSQTT_LINK, profile)] ?: "",
             csqttLinkMode = prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false,
+            addedAt = prefs[getProfileKey(PROFILE_ADDED_AT, profile)] ?: 0L,
+            inUse = profileInUse(prefs, profile),
         )
     }.onIo()
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
@@ -2775,11 +2790,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
      */
     internal suspend fun forgetVkHashCheckResults(hashes: Set<String>) {
         if (hashes.isEmpty()) return
-        dataStore.edit { prefs ->
-            val key = getProfileKey(VK_HASH_CHECK_RESULTS, selectedProfile(prefs))
-            val results = VkHashValidationCodec.decode(prefs[key] ?: "{}")
-            if (hashes.any(results::containsKey)) prefs[key] = VkHashValidationCodec.encode(results - hashes)
-        }
+        dataStore.edit { prefs -> forgetVkHashCheckResultsKeys(prefs, selectedProfile(prefs), hashes) }
     }
 
     suspend fun invalidateVkHash(hash: String) {

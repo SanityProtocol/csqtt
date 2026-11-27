@@ -300,11 +300,11 @@ private fun StreamZone.colors(): Pair<Color, Color> {
 }
 
 /**
- * «Потоки» (the operator, 2026-11-27): the count the profile asks for, in fives, said as the most one hash carries
- * and the total. The line has four zones, counted per hash — green to 20, blue to 50, orange to 70, red above — so
- * with more hashes they stretch along it. A thumb let go in the orange or the red zone, from a zone below it, is asked
- * about before the count is stored; nothing caps a count. The server's limit, when the server named one, is marked on
- * the track (S10).
+ * «Потоки» (the operator, 2026-11-27): the count the profile asks for, in fives, said as the total and, with more
+ * than one hash, the most one of them carries. The line has four zones, counted per hash — green to 20, blue to 50,
+ * orange to 70, red above — so with more hashes they stretch along it. A thumb let go in the orange or the red zone,
+ * from a zone below it, is asked about before the count is stored; nothing caps a count. The server's limit, when the
+ * server named one, is marked on the track (S10).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -332,7 +332,7 @@ private fun Streams(view: TunnelView) {
     val zone = StreamsPlan.zone(value, calls)
     val (zoneColor, zoneGround) = zone.colors()
 
-    // the count is long («50 на хеш (всего 90)»): where it does not fit beside the label — a narrow screen, a large
+    // the count is long («90 (50 на хеш)»): where it does not fit beside the label — a narrow screen, a large
     // font — it goes under the label, whole, and the label is never broken inside its word
     val name = stringResource(R.string.tunnel_streams)
     FlowRow(

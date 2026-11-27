@@ -218,6 +218,26 @@ internal fun hashesAStartUses(hashes: List<String>, results: Map<String, VkHashV
 internal fun <T> draftStands(draft: T?, base: T?, stored: T): Boolean =
     draft != null && draft != stored && (base == null || base == stored)
 
+/**
+ * A draft is written once. [left] is the draft a field's screen last left with — the tab changed, the app sent to the
+ * background, the screen destroyed — its write issued then; null once the field is edited again. A draft equal to it
+ * has had its write: it does not come back with the screen, where the field follows the store again, and a second
+ * leave writes nothing for it. The base cannot say this ([draftStands]): it cannot tell «the store never changed» from
+ * «the store took the draft and was put back since» — what the end of a deploy does to a port changed on «Туннель»,
+ * writing the server's own again — and such a draft, standing, was shown over the newer value and written over it.
+ */
+internal fun draftLeft(draft: String?, left: String?): Boolean = draft != null && draft == left
+
+/**
+ * Whether the marks of a refused start are still their profile's. They were made for the profile that held the slot
+ * then: added at [markedAdded] (0 for one from before that was kept, or one typed into an empty slot) and holding
+ * something or not ([markedInUse]). They stay with it whatever is added or deleted beside it, and go when the slot is
+ * seen with a profile added at another time, or empty after it held the refused one: what takes the slot next does
+ * not open full of errors for it.
+ */
+internal fun refusalMarksStand(markedAdded: Long, markedInUse: Boolean, added: Long, inUse: Boolean): Boolean =
+    added == markedAdded && (inUse || !markedInUse)
+
 /** What a participant's link is short of, said on a card of its own (the canvas, F-TunnelLinkStates). */
 internal enum class LinkNote { OwnerToken, NeedsHashes, Outdated }
 

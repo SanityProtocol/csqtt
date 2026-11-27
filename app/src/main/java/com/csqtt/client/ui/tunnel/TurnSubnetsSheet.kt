@@ -58,7 +58,8 @@ private val Limits = listOf(ALL, "1", "2", "4", "9")
 /**
  * «TURN-подсети» (the canvas, F-TurnSubnets): through which of VK's servers the tunnel goes — any that VK names, or
  * one subnet and so many of its addresses. A subnet with fewer servers than the count asked for cannot be picked.
- * «Проверить пинг» measures each, for as long as the sheet is open. Nothing is stored until «Сохранить».
+ * «Проверить пинг» measures each, for as long as the sheet is open. A choice is stored on «Сохранить» and on any other
+ * way of closing but «Отмена», as the hashes sheet stores its fields.
  */
 @Composable
 internal fun TurnSubnetsSheet(profileArg: String, close: () -> Unit) {

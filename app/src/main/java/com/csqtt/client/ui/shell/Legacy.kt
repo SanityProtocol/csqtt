@@ -8,6 +8,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -27,6 +28,7 @@ import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.pickProfile
+import com.csqtt.client.refusalMarksStand
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.home.HomeTab
 import com.csqtt.client.ui.legacy.DeployTab
@@ -72,11 +74,26 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
     // come back, and be stored, into the new one
     val epoch by store.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
     // a start refused for a profile's settings opens «Туннель» on what that profile lacks: the count of them, and
-    // whose the last one was — the slot and the epoch it was refused under. Another profile's form is not full of
-    // errors for it, the next profile to take the slot neither
+    // whose the last one was — the slot, and the profile that held it then (when it was added, whether it held
+    // anything). The marks are that profile's (refusalMarksStand): they stay whatever is added or deleted beside it,
+    // another profile's form is not full of errors for it, and neither is the next profile to take the slot
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
     var tunnelValidationProfile by rememberSaveable { mutableIntStateOf(-1) }
-    var tunnelValidationEpoch by rememberSaveable { mutableIntStateOf(-1) }
+    var tunnelValidationAdded by rememberSaveable { mutableLongStateOf(0L) }
+    var tunnelValidationInUse by rememberSaveable { mutableStateOf(false) }
+    val marked = auth.isLoaded && tunnelValidationProfile == auth.profile
+    val marksStand = marked && refusalMarksStand(tunnelValidationAdded, tunnelValidationInUse, auth.addedAt, auth.inUse)
+    LaunchedEffect(marked, marksStand, auth.inUse) {
+        when {
+            !marked -> Unit
+            // seen gone from its slot, the refused profile takes its marks with it for good: what is typed into the
+            // emptied slot next is another profile
+            !marksStand -> tunnelValidationProfile = -1
+            // the empty form a start was refused for holds something now: from here on, the slot seen empty is the
+            // profile deleted
+            auth.inUse -> tunnelValidationInUse = true
+        }
+    }
     // «Дополнительно» of «Туннель» stays open from one profile to the next: it is how the screen is read, not a profile's
     var tunnelMoreOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -92,7 +109,8 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
                     onInvalidConfiguration = {
                         nav.select(Tab.Tunnel)
                         tunnelValidationProfile = auth.profile
-                        tunnelValidationEpoch = epoch
+                        tunnelValidationAdded = auth.addedAt
+                        tunnelValidationInUse = auth.inUse
                         tunnelValidationRequest += 1
                     },
                 )
@@ -101,7 +119,7 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
             else -> forms.SaveableStateProvider("tunnel:${auth.profile}:$epoch") {
                 TunnelTab(
                     auth, epoch,
-                    validationRequest = if (tunnelValidationProfile == auth.profile && tunnelValidationEpoch == epoch) tunnelValidationRequest else 0,
+                    validationRequest = if (marksStand) tunnelValidationRequest else 0,
                     moreOpen = tunnelMoreOpen, onMoreOpen = { tunnelMoreOpen = it },
                 )
             }

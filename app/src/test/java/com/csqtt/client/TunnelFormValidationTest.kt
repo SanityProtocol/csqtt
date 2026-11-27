@@ -153,6 +153,38 @@ class TunnelFormValidationTest {
         assertTrue("the base not noted yet: the first keystroke", draftStands(draft = "a", base = null, stored = "b"))
     }
 
+    // the verify of the fix round (V1): the base cannot tell «the store never changed» from «it took the draft and was
+    // put back» — 46100 typed over 46000 and written as the tab was left, then a deploy's end writing 46000 again
+
+    @Test
+    fun `a draft is written once - the one its screen left with does not come back`() {
+        assertTrue("by its base alone such a draft would stand again", draftStands(draft = "46100", base = "46000", stored = "46000"))
+        assertTrue(draftLeft(draft = "46100", left = "46100"))
+        assertTrue("an address left with its port in it: as it stood, not as it was stored", draftLeft("h.example:5000", "h.example:5000"))
+        assertFalse("edited since: the note went with the edit", draftLeft(draft = "46100", left = null))
+        assertFalse("another text than the one that left", draftLeft(draft = "46101", left = "46100"))
+        assertFalse("no draft", draftLeft(draft = null, left = "46100"))
+        assertFalse(draftLeft(draft = null, left = null))
+    }
+
+    // the verify of the fix round (V3), and the review's F10: the marks of a refused start are the profile's
+
+    @Test
+    fun `the marks of a refused start stay with their profile and go with it`() {
+        // refused while it held something, added at 1 000: whatever is added or deleted beside it, it is still it
+        assertTrue(refusalMarksStand(markedAdded = 1_000, markedInUse = true, added = 1_000, inUse = true))
+        assertFalse("deleted: the slot is empty", refusalMarksStand(1_000, true, added = 0, inUse = false))
+        assertFalse("another profile was added into the slot", refusalMarksStand(1_000, true, added = 2_000, inUse = true))
+        // a profile from before the date was kept, or one typed into an empty slot, has none
+        assertTrue(refusalMarksStand(markedAdded = 0, markedInUse = true, added = 0, inUse = true))
+        assertFalse("deleted: nothing but the empty slot tells", refusalMarksStand(0, true, added = 0, inUse = false))
+        assertFalse(refusalMarksStand(0, true, added = 2_000, inUse = true))
+        // refused on an empty form: the same form still, empty or being filled in
+        assertTrue(refusalMarksStand(markedAdded = 0, markedInUse = false, added = 0, inUse = false))
+        assertTrue(refusalMarksStand(markedAdded = 0, markedInUse = false, added = 0, inUse = true))
+        assertFalse("a profile was added into it", refusalMarksStand(0, false, added = 2_000, inUse = true))
+    }
+
     // the review of P3 B3 (F3): the zones count the hashes a start connects with
 
     @Test
