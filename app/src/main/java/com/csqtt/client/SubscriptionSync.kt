@@ -82,9 +82,11 @@ internal object SubscriptionSync {
      * afresh. The key is the stored one whenever the link is a subscription the store already has — under the link's
      * own spelling, or under another spelling of the same address (without its scheme, `http://` for `https://`, a host
      * in other letter case: [subscriptionAddress]) — so one subscription is never kept twice, and its other spelling
-     * is no way around its certificate. Marked by the user ([allowHttp]: the import sheet's switch, an http:// link, or
-     * the record's own mark), the server is fetched over HTTPS all the same and trusted by its pinned certificate
-     * (M-171).
+     * is no way around its certificate. A server is marked — fetched over HTTPS all the same and trusted by its pinned
+     * certificate (M-171) — by [allowHttp] (the import sheet's switch), by the record's own mark, or by an `http://`
+     * key; for a link that is a stored subscription the key is the stored one, so its stored spelling decides, not the
+     * one typed. A store that already holds one subscription under two spellings (an older build could keep it so)
+     * keeps both: each spelling is its own record.
      */
     internal fun trustFor(metas: Map<String, SubscriptionMeta>, rawUrl: String, allowHttp: Boolean): Pair<String, SubscriptionTrust> {
         val typed = rawUrl.trim()
@@ -96,6 +98,18 @@ internal object SubscriptionSync {
         val meta = metas[url]
         val pinned = allowHttp || meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
         return url to SubscriptionTrust(pinned, meta?.trusted)
+    }
+
+    /**
+     * Whether [next], the link a subscription kept under [own] is being changed to, is ANOTHER subscription's link in
+     * any spelling of it ([subscriptionAddress]): saving it would make the two one, with the other's trusted
+     * certificate lost. A link left as it is never is — also beside a twin of its own in the store, where its name and
+     * its interval must still save.
+     */
+    internal fun linkIsAnothers(next: String, own: String, others: Set<String>): Boolean {
+        if (next == own) return false
+        val address = subscriptionAddress(next) ?: return false
+        return others.any { subscriptionAddress(it) == address }
     }
 
     /**

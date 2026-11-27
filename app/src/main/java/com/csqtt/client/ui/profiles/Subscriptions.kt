@@ -43,7 +43,6 @@ import com.csqtt.client.SubscriptionSync
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.copySensitive
 import com.csqtt.client.normalizeSubscriptionUrl
-import com.csqtt.client.subscriptionAddress
 import com.csqtt.client.noticeTime
 import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
@@ -355,9 +354,9 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
                     val nextUrl = normalizeSubscriptionUrl(url, meta.allowHttp)
                     if (nextUrl.isEmpty() || runCatching { URI(nextUrl).host }.getOrNull().isNullOrBlank()) {
                         urlError = needUrl
-                    } else if (subscription.others.any { subscriptionAddress(it) == subscriptionAddress(nextUrl) }) {
+                    } else if (SubscriptionSync.linkIsAnothers(nextUrl, subscription.url, subscription.others)) {
                         // two subscriptions under one link — in any spelling of it — would become one, with the
-                        // other's trusted certificate lost
+                        // other's trusted certificate lost; a link left as it is always saves
                         urlError = linkTaken
                     } else {
                         // on the app's scope, and the link last: the name and the interval are kept under the link as it was

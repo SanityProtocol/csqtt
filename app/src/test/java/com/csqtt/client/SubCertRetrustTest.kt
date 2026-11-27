@@ -108,10 +108,29 @@ class SubCertRetrustTest {
             assertEquals(other, fresh.first)
             assertNull(other, fresh.second.record)
         }
+        // a store that already holds the subscription twice (an older build could): each spelling is its own record
+        val twins = mapOf(kept to metas.getValue(kept), "http://panel.example.net:8443/sub/abc?t=Secret" to SubscriptionMeta(url = "http://panel.example.net:8443/sub/abc?t=Secret", allowHttp = true))
+        for (spelling in twins.keys) assertEquals(spelling, SubscriptionSync.trustFor(twins, spelling, allowHttp = true).first)
         // the address two spellings share; a link without a host has none, and matches nothing
         assertEquals(subscriptionAddress("http://Panel.example.net/sub"), subscriptionAddress("https://panel.example.net:443/sub"))
         assertNull(subscriptionAddress("https:///sub"))
         assertEquals("https:///sub", SubscriptionSync.trustFor(mapOf("https:///other" to SubscriptionMeta(url = "https:///other")), "https:///sub", false).first)
+    }
+
+    @Test
+    fun `a link left as it is always saves, and another subscription's link is refused in any spelling`() {
+        val own = "https://panel.example.net/sub/abc"
+        val twin = "http://panel.example.net/sub/abc"   // the same subscription, kept a second time by an older build
+        val others = setOf(twin, "https://sub.example.net/c/1")
+        // untouched: its name and its interval save, twin or no twin
+        assertFalse(SubscriptionSync.linkIsAnothers(own, own, others))
+        // changed to another subscription's link, in another spelling of it
+        assertTrue(SubscriptionSync.linkIsAnothers("http://SUB.example.net/c/1", own, others))
+        // changed onto its twin's spelling: the two would become one
+        assertTrue(SubscriptionSync.linkIsAnothers(twin, own, others))
+        // a link no subscription has; and one without a host, which matches nothing
+        assertFalse(SubscriptionSync.linkIsAnothers("https://panel.example.net/sub/new", own, others))
+        assertFalse(SubscriptionSync.linkIsAnothers("https:///x", own, setOf("https:///x2", "https:///x")))
     }
 
     @Test
