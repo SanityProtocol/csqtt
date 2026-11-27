@@ -113,6 +113,7 @@ class TunnelService : Service() {
     private val physicalNetworks = PhysicalNetworkTracker<Network>()
     private val physicalCandidates = mutableSetOf<Network>()
     private val vkProbeJobs = mutableMapOf<Network, Job>()
+    private val vkProbeVoices = mutableMapOf<Network, VkProbeVoice>()
     private val vkProbeLock = Any()
     private var vkRecoveryJob: Job? = null
     private var autoPauseSettingsJob: Job? = null
@@ -976,15 +977,19 @@ class TunnelService : Service() {
                 var failures = 0
                 try {
                     while (isActive && !physicalNetworks.isUsable(network)) {
-                        if (probeVkThrough(network)) {
+                        val voice = vkProbeVoice(network)
+                        voice.trying(SystemClock.elapsedRealtime())
+                        var reason: String? = null
+                        if (probeVkThrough(network) { reason = it.javaClass.simpleName }) {
                             if (!isActive || !isPhysicalCandidate(network)) return@launch
-                            // said only where the silence was said: the log then has both ends of it
-                            if (vkProbeSaidUnanswered(failures)) logVkProbe(vkProbeAnswersLine(vkProbeNetwork(network)))
                             updatePhysicalNetwork(network, true)
                             return@launch
                         }
                         failures++
-                        if (vkProbeSaysUnanswered(failures)) logVkProbe(vkProbeUnansweredLine(vkProbeNetwork(network)))
+                        // a try that outlived its probe — the network gone, the run stopped — has nothing more to say
+                        if (isActive && isPhysicalCandidate(network)) {
+                            voice.failed(SystemClock.elapsedRealtime(), vkProbeNetwork(network), reason)?.let(::logVkProbe)
+                        }
                         delay(vkProbeRetryDelayMs(failures))
                     }
                 } finally {
@@ -1010,27 +1015,31 @@ class TunnelService : Service() {
 
     private fun logVkProbe(line: String) = TunnelManager.updateLog("vk_probe", line, 2, false, LogLevel.NET)
 
+    private fun vkProbeVoice(network: Network): VkProbeVoice = synchronized(vkProbeLock) { vkProbeVoices.getOrPut(network, ::VkProbeVoice) }
+
     private fun forgetPhysicalNetwork(network: Network) {
         synchronized(vkProbeLock) {
             physicalCandidates.remove(network)
             vkProbeJobs.remove(network)?.cancel()
+            vkProbeVoices.remove(network)
         }
         updatePhysicalNetwork(network, false)
     }
 
-    private fun probeVkThrough(network: Network): Boolean = VK_PROBE_URLS.any { address ->
+    private fun probeVkThrough(network: Network, failed: (Exception) -> Unit = {}): Boolean = VK_PROBE_URLS.any { address ->
         val url = URL(address)
-        probeVkRequest { network.openConnection(url) as HttpURLConnection }
-            ?: probeVkUnboundFallback(network, url)
+        probeVkRequest(failed) { network.openConnection(url) as HttpURLConnection }
+            ?: probeVkUnboundFallback(network, url, failed)
     }
 
-    private fun probeVkUnboundFallback(network: Network, url: URL): Boolean {
+    private fun probeVkUnboundFallback(network: Network, url: URL, failed: (Exception) -> Unit): Boolean {
         val active = runCatching { connectivityManager.activeNetwork }.getOrNull()
         if (active != null && active != network) return false
-        return probeVkRequest { url.openConnection() as HttpURLConnection } ?: false
+        return probeVkRequest(failed) { url.openConnection() as HttpURLConnection } ?: false
     }
 
-    private fun probeVkRequest(open: () -> HttpURLConnection): Boolean? {
+    /** [failed] is told what a request ended on: the probe's line names it, so a log tells a timeout from a refused socket. */
+    private fun probeVkRequest(failed: (Exception) -> Unit = {}, open: () -> HttpURLConnection): Boolean? {
         val connection = runCatching(open).getOrNull() ?: return null
         return try {
             connection.instanceFollowRedirects = false
@@ -1043,7 +1052,8 @@ class TunnelService : Service() {
             connection.setRequestProperty("Accept-Encoding", "identity")
             connection.setRequestProperty("User-Agent", "Mozilla/5.0")
             isVkProbeHttpResponse(connection.responseCode)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            failed(e)
             null
         } finally {
             connection.disconnect()
@@ -1159,6 +1169,8 @@ class TunnelService : Service() {
     }
 
     private fun updatePhysicalNetwork(network: Network, usable: Boolean) {
+        // VK answers through it — to its probe, or to another check of the network: said where its silence was said
+        if (usable) synchronized(vkProbeLock) { vkProbeVoices[network] }?.answered(vkProbeNetwork(network))?.let(::logVkProbe)
         val transition = physicalNetworks.update(network, usable)
         if (autoPausedForWifi) return
         when (transition) {
@@ -1915,6 +1927,7 @@ class TunnelService : Service() {
         synchronized(vkProbeLock) {
             vkProbeJobs.values.forEach(Job::cancel)
             vkProbeJobs.clear()
+            vkProbeVoices.clear()
             physicalCandidates.clear()
         }
         releaseTunnelResources(finishVkCalls = true)

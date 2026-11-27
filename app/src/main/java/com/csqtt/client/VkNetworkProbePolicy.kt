@@ -12,16 +12,50 @@ internal fun vkProbeRetryDelayMs(failures: Int): Long = when (failures.coerceAtL
 internal fun isVkProbeHttpResponse(code: Int): Boolean = code in 100..599
 
 /**
- * When the probe says in the log that a network is there and VK does not answer through it: at the fifth try in a row
- * (five seconds: a network that has only just come up is not said), at the twentieth (half a minute, the tries now 15 s
- * apart) and at every twentieth from there on — five minutes of a phone awake. Until this the log could not tell «no
- * network at all» from «a network VK does not answer on»: the probe said nothing (the night of 2026-11-27, five hours
- * of «Сеть отключена» with mobile data on). The line is the same each time, so the log counts it on one record.
+ * What the probe of one network says in the log, and when. Until this the log could not tell «no network at all» from
+ * «a network VK does not answer on»: the probe said nothing (the night of 2026-11-27, five hours of «Сеть отключена»
+ * with mobile data on).
+ *
+ * It goes by time, not by tries: a try on a network that drops VK's packets waits out its timeouts — nine seconds and
+ * more — and one that fails at once takes none. The silence is said once it has lasted [SAID_AFTER_MS] since the first
+ * try (a network that has only just come up is not said), and again every [SAID_AGAIN_MS]; the clock is the one that
+ * runs through the phone's sleep, so a night of short wakes says it as often as a day awake. That VK answers is said
+ * only where its silence was. One per network, kept for as long as the network is there: a probe that is started
+ * again, or an answer another check of the network gets, is the same silence ending.
  */
-internal fun vkProbeSaysUnanswered(failures: Int): Boolean = failures == 5 || (failures >= 20 && failures % 20 == 0)
+internal class VkProbeVoice {
+    private var startedAt: Long? = null
+    private var saidAt: Long? = null
 
-/** Whether [failures] tries in a row were enough for the line above: VK answering again is then said too. */
-internal fun vkProbeSaidUnanswered(failures: Int): Boolean = failures >= 5
+    /** A try begins at [now] (elapsed real time, ms). */
+    @Synchronized
+    fun trying(now: Long) {
+        if (startedAt == null) startedAt = now
+    }
+
+    /** A try failed at [now], for [reason] when one is known: the line to write, or null. */
+    @Synchronized
+    fun failed(now: Long, network: String, reason: String?): String? {
+        val since = saidAt ?: startedAt ?: now.also { startedAt = it }
+        if (now - since < (if (saidAt == null) SAID_AFTER_MS else SAID_AGAIN_MS)) return null
+        saidAt = now
+        return "[СЕТЬ] VK не отвечает через $network${reason?.let { " ($it)" }.orEmpty()} · проверяем дальше"
+    }
+
+    /** VK answers through the network: the line to write, where its silence was said, and the voice starts anew. */
+    @Synchronized
+    fun answered(network: String): String? {
+        val said = saidAt != null
+        startedAt = null
+        saidAt = null
+        return if (said) "[СЕТЬ] VK отвечает через $network" else null
+    }
+
+    companion object {
+        const val SAID_AFTER_MS = 5_000L
+        const val SAID_AGAIN_MS = 5 * 60_000L
+    }
+}
 
 /** The network a probe line speaks of, as «через …» takes it. */
 internal fun vkProbeNetworkName(wifi: Boolean, cellular: Boolean): String = when {
@@ -29,7 +63,3 @@ internal fun vkProbeNetworkName(wifi: Boolean, cellular: Boolean): String = when
     cellular -> "мобильную сеть"
     else -> "сеть"
 }
-
-internal fun vkProbeUnansweredLine(network: String): String = "[СЕТЬ] VK не отвечает через $network · проверяем дальше"
-
-internal fun vkProbeAnswersLine(network: String): String = "[СЕТЬ] VK снова отвечает через $network"

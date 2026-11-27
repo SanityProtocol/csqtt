@@ -2,6 +2,7 @@ package com.csqtt.client
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,23 +16,60 @@ class VkNetworkProbePolicyTest {
     }
 
     @Test
-    fun theProbeSaysANetworkVkDoesNotAnswerOnAndNotAtEveryTry() {
-        // the first 15 tries are a second apart, then 2, 3, 5 and 8 s, then 15 s each
-        assertEquals(listOf(5, 20, 40, 60, 80, 100), (0..100).filter(::vkProbeSaysUnanswered))
-        // VK answering again is said where the silence was
-        assertFalse(vkProbeSaidUnanswered(0))
-        assertFalse("a network that has only just come up", vkProbeSaidUnanswered(4))
-        assertTrue(vkProbeSaidUnanswered(5))
-        assertTrue(vkProbeSaidUnanswered(37))
+    fun theProbeSaysASilenceOnceItHasLastedAndThenEveryFiveMinutes() {
+        val voice = VkProbeVoice()
+        voice.trying(1_000)
+        assertNull("a network that has only just come up", voice.failed(1_050, "Wi-Fi", "UnknownHostException"))
+        assertNull(voice.failed(5_999, "Wi-Fi", null))
+        assertEquals(
+            "[СЕТЬ] VK не отвечает через Wi-Fi (SocketTimeoutException) · проверяем дальше",
+            voice.failed(6_000, "Wi-Fi", "SocketTimeoutException"),
+        )
+        assertNull("said: not again for five minutes", voice.failed(6_000 + 299_999, "Wi-Fi", "SocketTimeoutException"))
+        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(6_000 + 300_000, "Wi-Fi", null))
+        assertNull(voice.failed(6_000 + 300_000 + 299_999, "Wi-Fi", null))
+    }
+
+    @Test
+    fun aTryThatWaitedOutItsTimeoutsIsSaidAtOnce() {
+        // a network that drops VK's packets: the first try alone takes nine seconds and more — and so does the first
+        // one after a night's sleep, however short the wake
+        val voice = VkProbeVoice()
+        voice.trying(0)
+        assertEquals(
+            "[СЕТЬ] VK не отвечает через мобильную сеть (SocketTimeoutException) · проверяем дальше",
+            voice.failed(9_200, vkProbeNetworkName(wifi = false, cellular = true), "SocketTimeoutException"),
+        )
+    }
+
+    @Test
+    fun aSilenceOutlivesItsProbeAndItsEndIsSaidOnlyWhereItWasSaid() {
+        // VK answered before anything was said: nothing to say
+        val quick = VkProbeVoice()
+        quick.trying(0)
+        assertNull(quick.failed(1_000, "Wi-Fi", null))
+        assertNull(quick.answered("Wi-Fi"))
+
+        // the probe is started again for the same network (its capabilities went and came back): the same silence
+        val voice = VkProbeVoice()
+        voice.trying(0)
+        assertNull(voice.failed(100, "Wi-Fi", null))
+        voice.trying(4_000)
+        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(5_000, "Wi-Fi", null))
+        assertEquals("[СЕТЬ] VK отвечает через Wi-Fi", voice.answered("Wi-Fi"))
+        assertNull("said once", voice.answered("Wi-Fi"))
+        // and the network's next silence starts from nothing
+        voice.trying(100_000)
+        assertNull(voice.failed(101_000, "Wi-Fi", null))
+        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(105_000, "Wi-Fi", null))
     }
 
     @Test
     fun aProbeLineNamesItsNetwork() {
-        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", vkProbeUnansweredLine(vkProbeNetworkName(wifi = true, cellular = false)))
-        assertEquals("[СЕТЬ] VK не отвечает через мобильную сеть · проверяем дальше", vkProbeUnansweredLine(vkProbeNetworkName(wifi = false, cellular = true)))
-        assertEquals("[СЕТЬ] VK снова отвечает через сеть", vkProbeAnswersLine(vkProbeNetworkName(wifi = false, cellular = false)))
-        // one text for a network, whatever the try: the log counts it on one record
-        assertEquals(vkProbeUnansweredLine("Wi-Fi"), vkProbeUnansweredLine(vkProbeNetworkName(wifi = true, cellular = true)))
+        assertEquals("Wi-Fi", vkProbeNetworkName(wifi = true, cellular = false))
+        assertEquals("a network that is both is said as the Wi-Fi it is used as", "Wi-Fi", vkProbeNetworkName(wifi = true, cellular = true))
+        assertEquals("мобильную сеть", vkProbeNetworkName(wifi = false, cellular = true))
+        assertEquals("its capabilities are gone", "сеть", vkProbeNetworkName(wifi = false, cellular = false))
     }
 
     @Test
