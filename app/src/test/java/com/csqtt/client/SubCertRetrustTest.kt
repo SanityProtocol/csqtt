@@ -85,6 +85,36 @@ class SubCertRetrustTest {
     }
 
     @Test
+    fun `another spelling of a subscription's link is the same subscription, under its stored key`() {
+        // pasted with https:// and the switch on: kept under that key, with the certificate its server showed
+        val kept = "https://panel.example.net:8443/sub/abc?t=Secret"
+        val metas = mapOf(kept to SubscriptionMeta(url = kept, allowHttp = true, certSha256 = old.sha256, certNotAfter = future))
+        // typed again without its scheme, the switch on: that would spell http:// — it is the stored one all the same
+        for (typed in listOf("panel.example.net:8443/sub/abc?t=Secret", "http://panel.example.net:8443/sub/abc?t=Secret", "https://PANEL.example.NET:8443/sub/abc?t=Secret")) {
+            val (url, trust) = SubscriptionSync.trustFor(metas, typed, allowHttp = true)
+            assertEquals(typed, kept, url)
+            assertEquals(typed, old.sha256, trust.record!!.sha256)   // judged against its certificate, not a first use
+        }
+        // and the reverse: kept under http://, pasted as https:// with the switch off — still the marked one
+        val http = "http://panel.example.net/sub/abc"
+        val marked = mapOf(http to SubscriptionMeta(url = http, allowHttp = true, certSha256 = old.sha256))
+        val (url, trust) = SubscriptionSync.trustFor(marked, "https://panel.example.net/sub/abc", allowHttp = false)
+        assertEquals(http, url)
+        assertTrue(trust.pinned)
+        assertEquals(old.sha256, trust.record!!.sha256)
+        // another path, another port, another token is another subscription
+        for (other in listOf("https://panel.example.net:8443/sub/abd?t=Secret", "https://panel.example.net:8444/sub/abc?t=Secret", "https://panel.example.net:8443/sub/abc?t=secret")) {
+            val fresh = SubscriptionSync.trustFor(metas, other, allowHttp = true)
+            assertEquals(other, fresh.first)
+            assertNull(other, fresh.second.record)
+        }
+        // the address two spellings share; a link without a host has none, and matches nothing
+        assertEquals(subscriptionAddress("http://Panel.example.net/sub"), subscriptionAddress("https://panel.example.net:443/sub"))
+        assertNull(subscriptionAddress("https:///sub"))
+        assertEquals("https:///sub", SubscriptionSync.trustFor(mapOf("https:///other" to SubscriptionMeta(url = "https:///other")), "https:///sub", false).first)
+    }
+
+    @Test
     fun `a refresh that fails for another reason, or works, leaves no certificate to ask about`() = withHttps { url ->
         val prefs = load("{}")
         val refused = (SubscriptionImporter.fetch(url, SubscriptionTrust(true, old)) as SubscriptionFetchResult.Failure).refused

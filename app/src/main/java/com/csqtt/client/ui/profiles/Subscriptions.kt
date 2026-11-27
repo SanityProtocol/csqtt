@@ -43,6 +43,7 @@ import com.csqtt.client.SubscriptionSync
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.copySensitive
 import com.csqtt.client.normalizeSubscriptionUrl
+import com.csqtt.client.subscriptionAddress
 import com.csqtt.client.noticeTime
 import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
@@ -296,8 +297,9 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
             mono = true, error = urlError,
             trailing = {
                 IconBtn(Icons.copy, stringResource(R.string.sub_copy_link), {
-                    // marked as sensitive for the system's clipboard preview, as the app's other secrets (M-173)
-                    if (context.copySensitive("csqtt", url)) messages.show(linkCopied)
+                    // marked as sensitive for the system's clipboard preview, as the app's other secrets (M-173); an
+                    // emptied field has nothing to copy
+                    if (url.isNotBlank() && context.copySensitive("csqtt", url)) messages.show(linkCopied)
                 }, small = true, tint = colors.muted)
             },
         )
@@ -353,8 +355,9 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
                     val nextUrl = normalizeSubscriptionUrl(url, meta.allowHttp)
                     if (nextUrl.isEmpty() || runCatching { URI(nextUrl).host }.getOrNull().isNullOrBlank()) {
                         urlError = needUrl
-                    } else if (nextUrl in subscription.others) {
-                        // two subscriptions under one link would become one, with the other's trusted certificate lost
+                    } else if (subscription.others.any { subscriptionAddress(it) == subscriptionAddress(nextUrl) }) {
+                        // two subscriptions under one link — in any spelling of it — would become one, with the
+                        // other's trusted certificate lost
                         urlError = linkTaken
                     } else {
                         // on the app's scope, and the link last: the name and the interval are kept under the link as it was

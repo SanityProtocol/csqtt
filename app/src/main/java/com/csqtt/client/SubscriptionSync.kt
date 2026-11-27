@@ -77,15 +77,22 @@ internal object SubscriptionSync {
     }
 
     /**
-     * The URL a subscription is kept under, and how its server is trusted. The key comes first — the link with its
-     * scheme, as the store keeps it — and the record is the one under that key: a link typed again without its scheme
-     * is judged against the certificate it was trusted with, never trusted afresh. Marked by the user ([allowHttp]: the
-     * import sheet's switch, an http:// link, or the record's own mark), the server is fetched over HTTPS all the same
-     * and trusted by its pinned certificate (M-171).
+     * The URL a subscription is kept under, and how its server is trusted. The key comes first, and the record is the
+     * one under that key: a link typed again is judged against the certificate it was trusted with, never trusted
+     * afresh. The key is the stored one whenever the link is a subscription the store already has — under the link's
+     * own spelling, or under another spelling of the same address (without its scheme, `http://` for `https://`, a host
+     * in other letter case: [subscriptionAddress]) — so one subscription is never kept twice, and its other spelling
+     * is no way around its certificate. Marked by the user ([allowHttp]: the import sheet's switch, an http:// link, or
+     * the record's own mark), the server is fetched over HTTPS all the same and trusted by its pinned certificate
+     * (M-171).
      */
     internal fun trustFor(metas: Map<String, SubscriptionMeta>, rawUrl: String, allowHttp: Boolean): Pair<String, SubscriptionTrust> {
         val typed = rawUrl.trim()
-        val url = normalizeSubscriptionUrl(typed, allowHttp || typed.startsWith("http://", ignoreCase = true))
+        val spelled = normalizeSubscriptionUrl(typed, allowHttp || typed.startsWith("http://", ignoreCase = true))
+        val address = subscriptionAddress(spelled)
+        val url = spelled.takeIf { it in metas }
+            ?: metas.keys.firstOrNull { address != null && subscriptionAddress(it) == address }
+            ?: spelled
         val meta = metas[url]
         val pinned = allowHttp || meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
         return url to SubscriptionTrust(pinned, meta?.trusted)

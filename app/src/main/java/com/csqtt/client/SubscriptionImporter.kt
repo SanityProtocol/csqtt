@@ -81,6 +81,18 @@ internal data class SubscriptionImportSummary(
 internal fun subscriptionTransportUrl(url: String): String =
     if (url.startsWith("http://", ignoreCase = true)) "https://" + url.substring(7) else url
 
+/**
+ * The address a subscription's link is fetched at: host (in lower case), port, path and query of its HTTPS form. Two
+ * links with one address are one subscription whatever their spelling — `http://` for `https://` (both are fetched over
+ * HTTPS), a host in other letter case. Null for a link that has no host.
+ */
+internal fun subscriptionAddress(url: String): String? = runCatching {
+    val uri = URI(subscriptionTransportUrl(url.trim()))
+    val host = uri.host?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() } ?: return null
+    val port = if (uri.port == -1) 443 else uri.port
+    "$host:$port${uri.rawPath.orEmpty()}${uri.rawQuery?.let { "?$it" }.orEmpty()}"
+}.getOrNull()
+
 /** How a marked subscription's server showed a leaf certificate. */
 internal enum class CertKind(val stored: String) {
     /** The platform refused its chain (a self-signed panel, a lapsed certificate). */

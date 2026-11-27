@@ -159,13 +159,15 @@ internal fun QrScanner(close: () -> Unit) {
     val activity = LocalActivity.current
     var camera by remember { mutableStateOf(granted()) }
     var asked by rememberSaveable { mutableStateOf(false) }
-    // «Разрешить» was pressed while Android would no longer show its question (it gives no rationale after a refusal
-    // it took as final): the refusal that comes back then was not the user's answer to anything
-    var notAsking by remember { mutableStateOf(false) }
+    // Android no longer shows its question once it took a refusal as final: it gives no rationale before the request,
+    // and none after it either. No rationale before alone is also the state of "never refused" (the first question
+    // closed without an answer), and there the refusal that comes back is the user's own, said just now
+    var noRationaleBefore by remember { mutableStateOf(false) }
+    fun noRationale() = activity?.let { !ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.CAMERA) } ?: false
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { given ->
         camera = given
         // the app's page in the system settings is where the permission is given then
-        if (!given && notAsking) {
+        if (!given && noRationaleBefore && noRationale()) {
             runCatching {
                 context.startActivity(
                     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
@@ -173,7 +175,7 @@ internal fun QrScanner(close: () -> Unit) {
                 )
             }
         }
-        notAsking = false
+        noRationaleBefore = false
     }
     LaunchedEffect(Unit) {
         if (!camera && !asked) {
@@ -259,7 +261,7 @@ internal fun QrScanner(close: () -> Unit) {
                                 Btn(
                                     stringResource(R.string.qr_allow_camera),
                                     {
-                                        notAsking = activity?.let { !ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.CAMERA) } ?: false
+                                        noRationaleBefore = noRationale()
                                         permission.launch(Manifest.permission.CAMERA)
                                     },
                                     kind = BtnKind.Primary, small = true,
