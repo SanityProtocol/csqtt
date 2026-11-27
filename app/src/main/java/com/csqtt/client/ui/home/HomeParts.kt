@@ -4,10 +4,11 @@ import android.app.ActivityManager
 import android.content.Context
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -34,6 +36,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -81,13 +84,14 @@ internal object HomeMotion {
     const val FADE_OUT_MS = 80
     const val FADE_IN_MS = 160
 
-    /** How a size or a colour gets to its next value: over [MOVE_MS], or at once where Home does not move ([HomeView.moves]). */
-    fun <T> spec(moves: Boolean): FiniteAnimationSpec<T> = if (moves) tween(MOVE_MS, easing = FastOutSlowInEasing) else snap()
+    /** How a size or a colour gets to its next value where Home moves ([HomeView.moves]): over [MOVE_MS]. */
+    fun <T> spec(): FiniteAnimationSpec<T> = tween(MOVE_MS, easing = FastOutSlowInEasing)
 
     /**
      * A phone Android marks as low on memory is the kind that drops frames: there Home changes at once, as it did
      * before it moved, and motion costs nothing (the operator, 2026-11-27: smooth and fast on the worst phones). Measured
-     * on the bench, a connect and a disconnect draw about 85 frames more with motion than without.
+     * on the bench, a connect and a disconnect draw about 25 frames more in the list and 75 more in «Одно подключение»
+     * with motion than without.
      */
     fun wanted(context: Context): Boolean = context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != true
 }
@@ -95,8 +99,9 @@ internal object HomeMotion {
 /**
  * A line of Home that is not always there: [value] is what it says, null when it says nothing. What it says changes in
  * place; a line of another [kind] fades into its place; its room opens and closes as [HomeMotion] says. [moves] false:
- * the change is drawn at once ([HomeView.moves]). The line gives itself its distance from what is above it, inside
- * [content], so a line that says nothing takes no room at all.
+ * the change is drawn whole in the frame it comes in, the line that went not drawn under it ([HomeView.moves]). The
+ * line gives itself its distance from what is above it, inside [content], so a line that says nothing takes no room at
+ * all.
  *
  * Its cost (the operator, 2026-11-27: smooth and fast on the worst phones): nothing while nothing changes; a change is
  * laid out and drawn for a quarter of a second, with nothing composed again for a frame of it.
@@ -119,7 +124,9 @@ internal fun <T : Any> HomeLine(
         modifier = modifier.fillMaxWidth(),
         transitionSpec = {
             if (!movesNow) {
-                (EnterTransition.None togetherWith ExitTransition.None).using(SizeTransform(clip = false) { _, _ -> snap() })
+                // a fade that snaps, not «no transition»: with none the line that went is still drawn, at full strength,
+                // under the one that came, for the frame the change takes
+                (fadeIn(snap()) togetherWith fadeOut(snap())).using(SizeTransform(clip = false) { _, _ -> snap() })
             } else {
                 val opens = initialState == null
                 (fadeIn(tween(HomeMotion.FADE_IN_MS, delayMillis = if (opens) 0 else HomeMotion.FADE_OUT_MS)) togetherWith
@@ -141,6 +148,22 @@ internal fun <T : Any> HomeLine(
         }
     }
 }
+
+/**
+ * A colour, a length or a number of Home's as it is shown: turning into its next value where Home moves, and that value
+ * itself where it does not — an animation told to snap still lands a frame after the word it goes with.
+ */
+@Composable
+internal fun turningColor(target: Color, moves: Boolean, label: String): State<Color> =
+    if (moves) animateColorAsState(target, HomeMotion.spec(), label = label) else rememberUpdatedState(target)
+
+@Composable
+internal fun turningDp(target: Dp, moves: Boolean, label: String): State<Dp> =
+    if (moves) animateDpAsState(target, HomeMotion.spec(), label = label) else rememberUpdatedState(target)
+
+@Composable
+internal fun turningFloat(target: Float, moves: Boolean, label: String): State<Float> =
+    if (moves) animateFloatAsState(target, HomeMotion.spec(), label = label) else rememberUpdatedState(target)
 
 /**
  * The speeds have something to show: in a state that shows them ([showsTraffic]), once the run has reported. It changes

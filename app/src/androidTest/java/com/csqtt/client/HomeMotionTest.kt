@@ -139,7 +139,7 @@ class HomeMotionTest {
         }
     }
 
-    /** On the bench's screen, which has room for a connected card under the card at rest; a screen too low for that moves it. */
+    /** On the bench's screen and text size; with a text so large that the connected card is higher than its reserve, it moves. */
     @Test
     fun theButtonOfOneConnectionIsWhereItWasInEveryStateOfAConnection() {
         runBlocking { store.saveHomeLayout(HomeLayout.One) }
@@ -206,6 +206,27 @@ class HomeMotionTest {
             assertTrue("no line is said and the list is not higher: ${bounds(profiles).top} against ${places.getValue("off")}", bounds(profiles).top < places.getValue("off"))
             // the time's own box is not a line's, so its distance is told apart from a kept room by its size: under a line's height
             assertTrue("room is kept under the time with no line said: $underTheTime, under a line ${said.values.first().under}", underTheTime < said.values.first().under!! + 4f)
+        }
+    }
+
+    /**
+     * A start that is given up before its run was on has no wait after it: Home still comes back to «Отключено», and is
+     * not left on the «Остановка…» that bridges a run's end to its wait.
+     */
+    @Test
+    fun aStartGivenUpComesBackToOff() {
+        for (layout in listOf(HomeLayout.List, HomeLayout.One)) {
+            runBlocking { store.saveHomeLayout(layout) }
+            ActivityScenario.launch(MainActivity::class.java).use {
+                compose.waitUntil(10_000) { shown("Отключено") }
+                off()
+                TunnelManager.starting.value = true
+                compose.waitUntil(5_000) { shown("Подключение…") }
+                TunnelManager.starting.value = false
+                compose.waitUntil(5_000) { shown("Отключено") }
+                compose.waitForIdle()
+                assertTrue("$layout", shown("Отключено"))
+            }
         }
     }
 

@@ -355,8 +355,8 @@
     <string name="tunnel_dpi">Обход DPI (Gooby)</string>
     <string name="tunnel_dpi_off_says">Выключено: начало соединения отправляется как есть.</string>
     <string name="tunnel_dpi_light_says">Начало каждого соединения делится на несколько частей. Подключение почти не замедляется; помогает против простых фильтров.</string>
-    <string name="tunnel_dpi_medium_says">Части мельче, а первая нарочно теряется по пути и досылается чуть позже: фильтр видит начало соединения не по порядку. Подключение чуть дольше; подходит большинству сетей с блокировками.</string>
-    <string name="tunnel_dpi_heavy_says">По одному байту, и первая часть так же приходит с опозданием. Подключение заметно дольше; когда средняя не помогает.</string>
+    <string name="tunnel_dpi_medium_says">Части мельче, паузы между ними длиннее: фильтру труднее собрать начало соединения. Подключение чуть дольше; подходит большинству сетей с блокировками.</string>
+    <string name="tunnel_dpi_heavy_says">Самые мелкие части и самые длинные паузы. Подключение заметно дольше; когда средняя не помогает.</string>
     <string name="tunnel_next_connection">Туннель включён: изменения применятся при следующем подключении.</string>
     <string name="tunnel_dpi_off">Выкл</string>
     <string name="tunnel_dpi_light">Лёгкая</string>
@@ -436,10 +436,8 @@
     <string name="vk_token_expiring">Это временный токен: через сутки он перестанет работать. Нужен постоянный</string>
     <string name="vk_token_use">Подключить</string>
     <string name="vk_token_saved">Аккаунт VK подключён</string>
-    <string name="vk_change_stop">Туннель включён: выбранный аккаунт применится при следующем подключении. Чтобы войти в другой или удалить, остановите туннель.</string>
-    <string name="vk_account_next">Аккаунт применится при следующем подключении</string>
-    <string name="vk_sign_in_running">Чтобы войти в другой аккаунт, остановите туннель</string>
-    <string name="vk_delete_running">Чтобы удалить аккаунт, остановите туннель</string>
+    <string name="vk_change_stop">Для смены аккаунта остановите туннель.</string>
+    <string name="vk_change_running">Остановите туннель перед сменой аккаунта</string>
     <string name="vk_account_removed">Аккаунт VK удалён с этого телефона</string>
     <string name="vk_delete_title">Удалить аккаунт VK?</string>
     <string name="vk_delete_text">Его токен будет удалён с этого телефона. Чтобы подключить аккаунт снова, понадобится войти в VK.</string>

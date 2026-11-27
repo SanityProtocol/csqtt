@@ -476,6 +476,7 @@ class TunnelFormTest {
                 TunnelManager.running.value = true
                 compose.waitForIdle()
                 assertEquals("said of another profile's tunnel", 0, notes())
+                assertFalse("the MTU's line too", shown(atOnce))
                 TunnelManager.running.value = false
                 compose.waitForIdle()
                 // a start being prepared for this profile has read its settings already
@@ -487,7 +488,6 @@ class TunnelFormTest {
                 compose.waitForIdle()
                 assertEquals("once at the head of the tab, once in «Дополнительно»", 2, notes())
                 assertTrue(shown(atOnce))
-                assertFalse(shown("Пока туннель включён", substring = true))
                 // «Авто капча», of the block that was held
                 compose.onNodeWithText("Авто капча").performScrollTo().performClick()
                 compose.waitUntil(5_000) { runBlocking { slot.captchaMode.first() } == "auto" }

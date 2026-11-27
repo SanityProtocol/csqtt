@@ -1,8 +1,6 @@
 package com.csqtt.client.ui.home
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -252,14 +250,14 @@ internal fun HomeOne(view: HomeView) {
  */
 @Composable
 private fun Logo(on: Boolean, canTap: Boolean, description: String, moves: Boolean, onClick: () -> Unit) {
-    val lit = animateFloatAsState(if (on) 1f else 0f, HomeMotion.spec(moves), label = "logo-lit")
-    val strength = animateFloatAsState(
+    val lit = turningFloat(if (on) 1f else 0f, moves, "logo-lit")
+    val strength = turningFloat(
         when {
             on -> 1f
             canTap -> 0.66f
             else -> 0.34f
         },
-        HomeMotion.spec(moves), label = "logo-alpha",
+        moves, "logo-alpha",
     )
     val colour = lit.value
     Image(
@@ -284,14 +282,14 @@ private fun Logo(on: Boolean, canTap: Boolean, description: String, moves: Boole
 @Composable
 private fun StatusWord(word: String, tone: StatusTone, moves: Boolean) {
     val colors = Csq.colors
-    val color by animateColorAsState(
+    val color by turningColor(
         when (tone) {
             StatusTone.Accent -> colors.accentText
             StatusTone.Warn -> colors.warn
             StatusTone.Danger -> colors.danger
             StatusTone.Muted -> colors.muted
         },
-        HomeMotion.spec(moves), label = "status",
+        moves, "status",
     )
     Text(word, style = Status, textAlign = TextAlign.Center, color = color, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
 }
@@ -300,7 +298,7 @@ private fun StatusWord(word: String, tone: StatusTone, moves: Boolean) {
 @Composable
 private fun Clock(on: Boolean, moves: Boolean) {
     val colors = Csq.colors
-    val color by animateColorAsState(if (on) colors.accentText else colors.faint, HomeMotion.spec(moves), label = "timer")
+    val color by turningColor(if (on) colors.accentText else colors.faint, moves, "timer")
     Uptime(Timer, color, Modifier.padding(top = LineGap))
 }
 
@@ -312,7 +310,7 @@ private fun Clock(on: Boolean, moves: Boolean) {
 private fun Notes(moves: Boolean, content: @Composable ColumnScope.() -> Unit) {
     key(LocalConfiguration.current.screenWidthDp) {
         Column(
-            Modifier.fillMaxWidth().then(if (moves) Modifier.animateContentSize(HomeMotion.spec(true)) else Modifier),
+            Modifier.fillMaxWidth().then(if (moves) Modifier.animateContentSize(HomeMotion.spec()) else Modifier),
             horizontalAlignment = Alignment.CenterHorizontally, content = content,
         )
     }

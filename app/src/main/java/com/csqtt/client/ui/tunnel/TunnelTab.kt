@@ -831,12 +831,12 @@ internal fun RunNote(modifier: Modifier = Modifier) {
 }
 
 /**
- * Opens the VK sign-in for [profile]. Not while the tunnel runs, starts or stops ([vkSessionInUse]): the last session's
- * cookies go first, so that the sign-in can be to another account, and a run in «Авто ВК» lives on that session.
+ * Opens the VK sign-in for [profile]. Not while the tunnel runs, starts or stops (M-79); the last session's cookies go
+ * first, so that the sign-in can be to another account.
  */
 internal fun openVkSignIn(context: Context, nav: NavModel, messages: com.csqtt.client.Messages, profile: Int) {
-    if (vkSessionInUse()) {
-        messages.show(context.getString(R.string.vk_sign_in_running))
+    if (vkChangeBlocked()) {
+        messages.show(context.getString(R.string.vk_change_running))
     } else {
         com.csqtt.client.VkAuthWebViewManager.clearVkSessionCookies { nav.open(Routes.vkSignIn(profile)) }
     }

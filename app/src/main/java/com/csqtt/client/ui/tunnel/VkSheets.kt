@@ -97,13 +97,8 @@ private fun tokenDraftKey(profile: Int) = "vk:$profile:token"
 /** The pool as read from the store: null inside means the profile's run uses none; no [PoolRead] yet, not read yet. */
 private class PoolRead(val pool: VkPoolState?)
 
-/**
- * M-79 as the operator set it on 2026-11-27 («Pick/paste allowed»): the tunnel runs, starts or stops. A run reads its
- * account once, at its start, so an account picked or a token pasted meanwhile is stored for the next connection and
- * says so. What clears the phone's VK session is still refused then — a new sign-in and a deletion — because a run in
- * «Авто ВК» lives on that session.
- */
-internal fun vkSessionInUse(): Boolean =
+/** M-79: an account is not changed while the tunnel runs, starts or stops. */
+internal fun vkChangeBlocked(): Boolean =
     TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value
 
 /** The square at the head of a row of a list of accounts or calls: a mark, or a tick for the chosen one. */
@@ -117,9 +112,8 @@ private fun RowMark(on: Boolean = false, content: @Composable () -> Unit) {
 
 /**
  * «Аккаунты VK» (the canvas, F-VkAccounts; M-79, D30): the accounts signed in on this phone, the one this profile is
- * on, and the ways to another — a sign-in, or a permanent token pasted by hand. What is done here is done at once:
- * «Готово» only closes. While the tunnel runs an account is picked and a token pasted for the next connection; a
- * sign-in and a deletion wait for it to stop ([vkSessionInUse]).
+ * on, and the ways to another — a sign-in, or a permanent token pasted by hand. An account is not changed while the
+ * tunnel runs. What is done here is done at once: «Готово» only closes.
  */
 @Composable
 internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
@@ -155,11 +149,8 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
         close()
     }
 
-    /** Whether an account may be deleted now: it takes the phone's VK session with it. Says why not. */
-    fun mayDelete(): Boolean = !vkSessionInUse().also { inUse -> if (inUse) messages.show(context.getString(R.string.vk_delete_running)) }
-
-    /** What a change of the account says: with the tunnel on it is for the next connection. */
-    fun said(done: Int): String = context.getString(if (vkSessionInUse()) R.string.vk_account_next else done)
+    /** Whether the account may change now; says why not. */
+    fun mayChange(): Boolean = !vkChangeBlocked().also { blocked -> if (blocked) messages.show(context.getString(R.string.vk_change_running)) }
 
     fun useToken(text: String) {
         val parsed = VkTokenParse.parse(text)
@@ -167,12 +158,12 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
             parsed == null -> tokenError = badToken
             // D30: an expiring token would stop working within a day, mid-use
             parsed.expiresIn > 0L -> tokenError = expiringToken
-            else -> {
+            mayChange() -> {
                 tokenError = null
                 SecretDrafts.clear(key)
                 TunnelManager.scope.launch(Dispatchers.Main) {
                     store.saveVkAccessToken(parsed.token, parsed.userId, 0L)
-                    messages.show(said(R.string.vk_token_saved))
+                    messages.show(context.getString(R.string.vk_token_saved))
                 }
             }
         }
@@ -206,7 +197,7 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                         leading = { RowMark(on = true) {} },
                         trailing = {
                             Chip(stringResource(R.string.vk_account_selected), kind = ChipKind.Accent, small = true)
-                            IconBtn(Icons.trash, stringResource(R.string.vk_account_delete, name), { if (mayDelete()) deleting = "" }, small = true, tint = colors.muted)
+                            IconBtn(Icons.trash, stringResource(R.string.vk_account_delete, name), { if (mayChange()) deleting = "" }, small = true, tint = colors.muted)
                         },
                     )
                 }
@@ -216,20 +207,16 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                     Cell(
                         title = name, sub = stringResource(R.string.vk_account_id, id), selected = selected, divided = index > 0 || unlisted,
                         onClick = {
-                            if (!selected) {
+                            if (!selected && mayChange()) {
                                 TunnelManager.scope.launch(Dispatchers.Main) {
-                                    when {
-                                        !store.selectVkAccount(id) -> messages.show(context.getString(R.string.vk_account_unreadable))
-                                        // the run keeps the account it started with
-                                        vkSessionInUse() -> messages.show(context.getString(R.string.vk_account_next))
-                                    }
+                                    if (!store.selectVkAccount(id)) messages.show(context.getString(R.string.vk_account_unreadable))
                                 }
                             }
                         },
                         leading = { RowMark(on = selected) { Text((index + 1).toString(), style = Type.chipSmall, color = colors.muted) } },
                         trailing = {
                             if (selected) Chip(stringResource(R.string.vk_account_selected), kind = ChipKind.Accent, small = true)
-                            IconBtn(Icons.trash, stringResource(R.string.vk_account_delete, name), { if (mayDelete()) deleting = id }, small = true, tint = colors.muted)
+                            IconBtn(Icons.trash, stringResource(R.string.vk_account_delete, name), { if (mayChange()) deleting = id }, small = true, tint = colors.muted)
                         },
                     )
                 }
@@ -273,7 +260,7 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                     stringResource(R.string.action_delete),
                     {
                         deleting = null
-                        if (mayDelete()) {
+                        if (mayChange()) {
                             // the profile's own account goes with its VK session in the app, so that the next sign-in
                             // does not quietly bring the same account back
                             if (id.isEmpty() || id == userId) VkAuthWebViewManager.clearVkSessionCookies()
@@ -322,10 +309,14 @@ internal fun VkSignInDialog(profileArg: String, close: () -> Unit) {
                 close()
                 // on the app's scope: the token VK gave is stored whatever becomes of the window
                 TunnelManager.scope.launch(Dispatchers.Main) {
-                    // only a permanent token reaches here (M-82 / D30: an expiring one is refused at sign-in). A tunnel
-                    // started while the sign-in was open keeps the account it started with: this one is its next
-                    store.saveVkAccessToken(payload.token, payload.userId, payload.expiresIn)
-                    messages.show(app.getString(if (vkSessionInUse()) R.string.vk_account_next else R.string.vk_token_saved))
+                    // a tunnel started while the sign-in was open keeps its account (M-79)
+                    if (vkChangeBlocked()) {
+                        messages.show(app.getString(R.string.vk_change_running))
+                    } else {
+                        // only a permanent token reaches here (M-82 / D30: an expiring one is refused at sign-in)
+                        store.saveVkAccessToken(payload.token, payload.userId, payload.expiresIn)
+                        messages.show(app.getString(R.string.vk_token_saved))
+                    }
                 }
             },
             onError = { error = it },

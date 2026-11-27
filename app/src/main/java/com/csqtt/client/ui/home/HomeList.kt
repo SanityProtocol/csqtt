@@ -2,9 +2,8 @@ package com.csqtt.client.ui.home
 
 import androidx.annotation.StringRes
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -132,7 +131,7 @@ internal fun HomeList(view: HomeView) {
 @Composable
 private fun Notices(notices: List<HomeNotice>, view: HomeView, above: Boolean = false) {
     key(LocalConfiguration.current.screenWidthDp) {
-        Column(Modifier.fillMaxWidth().then(if (view.moves) Modifier.animateContentSize(HomeMotion.spec(true)) else Modifier)) {
+        Column(Modifier.fillMaxWidth().then(if (view.moves) Modifier.animateContentSize(HomeMotion.spec()) else Modifier)) {
             for (notice in notices) {
                 Box(Modifier.padding(top = if (above) 0.dp else BesideCards, bottom = if (above) BesideCards else 0.dp)) { ListNotice(notice, view) }
             }
@@ -175,7 +174,7 @@ private fun StateBlock(view: HomeView, top: Dp) {
     val pausedOn = view.notices.firstNotNullOfOrNull { it as? HomeNotice.PausedOn }
     val captcha = state is ConnectionState.CaptchaNeeded
     // the room above the C: most of it is the notifications card's when that is there, and goes with that card's motion
-    val above by animateDpAsState(top, HomeMotion.spec(view.moves), label = "above-disc")
+    val above by turningDp(top, view.moves, "above-disc")
     val line = with(LocalDensity.current) { HomeText.Line.lineHeight.toDp() }
     Column(Modifier.fillMaxWidth().padding(top = above), horizontalAlignment = Alignment.CenterHorizontally) {
         CDisc(view.visuals.disc, tapDescription(view), enabled = view.visuals.tap != Tap.Nothing, moves = view.moves, onClick = view.actions.tap)
@@ -294,26 +293,26 @@ private enum class Letter { White, Faint, Logo }
 @Composable
 private fun CDisc(disc: Disc, description: String, enabled: Boolean, moves: Boolean, onClick: () -> Unit) {
     val colors = Csq.colors
-    val ground = animateColorAsState(
+    val ground = turningColor(
         when (disc) {
             Disc.On -> colors.accent
             Disc.Busy -> colors.accentSoft
             Disc.Warn -> colors.warnSoft
             Disc.Off, Disc.Dim -> colors.raised
         },
-        HomeMotion.spec(moves), label = "disc-ground",
+        moves, "disc-ground",
     )
     // «on» has no ring: the accent's own is not seen on the accent ground
-    val ring = animateColorAsState(
+    val ring = turningColor(
         when (disc) {
             Disc.On, Disc.Busy -> colors.accent
             Disc.Warn -> colors.warn
             Disc.Off, Disc.Dim -> colors.line
         },
-        HomeMotion.spec(moves), label = "disc-ring",
+        moves, "disc-ring",
     )
-    val ringWidth = animateDpAsState(if (disc == Disc.Off || disc == Disc.Dim) 1.dp else 2.dp, HomeMotion.spec(moves), label = "disc-ring-width")
-    val glow = animateDpAsState(if (disc == Disc.On) 14.dp else 0.dp, HomeMotion.spec(moves), label = "disc-glow")
+    val ringWidth = turningDp(if (disc == Disc.Off || disc == Disc.Dim) 1.dp else 2.dp, moves, "disc-ring-width")
+    val glow = turningDp(if (disc == Disc.On) 14.dp else 0.dp, moves, "disc-glow")
     Box(
         Modifier
             .size(168.dp)
@@ -339,7 +338,8 @@ private fun CDisc(disc: Disc, description: String, enabled: Boolean, moves: Bool
             Disc.Dim -> Letter.Faint
             Disc.Off, Disc.Busy, Disc.Warn -> Letter.Logo
         }
-        Crossfade(letter, animationSpec = HomeMotion.spec(moves), label = "disc-letter") { shown ->
+        // where Home does not move the letter is the state's own at once, with no frame of the last one under it
+        Crossfade(letter, animationSpec = if (moves) HomeMotion.spec() else snap(), label = "disc-letter") { shown ->
             when (shown) {
                 Letter.White -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Color.White)
                 Letter.Faint -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = colors.faint)
