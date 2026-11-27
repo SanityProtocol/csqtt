@@ -1143,9 +1143,9 @@ class TunnelService : Service() {
                     return@launch
                 }
                 // the networks are listed before they are probed, and a probe takes its timeouts: one that was lost
-                // meanwhile is neither the network that answered nor one to go on probing
+                // meanwhile is neither the network that answered — the next one is asked — nor one to go on probing
                 val candidates = currentPhysicalCandidates()
-                val ready = candidates.firstOrNull(::probeVkThrough)?.takeUnless(::networkGone)
+                val ready = candidates.firstOrNull { probeVkThrough(it) && !networkGone(it) }
                 if (ready != null) {
                     rememberPhysicalCandidate(ready)
                     updatePhysicalNetwork(ready, true)
@@ -1171,7 +1171,7 @@ class TunnelService : Service() {
             try {
                 // as in verifyVkAndRestart: a network lost while it was probed is not one any more
                 val candidates = currentPhysicalCandidates()
-                val ready = candidates.firstOrNull(::probeVkThrough)?.takeUnless(::networkGone)
+                val ready = candidates.firstOrNull { probeVkThrough(it) && !networkGone(it) }
                 if (ready != null) {
                     rememberPhysicalCandidate(ready)
                     updatePhysicalNetwork(ready, true)
