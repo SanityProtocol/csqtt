@@ -16,16 +16,15 @@ class TunnelFormValidationTest {
         port: String = "46000",
         password: String = "secret",
         hashesReady: Boolean = true,
-        hashDuplicates: Boolean = false,
         required: Boolean = false,
     ) = tunnelIssues(
         linkMode = false, address = address, port = port, password = password, link = "", linkValid = false,
-        hashesReady = hashesReady, hashDuplicates = hashDuplicates, required = required,
+        hashesReady = hashesReady, required = required,
     )
 
     private fun link(link: String, valid: Boolean, hashesReady: Boolean = true, required: Boolean = false) = tunnelIssues(
         linkMode = true, address = "", port = "", password = "", link = link, linkValid = valid,
-        hashesReady = hashesReady, hashDuplicates = false, required = required,
+        hashesReady = hashesReady, required = required,
     )
 
     @Test
@@ -33,7 +32,7 @@ class TunnelFormValidationTest {
         assertFalse(own().any)
         assertFalse(own(address = "", port = "", password = "", hashesReady = false).any)
         assertEquals(
-            TunnelIssues(address = AddressIssue.Missing, port = true, password = PasswordIssue.Missing, hashes = HashesIssue.Missing),
+            TunnelIssues(address = AddressIssue.Missing, port = true, password = PasswordIssue.Missing, hashes = true),
             own(address = "", port = "", password = "", hashesReady = false, required = true),
         )
     }
@@ -66,11 +65,10 @@ class TunnelFormValidationTest {
     }
 
     @Test
-    fun `hashes are missing only after a refused start, and duplicates are always said`() {
-        assertNull(own(hashesReady = false).hashes)
-        assertEquals(HashesIssue.Missing, own(hashesReady = false, required = true).hashes)
-        assertEquals(HashesIssue.Duplicates, own(hashDuplicates = true).hashes)
-        assertEquals(HashesIssue.Duplicates, own(hashDuplicates = true, hashesReady = false, required = true).hashes)
+    fun `nothing to connect with is said only after a refused start`() {
+        assertFalse(own(hashesReady = false).hashes)
+        assertTrue(own(hashesReady = false, required = true).hashes)
+        assertFalse(own(hashesReady = true, required = true).hashes)
     }
 
     @Test
@@ -78,7 +76,7 @@ class TunnelFormValidationTest {
         assertFalse(link("csqtt://connect?v=2&host=h&peer=1&password=p", valid = true).any)
         assertEquals(TunnelIssues(link = LinkIssue.Invalid), link("csqtt://connect?v=1", valid = false))
         assertFalse(link("", valid = false).any)
-        assertEquals(TunnelIssues(link = LinkIssue.Missing, hashes = HashesIssue.Missing), link("", valid = false, hashesReady = false, required = true))
+        assertEquals(TunnelIssues(link = LinkIssue.Missing, hashes = true), link("", valid = false, hashesReady = false, required = true))
     }
 
     @Test

@@ -103,6 +103,20 @@ internal object Icons {
     val chevronDown by stroke("m6 9 6 6 6-6")
     val lock by stroke(rect(3f, 11f, 18f, 11f, 2f), "M7 11V7a5 5 0 0 1 10 0v4")
 
+    // «Одно подключение»'s way to another connection (the operator, 2026-11-27): the two arrows set apart, each 2 of
+    // 24 off the middle
+    val switch by stroke("M7 3 3 7l4 4", "M3 7h14", "m17 21 4-4-4-4", "M21 17H7")
+    val link by stroke(
+        "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
+        "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
+    )
+    val chevrons by stroke("m7 15 5 5 5-5", "m7 9 5-5 5 5")
+    val help by stroke(circle(12f, 12f, 10f), "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3", "M12 17h.01")
+    val phone by stroke(rect(5f, 2f, 14f, 20f, 2f), "M12 18h.01")
+    val user by stroke("M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2", circle(12f, 7f, 4f))
+    val activity by stroke("M22 12h-4l-3 9L9 3l-3 9H2")
+    val checkCircle by stroke("M22 11.08V12a10 10 0 1 1-5.93-9.14", "m9 11 3 3L22 4")
+
     /** The C of the wordmark on the launcher icon's 108 grid: the app's own glyph everywhere, coloured by state. */
     val c: ImageVector by lazy {
         ImageVector.Builder(defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 108f, viewportHeight = 108f)
@@ -117,6 +131,7 @@ internal object Icons {
             key, cloud, terminal, list, arrowLeft, close, check, loader, warning, info, chevronRight, eye, eyeOff, more,
             viewList, viewOne, sort, pin, bellOff, wifi, alert, shield, c,
             pencil, trash, plus, qr, clipboard, server, image, refresh, copy, chevronUp, chevronDown, lock,
+            switch, link, chevrons, help, phone, user, activity, checkCircle,
         )
 }
 

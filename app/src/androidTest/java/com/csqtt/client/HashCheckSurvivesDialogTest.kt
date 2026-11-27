@@ -1,9 +1,10 @@
 package com.csqtt.client
 
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -19,9 +20,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * B5h2 (U2, APP-PLAN §4.2 rules 8 and 11): a VK hash check started in the dialog runs on after the dialog closes, a tab
- * switch and a recreate, and its results are stored for the profile it began on, even when another profile is opened
- * meanwhile.
+ * B5h2 (U2, APP-PLAN §4.2 rules 8 and 11): a VK hash check started in «Хеши звонков VK» runs on after the sheet closes,
+ * a tab switch and a recreate, and its results are stored for the profile it began on, even when another profile is
+ * opened meanwhile.
  */
 @RunWith(AndroidJUnit4::class)
 class HashCheckSurvivesDialogTest {
@@ -84,16 +85,16 @@ class HashCheckSurvivesDialogTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             compose.waitUntil(10_000) { shown("Туннель") }
             compose.onNodeWithText("Туннель").performClick()
-            compose.waitUntil(10_000) { shown("Ссылки VK звонков") }
-            compose.onNodeWithText("Ссылки VK звонков").performClick()
+            compose.waitUntil(10_000) { shown("Хеши звонков VK · 1 из 6") }
+            compose.onNodeWithText("Хеши звонков VK · 1 из 6").performClick()
             compose.waitUntil(5_000) { shown("Проверить актив") }
-            compose.onNodeWithText("Проверить актив").performClick()
+            compose.onNodeWithText("Проверить актив").performScrollTo().performClick()
             compose.waitUntil(5_000) { VkHashCheck.state.value == VkHashCheck.State.Running(SLOT) }
 
-            // the dialog closes, the tab changes, the screen is recreated, another profile is opened
-            compose.waitUntil(5_000) { shown("Проверяем...") }
-            compose.onNodeWithText("Сохранить").performClick()
-            compose.waitUntil(5_000) { !shown("Проверяем...") }
+            // the sheet says it may be closed; it closes, the tab changes, the screen is recreated, another profile is opened
+            compose.waitUntil(5_000) { shown("Можно закрыть — проверка продолжится") }
+            compose.onNodeWithText("Сохранить").performScrollTo().performClick()
+            compose.waitUntil(5_000) { !shown("Можно закрыть — проверка продолжится") }
             compose.onNodeWithText("Главная").performClick()
             scenario.recreate()
             compose.waitUntil(10_000) { shown("Туннель") }

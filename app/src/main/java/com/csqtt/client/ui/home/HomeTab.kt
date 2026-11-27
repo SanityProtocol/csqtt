@@ -49,6 +49,7 @@ import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.WifiRule
 import com.csqtt.client.connectionVisuals
 import com.csqtt.client.homeNotices
+import com.csqtt.client.peerIsLocal
 import com.csqtt.client.startStage
 import com.csqtt.client.ui.components.IconBtn
 import com.csqtt.client.ui.design.Icons
@@ -58,6 +59,7 @@ import com.csqtt.client.ui.shell.LocalOwners
 import com.csqtt.client.ui.shell.LocalStore
 import com.csqtt.client.ui.shell.Routes
 import com.csqtt.client.ui.shell.Tab
+import com.csqtt.client.ui.tunnel.openVkSignIn
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -97,11 +99,11 @@ internal fun HomeTab(
     auth: TunnelAuthSnapshot,
     layout: HomeLayout,
     onInvalidConfiguration: () -> Unit,
-    onVkAuthRequested: () -> Unit,
 ) {
     val store = LocalStore.current
     val nav = LocalNav.current
     val context = LocalContext.current
+    val messages = LocalOwners.current.messages
     val state by TunnelManager.connectionState.collectAsStateWithLifecycle()
     val cooldown by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
     val progress by TunnelManager.startProgress.collectAsStateWithLifecycle()
@@ -125,7 +127,7 @@ internal fun HomeTab(
             openTunnel = { nav.select(Tab.Tunnel) },
             addProfile = { nav.open(Routes.addProfile()) },
             reviewCertificate = { url -> nav.open(Routes.subCert(url)) },
-            vkSignIn = onVkAuthRequested,
+            vkSignIn = { openVkSignIn(context.applicationContext, nav, messages, auth.profile) },
             appSettings = {
                 runCatching {
                     context.startActivity(
@@ -237,11 +239,10 @@ private fun rememberHomeStart(auth: TunnelAuthSnapshot, onInvalidConfiguration: 
         manualHashCount = liveHashes.ifEmpty { typedHashes }.size,
     )
     val peer = storedPeer.orEmpty().trim()
-    val peerLocal = peer == "0.0.0.0" || peer == "127.0.0.1" || peer.equals("localhost", ignoreCase = true) || peer == "::1"
     val blocker = ConnectionStartPolicy.blocker(
         linkMode = auth.csqttLinkMode,
         linkValid = link != null,
-        peerValid = peer.isNotBlank() && !peer.contains(":") && !peerLocal,
+        peerValid = peer.isNotBlank() && !peer.contains(":") && !peerIsLocal(peer),
         peerPortValid = !manualPorts || peerPort in 1..65535,
         connectionPasswordSet = auth.connectionPassword.isNotBlank(),
         connectionPasswordReadable = auth.connectionPasswordState != StoredSecretState.Unreadable,

@@ -23,8 +23,12 @@ internal object WorkerCountPolicy {
         manualHashCount: Int,
     ): Int = CsqttConstants.Tunnel.MAX_WORKERS
 
-    fun defaultMaximum(extraWorkers: Boolean = false): Int =
-        if (extraWorkers) CsqttConstants.Tunnel.MAX_WORKERS else CsqttConstants.Tunnel.DEFAULT_MAX_WORKERS
+    /**
+     * The most streams a profile runs: what the core takes, and in «Авто ВК» ([accountAutoVk]) that mode's own limit.
+     * What is recommended below it is a count per hash ([StreamsPlan]), which warns and never caps.
+     */
+    fun maximum(accountAutoVk: Boolean): Int =
+        if (accountAutoVk) CsqttConstants.Tunnel.AUTO_VK_MAX_WORKERS else CsqttConstants.Tunnel.MAX_WORKERS
 
     fun normalizeForHashes(requested: Int, hashCount: Int): Int =
         normalize(requested, maximumForHashes(hashCount))

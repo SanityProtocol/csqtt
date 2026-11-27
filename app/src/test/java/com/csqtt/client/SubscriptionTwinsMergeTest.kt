@@ -174,7 +174,8 @@ class SubscriptionTwinsMergeTest {
             prefs[intPreferencesKey("store_schema_version")] = 8
             val before = asMap(prefs)
             SettingsStore.migrateStore(prefs)
-            assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(prefs)))
+            // the same step takes «Экстра потоки» out, where a store holds it, and a count that ran as 70 is 70
+            assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(prefs)) - "extra_workers" - "workers_per_hash_2")
         }
         val two = store(metaJson(Record(https, minutes = 60), Record("https://other.example.invalid/s/abc")), mapOf(1 to https, 2 to "https://other.example.invalid/s/abc"))
         val before = asMap(two)
@@ -201,6 +202,30 @@ class SubscriptionTwinsMergeTest {
         assertEquals(6, prefs[intPreferencesKey("active_profile")])
         assertEquals(1, prefs[intPreferencesKey("run_profile")])
         assertEquals(3, SettingsStore.profileEntries(prefs).size)
+    }
+
+    @Test
+    fun `the step takes the extra-streams switch out and a profile runs the count it ran`() {
+        val prefs = mutablePreferencesOf()
+        prefs[intPreferencesKey("store_schema_version")] = 8
+        // the switch on: up to 100 ran
+        prefs[booleanPreferencesKey("extra_workers")] = true
+        prefs[intPreferencesKey("workers_per_hash")] = 100
+        prefs[booleanPreferencesKey("extra_workers_4")] = false
+        prefs[intPreferencesKey("workers_per_hash_4")] = 70
+        // the switch off, or never touched: a count above 70 (a subscription's node starts at its power) ran as 70
+        prefs[booleanPreferencesKey("extra_workers_5")] = false
+        prefs[intPreferencesKey("workers_per_hash_5")] = 100
+        prefs[intPreferencesKey("workers_per_hash_6")] = 90
+        prefs[intPreferencesKey("workers_per_hash_7")] = 40
+        SettingsStore.migrateStore(prefs)
+        assertEquals(
+            mapOf(
+                "store_schema_version" to SettingsStore.STORE_SCHEMA, "workers_per_hash" to 100, "workers_per_hash_4" to 70,
+                "workers_per_hash_5" to 70, "workers_per_hash_6" to 70, "workers_per_hash_7" to 40,
+            ),
+            asMap(prefs),
+        )
     }
 
     @Test

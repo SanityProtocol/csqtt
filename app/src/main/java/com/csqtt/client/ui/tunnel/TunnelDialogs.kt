@@ -1,0 +1,130 @@
+package com.csqtt.client.ui.tunnel
+
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import com.csqtt.client.R
+import com.csqtt.client.StreamsPlan
+import com.csqtt.client.TunnelManager
+import com.csqtt.client.ui.components.Btn
+import com.csqtt.client.ui.components.BtnKind
+import com.csqtt.client.ui.components.CheckRow
+import com.csqtt.client.ui.components.DialogFrame
+import com.csqtt.client.ui.components.TextBtn
+import com.csqtt.client.ui.design.Csq
+import com.csqtt.client.ui.design.Type
+import kotlinx.coroutines.launch
+
+/**
+ * What a risk question is about: a mode that signs in to VK's unofficial API, the TCP transport, or more streams than
+ * are recommended for the profile's hashes (its value: the count picked and the recommended one, «60:30»).
+ */
+internal object RiskKind {
+    const val HASH_MODE = "hash"
+    const val WORK_MODE = "work"
+    const val TCP = "tcp"
+    const val STREAMS = "streams"
+}
+
+/** The explainers the «?» of a setting opens. */
+internal object InfoTopic {
+    const val HASH_MODE = "hash"
+    const val WORK_MODE = "work"
+    const val TRANSPORT = "transport"
+    const val STREAMS = "streams"
+}
+
+/**
+ * The warning before «Авто ВК», TCP or a count of streams above the recommended one is taken (the canvas,
+ * F-RiskDialog): what is risked, a real «Отмена», and no timer. It is a route of the shell, with the choice it was
+ * asked for in its argument, so the question and the choice are still there after the screen was made again (U4). The
+ * choice is stored only on «Понятно».
+ */
+@Composable
+internal fun RiskDialog(arg: String, close: () -> Unit) {
+    val parts = arg.split('|')
+    val profile = parts.getOrNull(0)?.toIntOrNull()
+    val kind = parts.getOrNull(1)
+    val value = parts.getOrNull(2).orEmpty()
+    // a count of streams comes with the recommended one it is above
+    val streams = value.split(':').mapNotNull(String::toIntOrNull).takeIf { kind == RiskKind.STREAMS && it.size == 2 }
+    val known = kind in setOf(RiskKind.HASH_MODE, RiskKind.WORK_MODE, RiskKind.TCP) || streams != null
+    if (profile == null || !known || value.isEmpty()) {
+        LaunchedEffect(Unit) { close() }
+        return
+    }
+    val store = rememberProfileStore(profile)
+    var dontRemind by rememberSaveable { mutableStateOf(false) }
+    DialogFrame(
+        title = stringResource(R.string.risk_title), onDismiss = close, dismissOnOutside = false,
+        actions = {
+            TextBtn(stringResource(R.string.action_cancel), close)
+            Btn(
+                stringResource(R.string.action_understood),
+                {
+                    val remembered = dontRemind
+                    // on the app's scope: the choice is stored even as the dialog goes
+                    TunnelManager.scope.launch {
+                        when (kind) {
+                            RiskKind.HASH_MODE -> store.saveVkHashMode(value)
+                            RiskKind.WORK_MODE -> store.saveVkAuthMode(value)
+                            RiskKind.STREAMS -> streams?.let { store.saveWorkersPerHash(it[0]) }
+                            else -> store.saveTurnTransport(value)
+                        }
+                        when {
+                            !remembered -> Unit
+                            kind == RiskKind.TCP -> store.saveTcpTransportRiskAcknowledged(true)
+                            else -> store.saveAutoJsRiskAcknowledged(true)
+                        }
+                    }
+                    close()
+                },
+                kind = BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp),
+            )
+        },
+    ) {
+        Text(
+            when {
+                streams != null -> stringResource(R.string.risk_streams, StreamsPlan.RECOMMENDED_PER_HASH, streams[1], streams[0])
+                kind == RiskKind.TCP -> stringResource(R.string.risk_tcp)
+                else -> stringResource(R.string.risk_auto_vk)
+            },
+            style = Type.fact, color = Csq.colors.text,
+        )
+        // a count of streams is asked about every time it goes into the red part: there is nothing to remember
+        if (streams == null) CheckRow(stringResource(R.string.risk_dont_remind), dontRemind, { dontRemind = it })
+    }
+}
+
+/** What a setting's choices mean, one paragraph a choice. */
+@Composable
+internal fun InfoDialog(topic: String, close: () -> Unit) {
+    val (title, paragraphs) = when (topic) {
+        InfoTopic.HASH_MODE -> R.string.info_hash_title to listOf(R.string.info_hash_manual, R.string.info_hash_auto_api, R.string.info_hash_auto_vk)
+        InfoTopic.WORK_MODE -> R.string.info_work_title to listOf(R.string.info_work_captcha, R.string.info_work_auto, R.string.info_work_auto_vk)
+        InfoTopic.TRANSPORT -> R.string.info_transport_title to listOf(R.string.info_transport_udp, R.string.info_transport_tcp, R.string.info_transport_when)
+        InfoTopic.STREAMS -> R.string.info_streams_title to listOf(R.string.info_streams, R.string.info_streams_hashes, R.string.info_streams_server)
+        else -> {
+            LaunchedEffect(Unit) { close() }
+            return
+        }
+    }
+    DialogFrame(
+        title = stringResource(title), onDismiss = close,
+        actions = { Btn(stringResource(R.string.action_understood), close, kind = BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp)) },
+    ) {
+        for (paragraph in paragraphs) {
+            // the one paragraph with a number in it: what is recommended on a hash
+            val text = if (paragraph == R.string.info_streams_hashes) stringResource(paragraph, StreamsPlan.RECOMMENDED_PER_HASH) else stringResource(paragraph)
+            Text(text, style = Type.fact, color = Csq.colors.text)
+        }
+    }
+}

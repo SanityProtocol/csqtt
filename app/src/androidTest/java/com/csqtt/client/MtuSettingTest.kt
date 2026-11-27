@@ -5,7 +5,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -25,7 +25,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * P1 Bt part 2: the profile's MTU on the classic «Туннель» tab. A preset is stored as picked; «Своё значение» stores a
+ * P1 Bt part 2: the profile's MTU on «Туннель», under «Дополнительно». A preset is stored as picked; «Своё значение» stores a
  * typed value only inside 576–1500; another profile shows its own value, never the last one's draft or choice.
  */
 @RunWith(AndroidJUnit4::class)
@@ -94,6 +94,8 @@ class MtuSettingTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             compose.waitUntil(10_000) { shown("Туннель") }
             compose.onNodeWithText("Туннель").performClick()
+            compose.waitUntil(10_000) { shown("Дополнительно") }
+            compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
             compose.waitUntil(10_000) { shown("MTU") }
             compose.onNodeWithText("MTU").performScrollTo()
             // a new profile runs at the default, and a preset is stored as picked
@@ -119,7 +121,8 @@ class MtuSettingTest {
             compose.waitForIdle()
             assertEquals(600, stored(SLOT))
 
-            // another profile with the same custom MTU opens with its own value in the field, not SLOT's draft
+            // another profile with the same custom MTU opens with its own value in the field, not SLOT's draft;
+            // «Дополнительно» stays open from one profile to the next
             runBlocking {
                 SettingsStore(context, ProfileScope.Fixed(OTHER)).saveVpnMtu(600)
                 store.saveActiveProfile(OTHER)

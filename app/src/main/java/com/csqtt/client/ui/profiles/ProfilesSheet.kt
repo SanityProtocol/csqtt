@@ -39,11 +39,13 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.csqtt.client.HomeLayout
 import com.csqtt.client.ProfileEntry
 import com.csqtt.client.ProfileKind
 import com.csqtt.client.ProfileOrder
 import com.csqtt.client.ProfileSort
 import com.csqtt.client.R
+import com.csqtt.client.SettingsStore
 import com.csqtt.client.SubscriptionMeta
 import com.csqtt.client.SubscriptionSync
 import com.csqtt.client.TunnelManager
@@ -60,6 +62,7 @@ import com.csqtt.client.ui.shell.LocalNav
 import com.csqtt.client.ui.shell.LocalOwners
 import com.csqtt.client.ui.shell.LocalStore
 import com.csqtt.client.ui.shell.Routes
+import com.csqtt.client.ui.shell.Tab
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -79,7 +82,15 @@ internal fun ProfilesSheet(close: () -> Unit) {
     val active by store.activeProfile.collectAsStateWithLifecycle(initialValue = -1)
     val metas by store.subscriptionMeta.collectAsStateWithLifecycle(initialValue = emptyMap())
     val shown = remember(entries, sort, order) { ProfileOrder.shown(entries, sort, order) }
-    val acts = profileActs(entries, active, afterPick = close)
+    val context = LocalContext.current.applicationContext
+    val messages = LocalOwners.current.messages
+    val layout by store.homeLayout.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedHomeLayout ?: HomeLayout.One)
+    val acts = profileActs(entries, active, afterPick = { picked ->
+        // «Одно подключение» never names the connection it is on, so a pick made for it is said, once (the operator,
+        // 2026-11-27); in the list the tinted row says it, and on «Туннель» the profile's own row
+        if (layout == HomeLayout.One && nav.tab == Tab.Home) messages.show(context.getString(R.string.home_picked, picked.name))
+        close()
+    })
 
     val own = shown.filter { it.kind != ProfileKind.Subscription }
     // a subscription's nodes, the hidden ones among them: its heading counts both

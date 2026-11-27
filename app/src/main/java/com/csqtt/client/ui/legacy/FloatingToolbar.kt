@@ -1,6 +1,5 @@
 package com.csqtt.client.ui.legacy
 
-import kotlinx.coroutines.launch
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -33,18 +32,14 @@ import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
 import androidx.compose.ui.platform.LocalContext
 import com.csqtt.client.ui.legacy.dialogs.ImportExportDialog
-import com.csqtt.client.ui.legacy.dialogs.TurnSubnetsDialog
 
 @Composable
 fun FloatingToolbar(
     settingsStore: SettingsStore,
-    csqttLinkMode: Boolean,
     activeProfile: Int,
     onActiveProfileChange: (Int) -> Unit,
     currentTheme: String,
     onThemeChange: (String) -> Unit,
-    activeFingerprint: String,
-    onFingerprintChange: (String) -> Unit,
     autoPauseOnWifi: Boolean,
     onAutoPauseOnWifiChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
@@ -52,24 +47,11 @@ fun FloatingToolbar(
     onOpenServer: (() -> Unit)? = null,
     /** «+ Добавить профиль» of the picker: the shell's «Добавить профиль» (P3 B2). */
     onAddProfile: () -> Unit = {},
-    /** «Все профили и подписки» of the picker: the shell's profiles sheet, where a profile is renamed, hidden or deleted. */
-    onAllProfiles: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(
-        initialValue = CsqttConstants.VkAuth.MODE_CALLS,
-    )
-    val selectedTurnSubnet by settingsStore.selectedTurnSubnet.collectAsStateWithLifecycle(
-        initialValue = "",
-    )
-    val turnSubnetIpLimit by settingsStore.turnSubnetIpLimit.collectAsStateWithLifecycle(
-        initialValue = "ALL",
-    )
     var isExpanded by rememberSaveable { mutableStateOf(false) }
     var showImportExportDialog by rememberSaveable { mutableStateOf(false) }
     var showAutoPauseInfo by rememberSaveable { mutableStateOf(false) }
-    var showTurnSubnetsDialog by rememberSaveable { mutableStateOf(false) }
     val profileList by settingsStore.profileList.collectAsStateWithLifecycle(initialValue = emptyList())
     val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val settingsIconTint = if (isDarkTheme) Color.White else Color.Black
@@ -162,36 +144,17 @@ fun FloatingToolbar(
                         title = "Профиль конфигурации",
                         selectedKey = activeProfile.toString(),
                         options = profileList.map { (profile, name) -> profile.toString() to name } +
-                            (ADD_PROFILE_KEY to "+ Добавить профиль") + (ALL_PROFILES_KEY to "Все профили и подписки"),
+                            (ADD_PROFILE_KEY to "+ Добавить профиль"),
                         enabled = true,
                         onSelected = { key ->
                             if (key == ADD_PROFILE_KEY) {
                                 // the ways to add a profile are the shell's sheet now; this dialog would lie over it
                                 isExpanded = false
                                 onAddProfile()
-                            } else if (key == ALL_PROFILES_KEY) {
-                                // rename, hide, delete and the subscriptions are the shell's sheet: the way to it from
-                                // «Одно подключение», which has no list of its own
-                                isExpanded = false
-                                onAllProfiles()
                             } else {
                                 key.toIntOrNull()?.let(onActiveProfileChange)
                             }
                         },
-                    )
-
-                    CompactDropdownSetting(
-                        title = "Отпечаток",
-                        selectedKey = activeFingerprint,
-                        options = listOf(
-                            "chrome" to "Chrome",
-                            "safari" to "Safari",
-                            "firefox" to "Firefox",
-                            "edge" to "Edge",
-                            "opera" to "Opera",
-                        ),
-                        enabled = true,
-                        onSelected = onFingerprintChange,
                     )
 
                     CompactDropdownSetting(
@@ -216,10 +179,6 @@ fun FloatingToolbar(
 
                     // B5f2: where the pause acts, and the networks of the two list rules
                     if (autoPauseOnWifi) WifiRuleControls(settingsStore)
-
-                    if (!csqttLinkMode) {
-                        SheetAction("Выбор TURN подсетей", onClick = { showTurnSubnetsDialog = true })
-                    }
 
                     // P3 B0: «Показывать деплой» is gone, so someone without a server opens «Сервер» from here; the tab
                     // stays in the bar while it is open, and for good once a server is there
@@ -249,23 +208,9 @@ fun FloatingToolbar(
         WifiAutoPauseInfoDialog(onDismiss = { showAutoPauseInfo = false })
     }
 
-    if (showTurnSubnetsDialog) {
-        TurnSubnetsDialog(
-            selectedSubnetId = selectedTurnSubnet,
-            turnSubnetIpLimit = turnSubnetIpLimit,
-            onSelectSubnet = { id ->
-                scope.launch { settingsStore.saveSelectedTurnSubnet(id) }
-            },
-            onSelectIpLimit = { limit ->
-                scope.launch { settingsStore.saveTurnSubnetIpLimit(limit) }
-            },
-            onDismiss = { showTurnSubnetsDialog = false },
-        )
-    }
 }
 
 private const val ADD_PROFILE_KEY = "add"
-private const val ALL_PROFILES_KEY = "all"
 
 /** An action at the foot of «Настройки»: the sheet's outlined pill, the width of the sheet. */
 @Composable

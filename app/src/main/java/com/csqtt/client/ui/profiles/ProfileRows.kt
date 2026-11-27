@@ -84,7 +84,7 @@ internal class ProfileActs(val pick: (ProfileEntry) -> Unit, val run: (ProfileAc
  * itself there, in the same coroutine, so the pick is never cut short by its own sheet going (M-97).
  */
 @Composable
-internal fun profileActs(entries: List<ProfileEntry>, active: Int, afterPick: () -> Unit = {}): ProfileActs {
+internal fun profileActs(entries: List<ProfileEntry>, active: Int, afterPick: (ProfileEntry) -> Unit = {}): ProfileActs {
     val store = LocalStore.current
     val nav = LocalNav.current
     val context = LocalContext.current.applicationContext
@@ -95,7 +95,7 @@ internal fun profileActs(entries: List<ProfileEntry>, active: Int, afterPick: ()
         pick = { entry ->
             scope.launch(Dispatchers.Main) {
                 pickProfile(context, store, entry.index, active)
-                afterPick()
+                afterPick(entry)
             }
         },
         run = { action, entry ->

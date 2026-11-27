@@ -125,6 +125,18 @@ internal object SecretDrafts {
         if (value.isEmpty()) drafts.remove(key) else drafts[key] = value
     }
 
+    /**
+     * What was typed into the field [key] since its form last dropped its drafts — an emptied field too, which [get]
+     * cannot tell from an untouched one; null while it was not touched. For a field that shows a stored secret until
+     * it is edited: backspacing over the last character must leave it empty, not bring the stored one back.
+     */
+    fun typed(key: String): String? = drafts[key]
+
+    /** Keeps [value] as typed, an empty one too (see [typed]). */
+    fun type(key: String, value: String) {
+        drafts[key] = value
+    }
+
     /** A form that saved or was cancelled drops its drafts: every key that starts with [prefix]. */
     fun clear(prefix: String) {
         drafts.keys.filter { it.startsWith(prefix) }.forEach(drafts::remove)

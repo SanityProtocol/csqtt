@@ -223,8 +223,7 @@ class TunnelService : Service() {
                             else -> requestedVkAuthMode
                         }
                         val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
-                        val extraWorkers = !accountAutoJs && store.extraWorkers.first()
-                        val maxWorkers = WorkerCountPolicy.defaultMaximum(extraWorkers)
+                        val maxWorkers = WorkerCountPolicy.maximum(accountAutoJs)
                         val workersPerHash = WorkerCountPolicy.normalize(requestedWorkers, maximum = maxWorkers)
                         if (accountAutoJs) {
                             store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_AUTO_JS)
@@ -508,9 +507,7 @@ class TunnelService : Service() {
                 val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
                 val workersPerHash = WorkerCountPolicy.normalize(
                     store.workersPerHash.first(),
-                    maximum = WorkerCountPolicy.defaultMaximum(
-                        extraWorkers = !accountAutoJs && store.extraWorkers.first(),
-                    ),
+                    maximum = WorkerCountPolicy.maximum(accountAutoJs),
                 )
                 awaitVkNetwork()
                 if (!isCurrentStart(requestGeneration)) return@launch
@@ -731,9 +728,7 @@ class TunnelService : Service() {
                     (source.tokenFromLink && vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS)
                 val workers = WorkerCountPolicy.normalize(
                     store.workersPerHash.first(),
-                    maximum = WorkerCountPolicy.defaultMaximum(
-                        extraWorkers = !accountAutoJs && store.extraWorkers.first(),
-                    ),
+                    maximum = WorkerCountPolicy.maximum(accountAutoJs),
                 )
                 val resolution = when {
                     accountAutoJs -> resolveAutoHashes(

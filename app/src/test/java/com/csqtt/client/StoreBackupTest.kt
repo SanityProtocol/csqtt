@@ -89,6 +89,29 @@ class StoreBackupTest {
     }
 
     @Test
+    fun `a file from before the store's step 9 restores a count of streams as it ran`() {
+        // P3 B3: «Экстра потоки» went with the limit of 70 it lifted, and the numbered steps do not run on a restore
+        val source = phone()
+        source[intPreferencesKey("workers_per_hash_3")] = 100
+        source[intPreferencesKey("workers_per_hash_5")] = 90
+        val file = JSONObject(StoreBackup.encode(source, serverSecrets = false, decrypt = decrypt, exportedAt = 1L))
+        assertEquals(SettingsStore.STORE_SCHEMA, file.getInt("store_schema"))
+        // this build's own file: the counts are the user's own
+        val same = otherPhone().also { StoreBackup.restore(it, file.toString(), encrypt, decrypt) }
+        assertEquals(100, same[intPreferencesKey("workers_per_hash_3")])
+        assertEquals(90, same[intPreferencesKey("workers_per_hash_5")])
+
+        // an older build's file names no schema, and the switch where it was ever touched
+        file.remove("store_schema")
+        val profiles = file.getJSONArray("profiles")
+        for (i in 0 until profiles.length()) profiles.getJSONObject(i).let { if (it.getInt("index") == 5) it.put("extra_workers", true) }
+        val old = otherPhone().also { StoreBackup.restore(it, file.toString(), encrypt, decrypt) }
+        assertEquals("the switch never touched: the count ran as 70", 70, old[intPreferencesKey("workers_per_hash_3")])
+        assertEquals("the switch on: the count ran as stored", 90, old[intPreferencesKey("workers_per_hash_5")])
+        assertNull("the switch itself is not restored", asMap(old)["extra_workers_5"])
+    }
+
+    @Test
     fun `a backup without server secrets carries no keystore secret, ciphertext or VK token`() {
         val json = StoreBackup.encode(phone(), serverSecrets = false, decrypt = decrypt, exportedAt = 1L)
         for (secret in listOf("ssh-pass", "KEY", "web-pass", "vk-token", "enc:")) assertFalse(secret, secret in json)

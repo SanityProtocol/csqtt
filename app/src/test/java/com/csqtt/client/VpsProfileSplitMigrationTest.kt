@@ -23,9 +23,9 @@ class VpsProfileSplitMigrationTest {
         val prefs = atVersion1(Store253Snapshots.owner)
         val before = asMap(prefs)
         SettingsStore.migrateStore(prefs)
-        // the battery saver's two keys: step 8 (P3 B0s) takes them out of a 2.5.3 store
+        // the battery saver's two keys: step 8 (P3 B0s) takes them out of a 2.5.3 store; «Экстра потоки»: step 9 (P3 B3)
         assertEquals(
-            setOf("vps_ref", "store_schema_version", "battery_saver_mode", "battery_saver_percent"),
+            setOf("vps_ref", "store_schema_version", "battery_saver_mode", "battery_saver_percent", "extra_workers"),
             changedKeys(before, asMap(prefs)),
         )
         assertEquals(0, SettingsStore.linkedVps(prefs, 0))

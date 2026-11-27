@@ -94,6 +94,8 @@ internal object StoreBackup {
             .put("format", FORMAT)
             .put("version", VERSION)
             .put("exported_at", exportedAt)
+            // what the store's numbered steps had made of it: a restore gives an older file what it lacks
+            .put("store_schema", SettingsStore.STORE_SCHEMA)
             .put("server_secrets", serverSecrets)
             .put("profiles", profiles)
             .put("vps", records)
@@ -166,9 +168,18 @@ internal object StoreBackup {
             }
             putTyped(prefs, key, kind, settings.get(name))
         }
-        // a backup taken before the store's step 9 can hold one subscription twice: the numbered steps do not run again
-        // on a restore, so the merge does
+        // a backup taken before the store's step 9 holds what such a store held, and the numbered steps do not run again
+        // on a restore, so the step's two rules run here: one subscription kept twice is one (harmless on any file),
+        // and a count of streams is what it ran as while «Экстра потоки» existed (a file of this step names its schema)
         SettingsStore.mergeSubscriptionTwins(prefs)
+        if (root.optInt("store_schema", 0) < 9) {
+            for (i in 0 until profiles.length()) {
+                val entry = profiles.optJSONObject(i) ?: continue
+                val index = (entry.opt("index") as? Int)?.takeIf { it in indices } ?: continue
+                val count = intPreferencesKey(SettingsStore.slotKeyName("workers_per_hash", index))
+                prefs[count]?.let { prefs[count] = SettingsStore.countAsItRan(it, entry.opt("extra_workers") as? Boolean) }
+            }
+        }
         SettingsStore.bumpProfileEpoch(prefs)
         val activeKey = intPreferencesKey("active_profile")
         prefs[activeKey]?.let { if (it !in indices) prefs[activeKey] = CsqttConstants.Profiles.MIN_INDEX }

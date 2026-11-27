@@ -187,6 +187,7 @@ object VkAutoCallsManager {
     /**
      * D6 (a1): fills the owner's pool (B5e3b) to one call per 10 of [workers]. Unlike [startAutoCalls], its calls are not
      * registered here, so a stop does not end them. An invalid token is cleared as there; the live pool still serves.
+     * [extra] calls are made beyond what the pool holds («Пул звонков VK», P3 B3).
      */
     internal suspend fun fillPool(
         context: Context,
@@ -195,8 +196,9 @@ object VkAutoCallsManager {
         dead: String?,
         workers: Int,
         tokenStore: SettingsStore,
+        extra: Int = 0,
     ): VkHashPool.Fill {
-        val target = callCountForWorkers(workers)
+        val target = maxOf(callCountForWorkers(workers), if (extra > 0) VkHashPool.alive(pool, dead).size + extra else 0)
         val requestPacer = VkRequestPacer(
             requestDelayForCallCount(target),
             SystemClock::elapsedRealtime,

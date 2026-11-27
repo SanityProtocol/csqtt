@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionState
 import com.csqtt.client.HomeNotice
+import com.csqtt.client.HomePick
 import com.csqtt.client.R
 import com.csqtt.client.StatusTone
 import com.csqtt.client.Tap
@@ -50,14 +51,20 @@ import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelProbe
 import com.csqtt.client.WifiCopy
 import com.csqtt.client.formatTraffic
+import com.csqtt.client.homePick
 import com.csqtt.client.probeLine
 import com.csqtt.client.showsTraffic
 import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
+import com.csqtt.client.ui.components.IconBtn
 import com.csqtt.client.ui.components.TextBtn
 import com.csqtt.client.ui.design.Csq
+import com.csqtt.client.ui.design.Icons
 import com.csqtt.client.ui.design.Type
 import com.csqtt.client.ui.legacy.rememberWifiNameAccess
+import com.csqtt.client.ui.shell.LocalNav
+import com.csqtt.client.ui.shell.LocalStore
+import com.csqtt.client.ui.shell.Routes
 
 // the classic panel's own sizes, kept as they are (P3-PLAN §1.3a)
 private val Status = Type.body.copy(fontWeight = FontWeight.Bold)
@@ -80,11 +87,9 @@ internal fun HomeOne(view: HomeView) {
     val streams = rememberStreams(state)
 
     Box(Modifier.fillMaxSize().padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
+      Box(Modifier.widthIn(max = 720.dp).verticalScroll(rememberScrollState()).padding(top = 10.dp, bottom = 26.dp)) {
         Column(
             modifier = Modifier
-                .widthIn(max = 720.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(top = 10.dp, bottom = 26.dp)
                 .shadow(if (colors.isDark) 4.dp else 10.dp, CardShape)
                 .clip(CardShape)
                 .background(colors.surface)
@@ -189,6 +194,24 @@ internal fun HomeOne(view: HomeView) {
                 }
             }
         }
+        // in the card's corner and beside the clipped card, not inside it; 8 dp from its edges, as on the canvas
+        CornerPick(Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 6.dp))
+      }
+    }
+}
+
+/**
+ * The way to another connection (the operator, 2026-11-27): this layout has no list, so one bare icon in the card's
+ * corner, as the header's are, opens «Профили» — or, with a single connection, «Добавить профиль». Never the
+ * connection's name: it can be long. Nothing is drawn until the store has said how many connections there are.
+ */
+@Composable
+private fun CornerPick(modifier: Modifier) {
+    val nav = LocalNav.current
+    val entries by LocalStore.current.profileEntries.collectAsStateWithLifecycle(initialValue = null)
+    when (homePick(entries ?: return)) {
+        HomePick.Switch -> IconBtn(Icons.switch, stringResource(R.string.home_pick_switch), { nav.open(Routes.profiles()) }, modifier)
+        HomePick.Add -> IconBtn(Icons.plus, stringResource(R.string.home_pick_add), { nav.open(Routes.addProfile()) }, modifier)
     }
 }
 

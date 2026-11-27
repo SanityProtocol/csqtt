@@ -5,11 +5,11 @@ package com.csqtt.client
  * TURN stream go out in pieces. Ported from Gooby's presets (gentle, current, extended); see the core's
  * dpi_split.rs.
  */
-enum class DpiSplitMode(val storedValue: String, val label: String) {
-    OFF("off", "Выкл"),
-    LIGHT("light", "Лёгкая"),
-    MEDIUM("medium", "Средняя"),
-    HEAVY("heavy", "Тяжёлая");
+enum class DpiSplitMode(val storedValue: String) {
+    OFF("off"),
+    LIGHT("light"),
+    MEDIUM("medium"),
+    HEAVY("heavy");
 
     /** Core arguments: only when on and the transport is TCP, since UDP has no stream to split. */
     fun arguments(turnTransport: String): List<String> =

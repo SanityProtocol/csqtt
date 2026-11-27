@@ -1,6 +1,7 @@
 package com.csqtt.client
 
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.csqtt.client.Store253Snapshots.asMap
@@ -38,6 +39,33 @@ class ImportKeepsParticipantTest {
         assertEquals("https://sub.example/s", prefs[s("subscription_url", 3)])
         assertEquals("Node", prefs[s("profile_name", 3)])
         assertEquals(ownerHashes, parseCsqttLink(prefs[s("csqtt_link", 3)]!!)!!.hashes)
+    }
+
+    @Test
+    fun `a new node starts within what is recommended for its link's hashes, and keeps its count after that`() {
+        // P3 B3: nothing holds a count at 70 any more, and a subscription's power may be 100
+        fun link(hashes: Int) = "csqtt://connect?v=2&host=203.0.113.50&peer=46100&password=pw" +
+            if (hashes == 0) "" else "&hashes=" + (0 until hashes).joinToString("+") { ('A' + it).toString().repeat(20) }
+        fun node(hashes: Int, power: Int) = SubscriptionProfileWrite(
+            profile = 3, link = link(hashes), power = power, nodeName = "Node", title = "Sub", url = "https://sub.example/s", subUuid = "u1",
+        )
+        val count = intPreferencesKey(SettingsStore.slotKeyName("workers_per_hash", 3))
+        fun started(hashes: Int, power: Int): Int? = mutablePreferencesOf().also { SettingsStore.writeSubscriptionNode(it, node(hashes, power)) }[count]
+        assertEquals(30, started(hashes = 1, power = 100))
+        assertEquals(60, started(hashes = 2, power = 100))
+        assertEquals(90, started(hashes = 3, power = 100))
+        assertEquals(100, started(hashes = 4, power = 100))
+        assertEquals("a power below it is the count", 20, started(hashes = 1, power = 20))
+        assertEquals("a link that brings no hashes says nothing of them", 100, started(hashes = 0, power = 100))
+
+        // refreshed in its slot, a node keeps the count the user set, within its power
+        val prefs = mutablePreferencesOf()
+        SettingsStore.writeSubscriptionNode(prefs, node(hashes = 1, power = 100))
+        prefs[count] = 80
+        SettingsStore.writeSubscriptionNode(prefs, node(hashes = 1, power = 100))
+        assertEquals(80, prefs[count])
+        SettingsStore.writeSubscriptionNode(prefs, node(hashes = 1, power = 50))
+        assertEquals(50, prefs[count])
     }
 
     @Test

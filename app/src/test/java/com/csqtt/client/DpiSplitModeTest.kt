@@ -19,6 +19,7 @@ class DpiSplitModeTest {
         assertEquals(DpiSplitMode.OFF, DpiSplitMode.fromStored(null))
         assertEquals(DpiSplitMode.OFF, DpiSplitMode.fromStored("current"))
         assertEquals(DpiSplitMode.HEAVY, DpiSplitMode.fromStored("heavy"))
-        assertEquals(listOf("Выкл", "Лёгкая", "Средняя", "Тяжёлая"), DpiSplitMode.entries.map { it.label })
+        // the order the screen offers them in: off first, then by weight (their names are the screen's, in resources)
+        assertEquals(listOf("off", "light", "medium", "heavy"), DpiSplitMode.entries.map { it.storedValue })
     }
 }

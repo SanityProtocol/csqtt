@@ -19,8 +19,6 @@ internal object VkTokenPolicy {
 
     const val EXPIRING_REFUSED =
         "VK выдал временный токен — он перестал бы работать через сутки. Войдите ещё раз позже или используйте свои хеши звонков"
-
-    const val CHANGE_WHILE_RUNNING = "Остановите туннель перед сменой аккаунта"
 }
 
 /** A token pasted by hand: a `vk1.a.…` token, or the whole `…blank.html#access_token=…` address the sign-in ends on. */

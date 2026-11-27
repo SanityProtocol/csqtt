@@ -111,6 +111,12 @@ internal data class DeploySettingsSnapshot(
         get() = profile >= 0
 }
 
+/**
+ * The owner's pool of calls as «Пул звонков VK» shows it (D6; P3 B3): the server's record it belongs to, the calls'
+ * hashes, the ones its panel last took, and how the last hand-over went.
+ */
+internal data class VkPoolState(val vps: Int, val pool: List<String>, val sent: List<String>, val handOver: HandOverResult?)
+
 internal data class TunnelAuthSnapshot(
     val profile: Int = -1,
     val connectionPassword: String = "",
@@ -129,7 +135,6 @@ internal data class ProfileConnectionSnapshot(
     val connectionPassword: String = "",
     val connectionPasswordState: StoredSecretState = StoredSecretState.Missing,
     val workersPerHash: Int = CsqttConstants.Tunnel.DEFAULT_WORKERS,
-    val extraWorkers: Boolean = false,
     val csqttLink: String = "",
     val csqttLinkMode: Boolean = false,
     val subscriptionUrl: String = "",
@@ -435,7 +440,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
         private val IS_WHITELIST = profileBoolean("is_whitelist")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
-        private val EXTRA_WORKERS = profileBoolean("extra_workers")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
         private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
@@ -678,6 +682,17 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 // 2.6.0, P3 B3: a subscription kept under two spellings of its link is one (2.5.3's «Скачивать по HTTP»
                 // kept a link as http:// beside its https:// record)
                 step { mergeSubscriptionTwins(prefs) }
+                // «Экстра потоки» goes, and with it the limit of 70 it lifted: what is recommended is said per hash on
+                // the slider. A profile runs what it ran ([countAsItRan]); a backup and a settings file written before
+                // this step get the same on their way in (StoreBackup.restore, importConfigJson)
+                for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
+                    val extra = booleanPreferencesKey(slotKeyName("extra_workers", profile))
+                    step {
+                        val count = getProfileKey(WORKERS_PER_HASH, profile)
+                        prefs[count]?.let { stored -> prefs[count] = countAsItRan(stored, prefs[extra]) }
+                    }
+                    prefs.remove(extra)
+                }
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
         }
@@ -961,8 +976,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
         /** A slot's profile was replaced: saved form state of the old one must not reach it (see PROFILE_EPOCH). */
         internal fun bumpProfileEpoch(prefs: MutablePreferences) {
-            prefs[PROFILE_EPOCH] = (prefs[PROFILE_EPOCH] ?: 0) + 1
+            prefs[PROFILE_EPOCH] = epochOf(prefs) + 1
         }
+
+        internal fun epochOf(prefs: Preferences): Int = prefs[PROFILE_EPOCH] ?: 0
 
         /**
          * Deletes [profile]: every connection key, its VPS link with them; the VPS record stays (M-41). The active profile
@@ -1028,7 +1045,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             val storedWorkers = prefs[getProfileKey(WORKERS_PER_HASH, profile)]
             val targetWorkers = when {
                 power == null -> storedWorkers ?: 10
-                storedWorkers == null -> power
+                // a new node starts within what is recommended for the hashes its link brings (P3 B3: nothing holds a
+                // count at 70 any more); above it is the user's own choice, asked about on the slider
+                storedWorkers == null -> {
+                    val hashes = StreamsPlan.hashes(autoVk = false, autoApi = false, manual = parseCsqttLink(write.link)?.hashes.orEmpty().size)
+                    if (hashes == null) power else power.coerceAtMost(StreamsPlan.recommended(hashes, CsqttConstants.Tunnel.MAX_WORKERS))
+                }
                 else -> storedWorkers.coerceAtMost(power)
             }
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(
@@ -1229,6 +1251,38 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
 
         private const val RECEIVED_HASHES_STAMP_EVERY_MS = 10 * 60_000L
+
+        /** What a count of streams ran as until «Экстра потоки» was on (2.5.3 and the builds before P3 B3): step 9. */
+        private const val LIMIT_WITHOUT_EXTRA = 70
+
+        /**
+         * A count of streams stored while «Экстра потоки» existed, as it ran: with the switch off, or never touched
+         * ([extra] null), a count above 70 ran as 70 — a subscription's node starts at its power, which may be 100 —
+         * so 70 is what the profile holds once nothing caps a count any more; with the switch on, the count itself.
+         */
+        internal fun countAsItRan(count: Int, extra: Boolean?): Int =
+            if (extra == true) count else count.coerceAtMost(LIMIT_WITHOUT_EXTRA)
+
+        /**
+         * Whether a write of the «Туннель» form — the server's ([linkForm] false) or the link's, drawn for [profile]
+         * under [epoch] — still has that profile to land in. It must be of the form's kind still: a link imported into
+         * it since made it a link's profile. And it must be there: in use, or the open one that holds nothing yet, which
+         * is the form's own only while no profile was deleted or added since ([epoch]) — the last profile's deletion
+         * leaves its emptied slot open.
+         */
+        internal fun formWriteStands(prefs: Preferences, profile: Int, linkForm: Boolean, epoch: Int): Boolean {
+            if ((prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false) != linkForm) return false
+            val open = profile == (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)
+            return profileInUse(prefs, profile) || (open && epochOf(prefs) == epoch)
+        }
+
+        /** [profile]'s connection password in the one place it is kept (M-99); a blank one removes it. */
+        internal fun putConnectionPassword(prefs: MutablePreferences, profile: Int, password: String) {
+            val local = getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)
+            if (password.isBlank()) prefs.remove(local) else prefs[local] = password
+            prefs.remove(getProfileKey(CONNECTION_PASSWORD, profile))
+            prefs.remove(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile))
+        }
 
         private fun dropReceivedHashes(prefs: MutablePreferences, profile: Int) {
             prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
@@ -1740,15 +1794,18 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         val profile = selectedProfile(prefs)
         prefs[getProfileKey(SECONDARY_VK_HASH, profile)] ?: ""
     }
-    /** The most workers the active profile may use: «Экстра потоки» lifts 70 to 100, a subscription can lower it. */
+    /**
+     * The most workers the selected profile may use: what the core takes, in «Авто ВК» that mode's own limit; a
+     * subscription can lower it. «Экстра потоки», which lifted 70 to 100, is gone (P3 B3): what is recommended is a
+     * count per hash, which the slider marks and warns of, and caps nothing.
+     */
     private fun workersMaximum(prefs: Preferences): Int {
         val profile = selectedProfile(prefs)
-        val isExtra = prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false
-        val defaultMax = WorkerCountPolicy.defaultMaximum(isExtra)
+        val maximum = WorkerCountPolicy.maximum(prefs[getProfileKey(VK_AUTH_MODE, profile)] == CsqttConstants.VkAuth.MODE_AUTO_JS)
         return prefs[getProfileKey(SUBSCRIPTION_POWER, profile)]
             ?.takeIf { it in 10..100 }
-            ?.coerceAtMost(defaultMax)
-            ?: defaultMax
+            ?.coerceAtMost(maximum)
+            ?: maximum
     }
     val workersMaximum: Flow<Int> = dataStore.data.map { prefs -> workersMaximum(prefs) }
     val workersPerHash: Flow<Int> = dataStore.data.map { prefs ->
@@ -2156,7 +2213,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 workersPerHash = WorkerCountPolicy.normalize(
                     prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS,
                 ),
-                extraWorkers = prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false,
                 csqttLink = prefs[getProfileKey(CSQTT_LINK, profile)] ?: "",
                 csqttLinkMode = prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false,
                 subscriptionUrl = prefs[getProfileKey(SUBSCRIPTION_URL, profile)] ?: "",
@@ -2408,6 +2464,17 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
     internal suspend fun vkPool(vps: Int): List<String> = vkPoolOf(dataStore.data.first(), vps)
 
+    /** The selected profile's pool, for its sheet; null when its run uses none (poolPanelOf). */
+    internal val vkPoolState: Flow<VkPoolState?> = dataStore.data.map { prefs ->
+        val panel = poolPanelOf(prefs, selectedProfile(prefs)) { vps ->
+            readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, vps)
+        } ?: return@map null
+        VkPoolState(
+            vps = panel.vps, pool = vkPoolOf(prefs, panel.vps), sent = handOverStateOf(prefs, panel.vps).first,
+            handOver = HandOverResult.decode(prefs[getProfileKey(DEPLOY_VK_POOL_HANDOVER, panel.vps)]),
+        )
+    }.onIo()
+
     internal suspend fun saveVkPool(vps: Int, pool: List<String>) {
         dataStore.edit { prefs -> writeVkPool(prefs, vps, pool) }
     }
@@ -2485,9 +2552,41 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs -> removeVkAccountKeys(prefs, selectedProfile(prefs), userId) }
     }
 
-    /** The server's address of the selected profile, as the Tunnel tab's field writes it: this key and no other. */
-    suspend fun savePeer(peer: String) {
-        dataStore.edit { prefs -> prefs[getProfileKey(PEER, selectedProfile(prefs))] = peer }
+    /**
+     * A write of the «Туннель» form (P3 B3): one field's keys and no others. A field is stored when it is left, and it
+     * is left too when its profile is deleted or becomes another kind under it — from «Профили» over the tab, with the
+     * field still in focus — so its write can land after that. It is dropped then ([formWriteStands]): it would bring
+     * the deleted profile back with one field in it, or put a server's address into a link's profile. [epoch] is the
+     * one the form was drawn under (see PROFILE_EPOCH).
+     */
+    private suspend fun editForm(linkForm: Boolean, epoch: Int, write: MutablePreferences.(profile: Int) -> Unit) {
+        dataStore.edit { prefs ->
+            val profile = selectedProfile(prefs)
+            if (formWriteStands(prefs, profile, linkForm, epoch)) prefs.write(profile)
+        }
+    }
+
+    /** The form's address — and its port, when the two were typed as one («203.0.113.5:46000»). */
+    suspend fun saveFormAddress(peer: String, port: Int?, epoch: Int) = editForm(linkForm = false, epoch) { profile ->
+        this[getProfileKey(PEER, profile)] = peer
+        if (port != null && port in 1..65535) this[getProfileKey(SERVER_PEER_PORT, profile)] = port
+    }
+
+    suspend fun saveFormPort(port: Int, epoch: Int) = editForm(linkForm = false, epoch) { profile ->
+        if (port in 1..65535) this[getProfileKey(SERVER_PEER_PORT, profile)] = port
+    }
+
+    /** The form's password: one the server can take, or nothing is written (M-99); a field never erases a stored one. */
+    suspend fun saveFormPassword(password: String, epoch: Int) = editForm(linkForm = false, epoch) { profile ->
+        if (isValidTunnelPassword(password)) putConnectionPassword(this, profile, password)
+    }
+
+    /**
+     * The form's link, whole or emptied (M-72): through the one import path (M-70), so a new link starts with all its
+     * hashes and leaves any subscription.
+     */
+    internal suspend fun saveFormLink(link: String, epoch: Int) = editForm(linkForm = true, epoch) { profile ->
+        if (link.isEmpty()) writeLinkKeys(this, profile, "") else importLinkKeys(this, link, target = profile)
     }
 
     /** S8: true when [profile]'s stored set changed (written only for a link profile). */
@@ -2513,10 +2612,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
-    val extraWorkers: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = selectedProfile(prefs)
-        prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false
-    }
     val autoJsRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_JS_RISK_ACKNOWLEDGED] ?: false
     }
@@ -2675,13 +2770,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
-    suspend fun saveVkHashCheckResults(resultsJson: String) {
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            prefs[getProfileKey(VK_HASH_CHECK_RESULTS, profile)] = resultsJson
-        }
-    }
-
     /** B5h2 (U2): a finished check's results, merged into what this store's profile holds when it ends. */
     internal suspend fun mergeVkHashCheckResults(checked: Map<String, VkHashValidationStatus>) {
         if (checked.isEmpty()) return
@@ -2829,13 +2917,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
-    suspend fun saveCsqttLink(link: String) {
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            writeLinkKeys(prefs, profile, link)
-        }
-    }
-
     suspend fun saveCsqttLinkMode(enabled: Boolean) {
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
@@ -2873,15 +2954,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(workersPerHash, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
-        }
-    }
-
-    suspend fun saveParticipantTunnelSettings(vkHashes: String, workersPerHash: Int) {
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            prefs[getProfileKey(VK_HASHES, profile)] = vkHashes
-            prefs[getProfileKey(WORKERS_PER_HASH, profile)] =
-                WorkerCountPolicy.normalize(workersPerHash, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
         }
     }
 
@@ -2983,14 +3055,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         this[getProfileKey(DEPLOY_SSH_PORT, vps)] = sshPortStr
     }
 
-    suspend fun saveServerPeerPort(peer: Int) {
-        if (peer !in 1..65535) return
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            prefs[getProfileKey(SERVER_PEER_PORT, profile)] = peer
-        }
-    }
-
     suspend fun saveDeploy(ip: String) = editVps { vps ->
         val previous = this[getProfileKey(DEPLOY_IP, vps)]
         this[getProfileKey(DEPLOY_IP, vps)] = ip
@@ -3035,19 +3099,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     suspend fun saveConnectionPassword(password: String, forProfile: Int? = null) {
         // one rule for every field (M-99): a password GETCONF cannot carry is never stored
         if (password.isNotBlank() && !isValidTunnelPassword(password)) return
-        dataStore.edit { prefs ->
-            val profile = forProfile ?: prefs[ACTIVE_PROFILE] ?: 0
-            val localKey = getProfileKey(CONNECTION_PASSWORD_LOCAL, profile)
-            val legacyKey = getProfileKey(CONNECTION_PASSWORD, profile)
-            val encryptedKey = getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile)
-            if (password.isBlank()) {
-                prefs.remove(localKey)
-            } else {
-                prefs[localKey] = password
-            }
-            prefs.remove(legacyKey)
-            prefs.remove(encryptedKey)
-        }
+        dataStore.edit { prefs -> putConnectionPassword(prefs, forProfile ?: prefs[ACTIVE_PROFILE] ?: 0, password) }
     }
 
     suspend fun resetUnreadableConnectionPassword(): Boolean {
@@ -3160,39 +3212,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             prefs[getProfileKey(CUSTOM_TURN_IPS, profile)] = ips
             if (ipLimit != null) {
                 prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] = ipLimit
-            }
-        }
-    }
-
-    suspend fun saveTurnSubnetIpLimit(limit: String) {
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            val subnetId = prefs[getProfileKey(SELECTED_TURN_SUBNET, profile)] ?: ""
-            val allIps = if (subnetId.isNotBlank()) TurnSubnetRegistry.getIpsForSubnet(subnetId) else emptyList()
-            val limitCount = limit.toIntOrNull()
-            val ips = if (allIps.isEmpty()) {
-                ""
-            } else if (limitCount != null && limitCount > 0) {
-                allIps.take(limitCount).joinToString(",")
-            } else {
-                allIps.joinToString(",")
-            }
-            prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] = limit
-            prefs[getProfileKey(CUSTOM_TURN_IPS, profile)] = ips
-        }
-    }
-
-    suspend fun saveExtraWorkers(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            prefs[getProfileKey(EXTRA_WORKERS, profile)] = enabled
-            if (!enabled) {
-                val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS
-                val maximum = WorkerCountPolicy.defaultMaximum(extraWorkers = false)
-                if (current > maximum) {
-                    prefs[getProfileKey(WORKERS_PER_HASH, profile)] =
-                        WorkerCountPolicy.normalize(current, maximum = maximum)
-                }
             }
         }
     }
@@ -3692,7 +3711,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             // the VK access token is a VK account credential: it stays on this device (an export goes to the clipboard
             // and Downloads). Exports before 2.5.2 carried it blank in practice; the import below leaves a stored one alone.
             deploy.put("workers_per_hash", prefs[getProfileKey(WORKERS_PER_HASH, p)] ?: CsqttConstants.Tunnel.DEFAULT_WORKERS)
-            deploy.put("extra_workers", prefs[getProfileKey(EXTRA_WORKERS, p)] ?: false)
             deploy.put("csqtt_link", prefs[getProfileKey(CSQTT_LINK, p)] ?: "")
             deploy.put("csqtt_link_mode", prefs[getProfileKey(CSQTT_LINK_MODE, p)] ?: false)
             deploy.put("secret_path_enabled", record(DEPLOY_SECRET_PATH_ENABLED) ?: false)
@@ -3816,8 +3834,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     deploy.optString("vk_access_token").takeIf { it.isNotBlank() }?.let {
                         mutable.putSecret(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, it, p)
                     }
-                    if (deploy.has("workers_per_hash")) mutable[getProfileKey(WORKERS_PER_HASH, p)] = deploy.getInt("workers_per_hash")
-                    if (deploy.has("extra_workers")) mutable[getProfileKey(EXTRA_WORKERS, p)] = deploy.getBoolean("extra_workers")
+                    if (deploy.has("workers_per_hash")) {
+                        val count = deploy.getInt("workers_per_hash")
+                        // a file written before «Экстра потоки» went names the switch: its count is what it ran as
+                        mutable[getProfileKey(WORKERS_PER_HASH, p)] =
+                            if (deploy.has("extra_workers")) countAsItRan(count, deploy.optBoolean("extra_workers")) else count
+                    }
                     if (deploy.has("csqtt_link")) writeLinkKeys(mutable, p, deploy.getString("csqtt_link"))
                     if (deploy.has("csqtt_link_mode")) mutable[getProfileKey(CSQTT_LINK_MODE, p)] = deploy.getBoolean("csqtt_link_mode")
                 }

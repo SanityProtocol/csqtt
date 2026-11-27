@@ -33,11 +33,11 @@ import com.csqtt.client.ui.legacy.DeployTab
 import com.csqtt.client.ui.legacy.ExceptionsTab
 import com.csqtt.client.ui.legacy.FloatingToolbar
 import com.csqtt.client.ui.legacy.LogsTab
-import com.csqtt.client.ui.legacy.SettingsTab
 import com.csqtt.client.ui.legacy.design.CsqttDarkExtendedColors
 import com.csqtt.client.ui.legacy.design.CsqttLightExtendedColors
 import com.csqtt.client.ui.legacy.design.CsqttMaterialShapes
 import com.csqtt.client.ui.legacy.design.LocalCsqttExtendedColors
+import com.csqtt.client.ui.tunnel.TunnelTab
 import kotlinx.coroutines.launch
 
 /*
@@ -61,53 +61,52 @@ internal fun LegacyFrame(content: @Composable () -> Unit) {
     }
 }
 
-/** A tab's classic screen. A form's saved state is keyed on its profile, so one profile's draft never reaches another. */
+/** A tab's screen: the new design's where its card is done, else classic's in its frame. */
 @Composable
-internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout, onVkAuthRequested: () -> Unit) {
+internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
     val store = LocalStore.current
     val nav = LocalNav.current
     val forms = rememberSaveableStateHolder()
     val auth by store.tunnelAuthSnapshot.collectAsStateWithLifecycle(initialValue = TunnelAuthSnapshot())
     // the epoch changes when a slot's profile is replaced (delete, add, restore): the old profile's edited form must not
-    // come back, and autosave, into the new one
+    // come back, and be stored, into the new one
     val epoch by store.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
+    // a start refused for a profile's settings opens «Туннель» on what that profile lacks: the count of them, and
+    // whose the last one was — another profile's form is not full of errors for it
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
+    var tunnelValidationProfile by rememberSaveable { mutableIntStateOf(-1) }
+    // «Дополнительно» of «Туннель» stays open from one profile to the next: it is how the screen is read, not a profile's
+    var tunnelMoreOpen by rememberSaveable { mutableStateOf(false) }
 
-    if (tab == Tab.Home) {
-        // «Главная» is the new design's (B1): outside classic's frame, with the system's font scale
-        if (auth.isLoaded) {
+    // «Главная» and «Туннель» are the new design's (B1, B3): outside classic's frame, with the system's font scale
+    if (tab == Tab.Home || tab == Tab.Tunnel) {
+        when {
+            !auth.isLoaded -> Spacer(Modifier.fillMaxSize())
             // one Home for every profile: a pick in its list changes what it shows, it does not make the screen again
-            forms.SaveableStateProvider("home") {
+            tab == Tab.Home -> forms.SaveableStateProvider("home") {
                 HomeTab(
                     auth = auth,
                     layout = homeLayout,
                     onInvalidConfiguration = {
                         nav.select(Tab.Tunnel)
+                        tunnelValidationProfile = auth.profile
                         tunnelValidationRequest += 1
                     },
-                    onVkAuthRequested = onVkAuthRequested,
                 )
             }
-        } else {
-            Spacer(Modifier.fillMaxSize())
+            // a form's saved state is its profile's: one profile's draft never reaches another
+            else -> forms.SaveableStateProvider("tunnel:${auth.profile}:$epoch") {
+                TunnelTab(
+                    auth, epoch, validationRequest = if (tunnelValidationProfile == auth.profile) tunnelValidationRequest else 0,
+                    moreOpen = tunnelMoreOpen, onMoreOpen = { tunnelMoreOpen = it },
+                )
+            }
         }
         return
     }
     LegacyFrame {
         when (tab) {
-            Tab.Home -> Unit
-            Tab.Tunnel -> if (auth.isLoaded) {
-                forms.SaveableStateProvider("tunnel:${auth.profile}:$epoch") {
-                    SettingsTab(
-                        settingsStore = store,
-                        tunnelAuthSettings = auth,
-                        validationRequest = tunnelValidationRequest,
-                        onVkAuthRequested = onVkAuthRequested,
-                    )
-                }
-            } else {
-                Spacer(Modifier.fillMaxSize())
-            }
+            Tab.Home, Tab.Tunnel -> Unit
             Tab.Server -> {
                 val deploy by store.deploySettingsSnapshot.collectAsStateWithLifecycle(initialValue = DeploySettingsSnapshot())
                 forms.SaveableStateProvider("deploy:${deploy.profile}:${deploy.epoch}") { DeployTab(store, deploy) }
@@ -166,25 +165,19 @@ internal fun LegacyHeaderActions(themeMode: String, onOpenServer: (() -> Unit)?)
     val nav = LocalNav.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val auth by store.tunnelAuthSnapshot.collectAsStateWithLifecycle(initialValue = TunnelAuthSnapshot())
     val activeProfile by store.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
-    val fingerprint by store.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
     val autoPauseOnWifi by store.autoPauseOnWifi.collectAsStateWithLifecycle(initialValue = false)
     LegacyFrame {
         FloatingToolbar(
             settingsStore = store,
-            csqttLinkMode = auth.csqttLinkMode,
             activeProfile = activeProfile,
             onActiveProfileChange = { profile -> scope.launch { pickProfile(context, store, profile, activeProfile) } },
             currentTheme = themeMode,
             onThemeChange = { mode -> scope.launch { store.saveThemeMode(mode) } },
-            activeFingerprint = fingerprint,
-            onFingerprintChange = { value -> scope.launch { store.saveFingerprint(value) } },
             autoPauseOnWifi = autoPauseOnWifi,
             onAutoPauseOnWifiChange = { enabled -> scope.launch { store.saveAutoPauseOnWifi(enabled) } },
             onOpenServer = onOpenServer,
             onAddProfile = { nav.open(Routes.addProfile()) },
-            onAllProfiles = { nav.open(Routes.profiles()) },
         )
     }
 }

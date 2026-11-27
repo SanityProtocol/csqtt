@@ -23,9 +23,10 @@ class StoreMigrationsTest {
     fun `an owner keeps its role, port and secrets, while the design key goes and 18 workers become 10`() {
         val (before, after) = migrate(Store253Snapshots.owner)
         assertEquals(
-            // vps_ref: step 2 (B5b2) links its deploy data as record 0; the battery saver's two: step 8 (P3 B0s)
+            // vps_ref: step 2 (B5b2) links its deploy data as record 0; the battery saver's two: step 8 (P3 B0s);
+            // «Экстра потоки»: step 9 (P3 B3)
             setOf("ui_design", "workers_per_hash", "vk_hash_mode", "store_schema_version", "vps_ref",
-                "battery_saver_mode", "battery_saver_percent"),
+                "battery_saver_mode", "battery_saver_percent", "extra_workers"),
             changedKeys(before, after),
         )
         assertNull(after["ui_design"])
@@ -124,10 +125,16 @@ class StoreMigrationsTest {
 
     @Test
     fun `workers become what the core runs`() {
-        for ((stored, runs) in listOf(0 to 10, 5 to 10, 18 to 10, 20 to 20, 75 to 70, 100 to 100, 250 to 100)) {
+        // above 70 only «Экстра потоки» ran: with the switch off, or never touched, such a count ran as 70 (P3 B3, step 9)
+        for ((stored, runs) in listOf(0 to 10, 5 to 10, 18 to 10, 20 to 20, 70 to 70, 75 to 70, 100 to 70, 250 to 70)) {
             val prefs = load("""{"ints": {"workers_per_hash_9": $stored}, "booleans": {"default_role_decided": true}}""")
             SettingsStore.migrateStore(prefs)
             assertEquals("stored $stored", runs, prefs[intPreferencesKey("workers_per_hash_9")])
+        }
+        for ((stored, runs) in listOf(75 to 70, 100 to 100, 250 to 100)) {
+            val prefs = load("""{"ints": {"workers_per_hash_9": $stored}, "booleans": {"default_role_decided": true, "extra_workers_9": true}}""")
+            SettingsStore.migrateStore(prefs)
+            assertEquals("stored $stored with the switch on", runs, prefs[intPreferencesKey("workers_per_hash_9")])
         }
     }
 

@@ -16,6 +16,13 @@ import com.csqtt.client.ui.profiles.SubCertChangedDialog
 import com.csqtt.client.ui.profiles.SubDeleteDialog
 import com.csqtt.client.ui.profiles.SubEditSheet
 import com.csqtt.client.ui.profiles.SubImportSheet
+import com.csqtt.client.ui.tunnel.HashesSheet
+import com.csqtt.client.ui.tunnel.InfoDialog
+import com.csqtt.client.ui.tunnel.RiskDialog
+import com.csqtt.client.ui.tunnel.TurnSubnetsSheet
+import com.csqtt.client.ui.tunnel.VkAccountsSheet
+import com.csqtt.client.ui.tunnel.VkPoolSheet
+import com.csqtt.client.ui.tunnel.VkSignInDialog
 import java.util.UUID
 
 /** What the screens are given at the root, composed once: where the user is, the store, and what outlives the screens. */
@@ -38,6 +45,13 @@ internal object Routes {
     const val SUB_EDIT = "sub-edit"
     const val SUB_DELETE = "sub-delete"
     const val SUB_CERT = "sub-cert"
+    const val HASHES = "hashes"
+    const val VK_ACCOUNTS = "vk-accounts"
+    const val VK_SIGN_IN = "vk-sign-in"
+    const val VK_POOL = "vk-pool"
+    const val TURN_SUBNETS = "turn-subnets"
+    const val RISK = "risk"
+    const val INFO = "info"
 
     /** A csqtt:// link waiting for the user's answer (M-70, M-71), by the id [PendingLink] keeps it under. */
     fun linkImport(id: String) = Dest(LINK_IMPORT, Layer.Dialog, id)
@@ -59,6 +73,22 @@ internal object Routes {
     fun subDelete(url: String) = Dest(SUB_DELETE, Layer.Dialog, subscriptionKey(url))
     fun subCert(url: String) = Dest(SUB_CERT, Layer.Dialog, subscriptionKey(url))
 
+    // «Туннель»'s sheets and questions (B3) are a profile's: each carries the profile it was opened for, so that it
+    // reads and writes that one whatever is opened behind it
+    fun hashes(profile: Int) = Dest(HASHES, Layer.Sheet, profile.toString())
+    fun vkAccounts(profile: Int) = Dest(VK_ACCOUNTS, Layer.Sheet, profile.toString())
+
+    /** The sign-in is a window of its own: VK's page needs the height and the keyboard. */
+    fun vkSignIn(profile: Int) = Dest(VK_SIGN_IN, Layer.Dialog, profile.toString())
+    fun vkPool(profile: Int) = Dest(VK_POOL, Layer.Sheet, profile.toString())
+    fun turnSubnets(profile: Int) = Dest(TURN_SUBNETS, Layer.Sheet, profile.toString())
+
+    /** The warning before a mode or a transport is taken: [kind] of RiskKind, and the [value] asked for (U4). */
+    fun risk(profile: Int, kind: String, value: String) = Dest(RISK, Layer.Dialog, "$profile|$kind|$value")
+
+    /** What a setting's choices mean: [topic] of InfoTopic. */
+    fun info(topic: String) = Dest(INFO, Layer.Dialog, topic)
+
     /** What stands for a subscription's URL where the URL itself must not be written. */
     fun subscriptionKey(url: String): String = url.trim().hashCode().toString()
 
@@ -73,6 +103,13 @@ internal object Routes {
         SUB_EDIT to { dest, close -> SubEditSheet(dest.arg, close) },
         SUB_DELETE to { dest, close -> SubDeleteDialog(dest.arg, close) },
         SUB_CERT to { dest, close -> SubCertChangedDialog(dest.arg, close) },
+        HASHES to { dest, close -> HashesSheet(dest.arg, close) },
+        VK_ACCOUNTS to { dest, close -> VkAccountsSheet(dest.arg, close) },
+        VK_SIGN_IN to { dest, close -> VkSignInDialog(dest.arg, close) },
+        VK_POOL to { dest, close -> VkPoolSheet(dest.arg, close) },
+        TURN_SUBNETS to { dest, close -> TurnSubnetsSheet(dest.arg, close) },
+        RISK to { dest, close -> RiskDialog(dest.arg, close) },
+        INFO to { dest, close -> InfoDialog(dest.arg, close) },
     )
 
     /** Set by instrumented tests only: routes of their own beside the app's. */

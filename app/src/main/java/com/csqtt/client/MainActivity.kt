@@ -29,7 +29,6 @@ import com.csqtt.client.ui.design.CsqTheme
 import com.csqtt.client.ui.design.isDarkMode
 import com.csqtt.client.ui.design.systemBars
 import com.csqtt.client.ui.legacy.AppUpdateDialog
-import com.csqtt.client.ui.legacy.dialogs.VkAuthDialog
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import com.csqtt.client.ui.home.HomeLayoutSwitch
 import com.csqtt.client.ui.shell.FirstFrame
@@ -58,7 +57,6 @@ class MainActivity : ComponentActivity() {
     /** Where the user is (§4.2 rule 2): it outlives a recreate, and a process death through its saved state. */
     internal lateinit var nav: NavModel
         private set
-    private var showVkAuthDialog by mutableStateOf(false)
 
     companion object {
         @Volatile
@@ -195,7 +193,7 @@ class MainActivity : ComponentActivity() {
                             if (nav.tab == Tab.Home) HomeLayoutSwitch(homeLayout)
                             LegacyHeaderActions(themeMode, onOpenServer = if (hasServer) null else ({ nav.select(Tab.Server) }))
                         },
-                        tabContent = { tab -> LegacyTab(tab, homeLayout, onVkAuthRequested = ::requestVkAuth) },
+                        tabContent = { tab -> LegacyTab(tab, homeLayout) },
                     )
                     LegacyFrame { LegacyDialogs() }
                     LegacyEffects()
@@ -205,35 +203,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** M-79: no account change while the tunnel runs, starts or stops; the old session's VK cookies go first, so a sign-in can pick another account. */
-    private fun requestVkAuth() {
-        if (vkAccountChangeBlocked()) {
-            showRaisedToast(VkTokenPolicy.CHANGE_WHILE_RUNNING, Toast.LENGTH_SHORT)
-        } else {
-            // the dialog opens once the old session's cookies are gone (review F1)
-            VkAuthWebViewManager.clearVkSessionCookies { showVkAuthDialog = true }
-        }
-    }
-
     /** Classic's dialogs the activity itself asks with, until their cards replace them. */
     @Composable
     private fun LegacyDialogs() {
-        if (showVkAuthDialog) {
-            val onToken: (VkAuthPayload) -> Unit = { payload ->
-                showVkAuthDialog = false
-                lifecycleScope.launch {
-                    // a tunnel started while the sign-in was open keeps its account (M-79)
-                    if (vkAccountChangeBlocked()) {
-                        showRaisedToast(VkTokenPolicy.CHANGE_WHILE_RUNNING, Toast.LENGTH_SHORT)
-                        return@launch
-                    }
-                    // only a permanent token reaches here (M-82 / D30: an expiring one is refused at sign-in)
-                    appSettingsStore.saveVkAccessToken(payload.token, payload.userId, payload.expiresIn)
-                    showRaisedToast("Аккаунт VK подключён", Toast.LENGTH_SHORT)
-                }
-            }
-            VkAuthDialog(onToken = onToken, onDismiss = { showVkAuthDialog = false })
-        }
         // M-91: the offer lives in AppUpdates, so a recreate shows it again until it is answered (lost-prompt audit B6)
         val pendingRelease by AppUpdates.offer.collectAsStateWithLifecycle()
         pendingRelease?.let { release ->
@@ -286,9 +258,6 @@ class MainActivity : ComponentActivity() {
             showRaisedToast(getString(R.string.link_not_opened), Toast.LENGTH_SHORT)
         }
     }
-
-    private fun vkAccountChangeBlocked(): Boolean =
-        TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

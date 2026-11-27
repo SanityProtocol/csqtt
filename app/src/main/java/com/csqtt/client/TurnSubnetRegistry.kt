@@ -57,3 +57,29 @@ object TurnSubnetRegistry {
 
     fun getJoinedIpsForSubnet(id: String?): String = getIpsForSubnet(id).joinToString(",")
 }
+
+/**
+ * How far a TURN subnet is: the answer time of a STUN request to its servers, the first and the last three of them, in
+ * milliseconds; null when none answered. It blocks for up to 300 ms a server: for a background thread.
+ */
+internal fun measureSubnetRtt(ips: List<String>, probe: (String) -> Double? = ::probeStunRtt): Double? {
+    if (ips.isEmpty()) return null
+    val first = ips.take(3).mapNotNull(probe)
+    val last = ips.takeLast(3).mapNotNull(probe)
+    return listOfNotNull(first.takeIf { it.isNotEmpty() }?.average(), last.takeIf { it.isNotEmpty() }?.average())
+        .takeIf { it.isNotEmpty() }?.average()
+}
+
+private fun probeStunRtt(ip: String): Double? = try {
+    java.net.DatagramSocket().use { socket ->
+        socket.soTimeout = 300
+        val request = byteArrayOf(0, 1, 0, 0, 0x21, 0x12, 0xa4.toByte(), 0x42) + ByteArray(12) { (0..255).random().toByte() }
+        val started = System.nanoTime()
+        socket.send(java.net.DatagramPacket(request, request.size, java.net.InetAddress.getByName(ip), 19302))
+        val answer = ByteArray(64)
+        socket.receive(java.net.DatagramPacket(answer, answer.size))
+        (System.nanoTime() - started) / 1_000_000.0
+    }
+} catch (_: Exception) {
+    null
+}

@@ -23,7 +23,7 @@ class HomePickTest {
     }
 
     @Test
-    fun `a store that has not answered yet shows the plus, never a switch to nothing`() {
+    fun `with no connection at all it is the plus, never a switch to nothing`() {
         assertEquals(HomePick.Add, homePick(emptyList()))
     }
 }

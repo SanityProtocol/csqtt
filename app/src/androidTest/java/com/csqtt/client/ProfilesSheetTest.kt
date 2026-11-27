@@ -8,7 +8,7 @@ import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
@@ -72,6 +72,14 @@ class ProfilesSheetTest {
     private fun row(name: String): SemanticsNodeInteraction =
         compose.onAllNodes(hasText(name, substring = true) and hasClickAction()).onLast()
 
+    /**
+     * Waits for the sheet's row under [name] after «Переименовать»: its dialog is gone, and the row is drawn with the
+     * name. The dialog's own field holds the name too, and can be tapped: only the row has the menu.
+     */
+    private fun awaitRenamedRow(name: String) = compose.waitUntil(5_000) {
+        !shown("Переименовать профиль") && compose.onAllNodes(hasContentDescription("Действия: $name")).fetchSemanticsNodes().isNotEmpty()
+    }
+
     private fun openSheet() {
         compose.waitUntil(10_000) { shown(ALL) }
         last(ALL).performClick()
@@ -84,6 +92,10 @@ class ProfilesSheetTest {
         sortBefore = store.profileSort.first()
         orderBefore = store.profileOrder.first()
         store.saveHomeLayout(HomeLayout.List)
+        // a message the test before raised is the app's, not its screen's: it would still be shown, and name a profile
+        (context.applicationContext as CsqttApplication).owners.messages.let { messages ->
+            messages.current.value?.let { messages.dismiss(it.id) }
+        }
         store.clearProfile(SLOT)
         store.saveActiveProfile(SLOT)
         store.importLink(link("alpha"), target = SLOT, name = "Альфа")
@@ -107,6 +119,8 @@ class ProfilesSheetTest {
             row("Бета").performClick()
             compose.waitUntil(5_000) { !shown(SHEET) }
             assertEquals(beta, runBlocking { store.activeProfile.first() })
+            // in the list the tinted row says which one is picked: no message names it
+            assertFalse(shown("Подключение: Бета"))
 
             // the menu hides a profile, and the message in the sheet is the way back
             openSheet()
@@ -148,7 +162,7 @@ class ProfilesSheetTest {
             last("Сохранить").performClick()
             compose.waitUntil(5_000) { entry(gamma).name == "Дельта" }
             // and the name it came with is one tap away
-            compose.waitUntil(5_000) { shown("Дельта") }
+            awaitRenamedRow("Дельта")
             menuOf("Дельта").performClick()
             last("Переименовать").performClick()
             compose.waitUntil(5_000) { shown("Вернуть исходное имя") }
@@ -157,7 +171,7 @@ class ProfilesSheetTest {
             compose.waitUntil(5_000) { entry(gamma).name == "Гамма" }
 
             // TalkBack's «Переместить вверх»: the order becomes the user's own, the row one place up in its card
-            compose.waitUntil(5_000) { shown("Гамма") }
+            awaitRenamedRow("Гамма")
             val actions = row("Гамма").fetchSemanticsNode().config.getOrNull(SemanticsActions.CustomActions).orEmpty()
             assertTrue("the row has no move action: ${actions.map { it.label }}", actions.any { it.label == "Переместить вверх" })
             compose.runOnUiThread { actions.first { it.label == "Переместить вверх" }.action() }
@@ -197,6 +211,41 @@ class ProfilesSheetTest {
             compose.waitUntil(5_000) { shown("Удалить профиль «Альфа»?") }
             last("Удалить").performClick()
             compose.waitUntil(5_000) { entries().none { it.index == SLOT } }
+        }
+    }
+
+    /**
+     * P3 B3 (the operator, 2026-11-27): «Одно подключение» has no list, so the icon in its card's corner is the way to
+     * another connection — the switch with two or more, which opens the sheet, and «+» with one, which opens «Добавить
+     * профиль». A pick made for this layout is named by a short message: the card never names its connection.
+     */
+    @Test
+    fun theCornerControlOfOneConnectionOpensTheSheetAndAPickIsNamed() {
+        runBlocking { store.saveHomeLayout(HomeLayout.One) }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            val switch = hasContentDescription("Выбрать подключение")
+            compose.waitUntil(10_000) { compose.onAllNodes(switch).fetchSemanticsNodes().isNotEmpty() }
+            assertFalse("the card never names the connection", shown("Альфа"))
+            compose.onNode(switch).performClick()
+            compose.waitUntil(5_000) { shown(SHEET) }
+            row("Бета").performClick()
+            compose.waitUntil(5_000) { !shown(SHEET) }
+            compose.waitUntil(5_000) { shown("Подключение: Бета") }
+            assertEquals(beta, runBlocking { store.activeProfile.first() })
+
+            // with one connection left there is nothing to switch to: the icon is «+», and adds. Whatever else this
+            // device's store holds is taken out for the look, and put back after
+            val kept = runBlocking { store.exportBackupJson(serverSecrets = true) }
+            try {
+                runBlocking { entries().filter { it.index != beta }.forEach { store.deleteProfile(it.index) } }
+                val add = hasContentDescription("Добавить подключение")
+                compose.waitUntil(10_000) { compose.onAllNodes(add).fetchSemanticsNodes().isNotEmpty() }
+                assertTrue(compose.onAllNodes(switch).fetchSemanticsNodes().isEmpty())
+                compose.onNode(add).performClick()
+                compose.waitUntil(5_000) { shown("Добавить профиль") }
+            } finally {
+                runBlocking { assertTrue(store.restoreBackupJson(kept)) }
+            }
         }
     }
 }

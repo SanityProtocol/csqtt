@@ -43,17 +43,16 @@ internal enum class PasswordIssue { Missing, Rule }
 
 internal enum class LinkIssue { Missing, Invalid }
 
-internal enum class HashesIssue { Missing, Duplicates }
-
 /** What is wrong with the form, field by field (the canvas, F-TunnelInvalid); nothing set, nothing wrong. */
 internal data class TunnelIssues(
     val address: AddressIssue? = null,
     val port: Boolean = false,
     val password: PasswordIssue? = null,
     val link: LinkIssue? = null,
-    val hashes: HashesIssue? = null,
+    /** Nothing to connect with: no hash of a call, and no VK account in a mode that makes them. */
+    val hashes: Boolean = false,
 ) {
-    val any: Boolean get() = address != null || port || password != null || link != null || hashes != null
+    val any: Boolean get() = address != null || port || password != null || link != null || hashes
 }
 
 /**
@@ -69,14 +68,9 @@ internal fun tunnelIssues(
     link: String,
     linkValid: Boolean,
     hashesReady: Boolean,
-    hashDuplicates: Boolean,
     required: Boolean,
 ): TunnelIssues {
-    val hashes = when {
-        hashDuplicates -> HashesIssue.Duplicates
-        required && !hashesReady -> HashesIssue.Missing
-        else -> null
-    }
+    val hashes = required && !hashesReady
     if (linkMode) {
         val linkIssue = when {
             link.isBlank() -> LinkIssue.Missing.takeIf { required }
@@ -130,6 +124,45 @@ internal object StreamsSlider {
      * (fewer than one group, more than the profile's maximum) is marked at the end it lies beyond.
      */
     fun mark(serverLimit: Int?, maximum: Int): Float? = serverLimit?.let { fraction(it, maximum) }
+}
+
+/**
+ * How a profile's streams land on its calls (the operator, 2026-11-27: the count is said per hash, and what is
+ * recommended is a count per hash, not a total). The core deals the streams out in tens — each ten on one VK
+ * credential, which is one more guest in the call — a ten to a hash in turn (`group_hash_index`), so with fewer hashes
+ * than tens some calls carry several.
+ */
+internal object StreamsPlan {
+    private const val STEP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
+
+    /**
+     * The most streams recommended on one hash: three credentials on a call. The 2.1 line enforced the same three (27
+     * streams, in its groups of nine) and 2.0 ran two by default; 2.5 enforces nothing, and a total of 70 on a single
+     * hash was seven guests in one call. One constant: what the red part of the slider and its warning go by.
+     */
+    const val RECOMMENDED_PER_HASH = 30
+
+    /** The most streams any one hash carries when [total] streams go over [hashes] calls. */
+    fun perHash(total: Int, hashes: Int): Int {
+        val tens = (total + STEP - 1) / STEP
+        return (tens + hashes - 1) / hashes.coerceAtLeast(1) * STEP
+    }
+
+    /** The largest total that keeps every one of [hashes] calls within [RECOMMENDED_PER_HASH]; never above [maximum]. */
+    fun recommended(hashes: Int, maximum: Int): Int = (hashes.coerceAtLeast(1) * RECOMMENDED_PER_HASH).coerceAtMost(maximum)
+
+    /**
+     * Over how many calls a profile's streams go. With the user's own hashes or a link's, the ones in use ([manual]),
+     * no more than the tunnel takes. In «Авто API» the app makes a call for every ten streams, up to that same count.
+     * Null where the count says nothing: «Авто ВК», whose one call is the account's own and is served by the account's
+     * sessions, and a profile that has no hash yet.
+     */
+    fun hashes(autoVk: Boolean, autoApi: Boolean, manual: Int): Int? = when {
+        autoVk -> null
+        autoApi -> CsqttConstants.Tunnel.MAX_VK_HASHES
+        manual <= 0 -> null
+        else -> manual.coerceAtMost(CsqttConstants.Tunnel.MAX_VK_HASHES)
+    }
 }
 
 /**

@@ -3,6 +3,8 @@ package com.csqtt.client
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -82,6 +84,10 @@ internal object PanelApi {
 /** D6 (a1): hands the owner's pool to its server, once per try, no retry loop and no timer (B5e3b). */
 internal object VkPoolHandOver {
     private val lock = Mutex()
+    private val refreshing = MutableStateFlow(false)
+
+    /** Whether [refresh] runs now: «Пул звонков VK» holds its buttons meanwhile, made again or not. */
+    val working: StateFlow<Boolean> = refreshing
 
     /**
      * Sends [panel]'s pool when it differs from what the panel last accepted (always with [force]). Returns the log
@@ -132,6 +138,34 @@ internal object VkPoolHandOver {
             BackgroundNotice.post(store.appContext, id, "Хеши звонков не переданы серверу", text, tag)
         } else if (ok) {
             BackgroundNotice.cancel(store.appContext, id, tag)
+        }
+    }
+
+    /**
+     * «Обновить» and «Создать звонок» of «Пул звонков VK» (P3 B3); [store] is [profile]'s own. The pool is filled as a
+     * connect fills it — the calls a check found [dead] replaced, and with [oneMore] one call beyond what it holds, up
+     * to what the server takes — and handed to the server's panel. The hand-over's outcome and line; null when the
+     * profile's run uses no pool, or the pool is empty.
+     */
+    suspend fun refresh(context: Context, store: SettingsStore, profile: Int, dead: Set<String>, oneMore: Boolean): Pair<Boolean, String>? {
+        // one at a time: a second tap while calls are being made makes no more of them
+        if (!refreshing.compareAndSet(expect = false, update = true)) return null
+        try {
+            val panel = store.activePoolPanel(profile) ?: return null
+            if (store.vkHashMode.first() != CsqttConstants.VkAutoHash.MODE_AUTO_API) return null
+            val workers = WorkerCountPolicy.normalize(store.workersPerHash.first())
+            val token = store.vkAccessToken.first()
+            VkHashPool.fillLock.withLock {
+                val pool = store.vkPool(panel.vps)
+                val live = pool.filterNot { it in dead }
+                // the pool never shrinks: each dead call is made again; a new one only while the server would take it
+                val more = (pool.size - live.size) + if (oneMore && pool.size < PanelApi.MAX_DEFAULT_HASHES) 1 else 0
+                val fill = VkAutoCallsManager.fillPool(context, token, live, null, workers, tokenStore = store, extra = more)
+                if (fill.hashes != pool) store.saveVkPool(panel.vps, fill.hashes)
+            }
+            return handOver(store, panel, force = true)
+        } finally {
+            refreshing.value = false
         }
     }
 

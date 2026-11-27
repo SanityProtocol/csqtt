@@ -28,22 +28,12 @@ class WorkerCountPolicyTest {
     }
 
     @Test
-    fun extraWorkersRaiseTheDefaultMaximum() {
-        assertEquals(
-            CsqttConstants.Tunnel.DEFAULT_MAX_WORKERS,
-            WorkerCountPolicy.defaultMaximum(extraWorkers = false),
-        )
-        assertEquals(
-            CsqttConstants.Tunnel.MAX_WORKERS,
-            WorkerCountPolicy.defaultMaximum(extraWorkers = true),
-        )
-        assertEquals(
-            CsqttConstants.Tunnel.DEFAULT_MAX_WORKERS,
-            WorkerCountPolicy.normalize(
-                Int.MAX_VALUE,
-                maximum = WorkerCountPolicy.defaultMaximum(extraWorkers = false),
-            ),
-        )
+    fun theMostAProfileRunsIsTheCoresAndInAutoVkThatModesOwn() {
+        // «Экстра потоки» is gone (P3 B3): nothing lifts a maximum, and what is recommended is a count per hash
+        assertEquals(CsqttConstants.Tunnel.MAX_WORKERS, WorkerCountPolicy.maximum(accountAutoVk = false))
+        assertEquals(CsqttConstants.Tunnel.AUTO_VK_MAX_WORKERS, WorkerCountPolicy.maximum(accountAutoVk = true))
+        assertEquals(100, WorkerCountPolicy.normalize(Int.MAX_VALUE, maximum = WorkerCountPolicy.maximum(accountAutoVk = false)))
+        assertEquals(70, WorkerCountPolicy.normalize(Int.MAX_VALUE, maximum = WorkerCountPolicy.maximum(accountAutoVk = true)))
     }
 
     @Test
