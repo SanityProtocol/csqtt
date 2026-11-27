@@ -1934,13 +1934,15 @@ mod tests {
         // three refreshes of the permission had failed before the sleep: asked again out of doubt, the fourth would
         // wait eight seconds. The once-more does not: the stream may be carrying nothing until it is granted
         core.lock().permission_failures = 3;
+        let refused_at = Instant::now();
         answer(&core, &key, METHOD_CREATE_PERMISSION, transaction_of(&requests, METHOD_CREATE_PERMISSION), Some([4, 0]));
         {
             let inner = core.lock();
             assert_eq!(inner.state, STATE_READY, "a refused CreatePermission ended an allocation in doubt");
             assert!(inner.unverified, "a refusal says nothing of the allocation: the doubt stays");
-            let retry = inner.permission_retry.expect("the refused CreatePermission is not asked again") - Instant::now();
-            assert!(retry <= MAINTENANCE_RETRY_BASE, "the once-more is {retry:?} away, not a second");
+            let again = inner.permission_retry.expect("the refused CreatePermission is not asked again");
+            assert!(again >= refused_at + MAINTENANCE_RETRY_BASE, "the once-more is sooner than a second");
+            assert!(again <= Instant::now() + MAINTENANCE_RETRY_BASE, "the once-more is later than a second");
         }
         // a second later it is asked again, beside the Refresh and the ChannelBind still waiting for their answers
         crate::clock::tests::sleep(MAINTENANCE_RETRY_BASE);
@@ -1958,6 +1960,24 @@ mod tests {
         let inner = core.lock();
         assert_eq!(inner.state, STATE_READY, "a refusal out of doubt, after the permission was granted, ended the allocation");
         assert!(inner.permission_retry.is_some());
+    }
+
+    /// Out of doubt nothing changes: a CreatePermission the relay refuses is asked again after the delay its earlier
+    /// failures have grown to, as it was — the second is the once-more's alone.
+    #[test]
+    fn a_permission_refused_out_of_doubt_keeps_its_delay() {
+        let (core, key) = ready_core();
+        bind_ready_channel(&core, &key);
+        core.lock().permission_failures = 3;
+        core.lock().start_operation(Operation::Permission, true, 0).unwrap();
+        let request = transaction_of(&pull_requests(&core), METHOD_CREATE_PERMISSION);
+        let refused_at = Instant::now();
+        answer(&core, &key, METHOD_CREATE_PERMISSION, request, Some([4, 0]));
+        let inner = core.lock();
+        assert_eq!(inner.state, STATE_READY);
+        assert!(!inner.permission_refused_in_doubt);
+        let again = inner.permission_retry.expect("a refused CreatePermission is not asked again");
+        assert!(again >= refused_at + Duration::from_secs(8), "the fourth failure in a row is asked again sooner than 8 s");
     }
 
     /// Once more, and no more: whether the relay's refusal passes is not known, and a stream left without its

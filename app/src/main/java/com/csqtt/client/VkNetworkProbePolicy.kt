@@ -17,29 +17,27 @@ internal fun isVkProbeHttpResponse(code: Int): Boolean = code in 100..599
  * with mobile data on).
  *
  * It goes by time, not by tries: a try on a network that drops VK's packets waits out its timeouts — nine seconds and
- * more — and one that fails at once takes none. The silence is said once it has lasted [SAID_AFTER_MS] since the first
- * try (a network that has only just come up is not said), and again every [SAID_AGAIN_MS]; the clock is the one that
- * runs through the phone's sleep, so a night of short wakes says it as often as a day awake. That VK answers is said
+ * more — and one that fails at once takes none. The silence is said once it has lasted [SAID_AFTER_MS] since its first
+ * failed try began (a network that has only just come up is not said), and again every [SAID_AGAIN_MS]; the clock is
+ * the one that runs through the phone's sleep, so after a sleep the next failed try is said. That VK answers is said
  * only where its silence was. One per network, kept for as long as the network is there: a probe that is started
- * again, or an answer another check of the network gets, is the same silence ending.
+ * again after a Wi-Fi pause or a deploy, or an answer another check of the network gets, is the same silence ending.
  */
 internal class VkProbeVoice {
     private var startedAt: Long? = null
     private var saidAt: Long? = null
 
-    /** A try begins at [now] (elapsed real time, ms). */
+    /**
+     * A try that began at [triedAt] failed at [now] (elapsed real time, ms), for [reason] when one is known: the line
+     * to write, or null.
+     */
     @Synchronized
-    fun trying(now: Long) {
-        if (startedAt == null) startedAt = now
-    }
-
-    /** A try failed at [now], for [reason] when one is known: the line to write, or null. */
-    @Synchronized
-    fun failed(now: Long, network: String, reason: String?): String? {
-        val since = saidAt ?: startedAt ?: now.also { startedAt = it }
+    fun failed(triedAt: Long, now: Long, network: String, reason: String?): String? {
+        val since = saidAt ?: startedAt ?: triedAt.also { startedAt = it }
         if (now - since < (if (saidAt == null) SAID_AFTER_MS else SAID_AGAIN_MS)) return null
         saidAt = now
-        return "[СЕТЬ] VK не отвечает через $network${reason?.let { " ($it)" }.orEmpty()} · проверяем дальше"
+        val why = reason?.takeIf(String::isNotBlank)?.let { " ($it)" }.orEmpty()
+        return "[СЕТЬ] VK не отвечает через $network$why · проверяем дальше"
     }
 
     /** VK answers through the network: the line to write, where its silence was said, and the voice starts anew. */

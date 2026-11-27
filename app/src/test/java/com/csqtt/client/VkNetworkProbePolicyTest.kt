@@ -18,16 +18,17 @@ class VkNetworkProbePolicyTest {
     @Test
     fun theProbeSaysASilenceOnceItHasLastedAndThenEveryFiveMinutes() {
         val voice = VkProbeVoice()
-        voice.trying(1_000)
-        assertNull("a network that has only just come up", voice.failed(1_050, "Wi-Fi", "UnknownHostException"))
-        assertNull(voice.failed(5_999, "Wi-Fi", null))
+        // tries that fail at once, a second apart
+        assertNull("a network that has only just come up", voice.failed(1_000, 1_050, "Wi-Fi", "UnknownHostException"))
+        assertNull(voice.failed(5_950, 5_999, "Wi-Fi", null))
         assertEquals(
             "[СЕТЬ] VK не отвечает через Wi-Fi (SocketTimeoutException) · проверяем дальше",
-            voice.failed(6_000, "Wi-Fi", "SocketTimeoutException"),
+            voice.failed(5_990, 6_000, "Wi-Fi", "SocketTimeoutException"),
         )
-        assertNull("said: not again for five minutes", voice.failed(6_000 + 299_999, "Wi-Fi", "SocketTimeoutException"))
-        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(6_000 + 300_000, "Wi-Fi", null))
-        assertNull(voice.failed(6_000 + 300_000 + 299_999, "Wi-Fi", null))
+        assertNull("said: not again for five minutes", voice.failed(300_000, 6_000 + 299_999, "Wi-Fi", "SocketTimeoutException"))
+        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(300_000, 6_000 + 300_000, "Wi-Fi", null))
+        assertNull(voice.failed(600_000, 6_000 + 300_000 + 299_999, "Wi-Fi", null))
+        assertEquals("a reason that is no word is none", "[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(606_000, 606_000, "Wi-Fi", ""))
     }
 
     @Test
@@ -35,10 +36,9 @@ class VkNetworkProbePolicyTest {
         // a network that drops VK's packets: the first try alone takes nine seconds and more — and so does the first
         // one after a night's sleep, however short the wake
         val voice = VkProbeVoice()
-        voice.trying(0)
         assertEquals(
             "[СЕТЬ] VK не отвечает через мобильную сеть (SocketTimeoutException) · проверяем дальше",
-            voice.failed(9_200, vkProbeNetworkName(wifi = false, cellular = true), "SocketTimeoutException"),
+            voice.failed(0, 9_200, vkProbeNetworkName(wifi = false, cellular = true), "SocketTimeoutException"),
         )
     }
 
@@ -46,22 +46,19 @@ class VkNetworkProbePolicyTest {
     fun aSilenceOutlivesItsProbeAndItsEndIsSaidOnlyWhereItWasSaid() {
         // VK answered before anything was said: nothing to say
         val quick = VkProbeVoice()
-        quick.trying(0)
-        assertNull(quick.failed(1_000, "Wi-Fi", null))
+        assertNull(quick.failed(0, 1_000, "Wi-Fi", null))
         assertNull(quick.answered("Wi-Fi"))
 
-        // the probe is started again for the same network (its capabilities went and came back): the same silence
+        // the probe is started again for the same network (a Wi-Fi pause or a deploy cancelled it): the same silence
         val voice = VkProbeVoice()
-        voice.trying(0)
-        assertNull(voice.failed(100, "Wi-Fi", null))
-        voice.trying(4_000)
-        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(5_000, "Wi-Fi", null))
+        assertNull(voice.failed(0, 100, "Wi-Fi", null))
+        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(4_900, 5_000, "Wi-Fi", null))
         assertEquals("[СЕТЬ] VK отвечает через Wi-Fi", voice.answered("Wi-Fi"))
         assertNull("said once", voice.answered("Wi-Fi"))
-        // and the network's next silence starts from nothing
-        voice.trying(100_000)
-        assertNull(voice.failed(101_000, "Wi-Fi", null))
-        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(105_000, "Wi-Fi", null))
+        // and the network's next silence starts from its own first failed try, not from the one before
+        assertNull(voice.failed(100_000, 101_000, "Wi-Fi", null))
+        assertNull(voice.failed(104_000, 104_999, "Wi-Fi", null))
+        assertEquals("[СЕТЬ] VK не отвечает через Wi-Fi · проверяем дальше", voice.failed(104_900, 105_000, "Wi-Fi", null))
     }
 
     @Test

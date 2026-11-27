@@ -977,8 +977,13 @@ class TunnelService : Service() {
                 var failures = 0
                 try {
                     while (isActive && !physicalNetworks.isUsable(network)) {
-                        val voice = vkProbeVoice(network)
-                        voice.trying(SystemClock.elapsedRealtime())
+                        // a network the system no longer has, made a candidate again after it was lost: its probe
+                        // ends here and takes the candidate with it, where it ran for as long as the service lived
+                        if (networkGone(network)) {
+                            forgetPhysicalNetwork(network)
+                            return@launch
+                        }
+                        val triedAt = SystemClock.elapsedRealtime()
                         var reason: String? = null
                         if (probeVkThrough(network) { reason = it.javaClass.simpleName }) {
                             if (!isActive || !isPhysicalCandidate(network)) return@launch
@@ -986,9 +991,12 @@ class TunnelService : Service() {
                             return@launch
                         }
                         failures++
-                        // a try that outlived its probe — the network gone, the run stopped — has nothing more to say
-                        if (isActive && isPhysicalCandidate(network)) {
-                            voice.failed(SystemClock.elapsedRealtime(), vkProbeNetwork(network), reason)?.let(::logVkProbe)
+                        // a try that outlived what it was for — the network gone, or answering to another check of
+                        // it, the run stopping — has nothing to say
+                        if (isActive && !isStopping && isPhysicalCandidate(network) && !physicalNetworks.isUsable(network)) {
+                            vkProbeVoice(network)
+                                .failed(triedAt, SystemClock.elapsedRealtime(), vkProbeNetwork(network), reason)
+                                ?.let(::logVkProbe)
                         }
                         delay(vkProbeRetryDelayMs(failures))
                     }
@@ -1015,6 +1023,14 @@ class TunnelService : Service() {
 
     private fun logVkProbe(line: String) = TunnelManager.updateLog("vk_probe", line, 2, false, LogLevel.NET)
 
+    /**
+     * Whether the system no longer has [network]: its onLost has come, or is on its way. Asked outside the network
+     * callbacks only (inside one the answer may be stale). Such a network is never made a candidate again: its
+     * callbacks are over, so nothing would take it out a second time.
+     */
+    private fun networkGone(network: Network): Boolean =
+        runCatching { connectivityManager.getNetworkCapabilities(network) == null }.getOrDefault(false)
+
     private fun vkProbeVoice(network: Network): VkProbeVoice = synchronized(vkProbeLock) { vkProbeVoices.getOrPut(network, ::VkProbeVoice) }
 
     private fun forgetPhysicalNetwork(network: Network) {
@@ -1039,7 +1055,7 @@ class TunnelService : Service() {
     }
 
     /** [failed] is told what a request ended on: the probe's line names it, so a log tells a timeout from a refused socket. */
-    private fun probeVkRequest(failed: (Exception) -> Unit = {}, open: () -> HttpURLConnection): Boolean? {
+    private fun probeVkRequest(failed: (Exception) -> Unit, open: () -> HttpURLConnection): Boolean? {
         val connection = runCatching(open).getOrNull() ?: return null
         return try {
             connection.instanceFollowRedirects = false
@@ -1126,8 +1142,10 @@ class TunnelService : Service() {
                 if (!TunnelManager.running.value || TunnelManager.activeWorkers.value != 0) {
                     return@launch
                 }
+                // the networks are listed before they are probed, and a probe takes its timeouts: one that was lost
+                // meanwhile is neither the network that answered nor one to go on probing
                 val candidates = currentPhysicalCandidates()
-                val ready = candidates.firstOrNull(::probeVkThrough)
+                val ready = candidates.firstOrNull(::probeVkThrough)?.takeUnless(::networkGone)
                 if (ready != null) {
                     rememberPhysicalCandidate(ready)
                     updatePhysicalNetwork(ready, true)
@@ -1136,7 +1154,7 @@ class TunnelService : Service() {
                     }
                     return@launch
                 }
-                candidates.forEach { network ->
+                candidates.filterNot(::networkGone).forEach { network ->
                     rememberPhysicalCandidate(network)
                     startVkNetworkProbe(network)
                 }
@@ -1151,14 +1169,15 @@ class TunnelService : Service() {
         if (vkRecoveryJob?.isActive == true) return
         vkRecoveryJob = serviceScope.launch(Dispatchers.IO) {
             try {
+                // as in verifyVkAndRestart: a network lost while it was probed is not one any more
                 val candidates = currentPhysicalCandidates()
-                val ready = candidates.firstOrNull(::probeVkThrough)
+                val ready = candidates.firstOrNull(::probeVkThrough)?.takeUnless(::networkGone)
                 if (ready != null) {
                     rememberPhysicalCandidate(ready)
                     updatePhysicalNetwork(ready, true)
                     return@launch
                 }
-                candidates.forEach { network ->
+                candidates.filterNot(::networkGone).forEach { network ->
                     rememberPhysicalCandidate(network)
                     startVkNetworkProbe(network)
                 }
