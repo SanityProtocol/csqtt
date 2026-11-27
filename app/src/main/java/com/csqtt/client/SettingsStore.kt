@@ -450,7 +450,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val IS_WHITELIST = profileBoolean("is_whitelist")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
-        private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
         // B5f2: where the auto-pause acts — #19's keys; the networks the user dismissed («Не сейчас») added
         private val WIFI_RULE = stringPreferencesKey("wifi_network_list_mode")
@@ -591,7 +590,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 9
+        internal const val STORE_SCHEMA = 10
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -695,6 +694,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     }
                     prefs.remove(extra)
                 }
+            }
+            if (from < 10) {
+                // 2.6.0, P3: the question before TCP is gone from the app (the operator, 2026-11-27: it made the
+                // transport read as unstable), and with it the note that it was answered
+                prefs.remove(booleanPreferencesKey("tcp_transport_risk_acknowledged"))
             }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
         }
@@ -839,7 +843,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 ACTIVE_PROFILE to StoredKind.INT, SHOW_SYSTEM_APPS to StoredKind.BOOLEAN,
                 INFO_ACTIONS_EXPANDED to StoredKind.BOOLEAN, INFO_PROJECT_EXPANDED to StoredKind.BOOLEAN,
                 SUBSCRIPTION_META to StoredKind.STRING, AUTO_JS_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN,
-                TCP_TRANSPORT_RISK_ACKNOWLEDGED to StoredKind.BOOLEAN, AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
+                AUTO_PAUSE_ON_WIFI to StoredKind.BOOLEAN,
                 THEME_MODE to StoredKind.STRING, IS_DYNAMIC_COLOR to StoredKind.BOOLEAN, THEME_PALETTE to StoredKind.STRING,
                 UPDATE_CHECK_INTERVAL_HOURS to StoredKind.INT,
                 HOME_LAYOUT to StoredKind.STRING, PROFILE_SORT to StoredKind.STRING, PROFILE_ORDER to StoredKind.STRING,
@@ -2629,9 +2633,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     val autoJsRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_JS_RISK_ACKNOWLEDGED] ?: false
     }
-    val tcpTransportRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[TCP_TRANSPORT_RISK_ACKNOWLEDGED] ?: false
-    }
     val autoPauseOnWifi: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_PAUSE_ON_WIFI] ?: false
     }
@@ -3211,12 +3212,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     suspend fun saveAutoJsRiskAcknowledged(acknowledged: Boolean) {
         dataStore.edit { prefs ->
             prefs[AUTO_JS_RISK_ACKNOWLEDGED] = acknowledged
-        }
-    }
-
-    suspend fun saveTcpTransportRiskAcknowledged(acknowledged: Boolean) {
-        dataStore.edit { prefs ->
-            prefs[TCP_TRANSPORT_RISK_ACKNOWLEDGED] = acknowledged
         }
     }
 

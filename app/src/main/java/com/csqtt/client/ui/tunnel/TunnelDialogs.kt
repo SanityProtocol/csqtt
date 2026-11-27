@@ -25,14 +25,13 @@ import com.csqtt.client.ui.design.Type
 import kotlinx.coroutines.launch
 
 /**
- * What a risk question is about: a mode that signs in to VK's unofficial API, the TCP transport, or a count of streams
+ * What a risk question is about: a mode that signs in to VK's unofficial API, or a count of streams
  * in the slider's orange or red zone (its value: the count picked, the most one hash would carry and whether the
  * profile could have more hashes, «60:60:1»).
  */
 internal object RiskKind {
     const val HASH_MODE = "hash"
     const val WORK_MODE = "work"
-    const val TCP = "tcp"
     const val STREAMS = "streams"
 }
 
@@ -46,7 +45,7 @@ internal object InfoTopic {
 }
 
 /**
- * The warning before «Авто ВК», TCP or a count of streams above the recommended one is taken (the canvas,
+ * The warning before «Авто ВК» or a count of streams above the recommended one is taken (the canvas,
  * F-RiskDialog): what is risked, a real «Отмена», and no timer. It is a route of the shell, with the choice it was
  * asked for in its argument, so the question and the choice are still there after the screen was made again (U4). The
  * choice is stored only on «Понятно».
@@ -62,7 +61,7 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
     val streams = value.split(':').mapNotNull(String::toIntOrNull).takeIf { kind == RiskKind.STREAMS && it.size == 3 }
     val moreHashesHelp = streams?.get(2) == 1
     val streamsZone = streams?.let { StreamsPlan.zone(it[1]) }
-    val known = kind in setOf(RiskKind.HASH_MODE, RiskKind.WORK_MODE, RiskKind.TCP) ||
+    val known = kind in setOf(RiskKind.HASH_MODE, RiskKind.WORK_MODE) ||
         streamsZone == StreamZone.Orange || streamsZone == StreamZone.Red
     if (profile == null || !known || value.isEmpty()) {
         LaunchedEffect(Unit) { close() }
@@ -85,13 +84,8 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
                             RiskKind.HASH_MODE -> store.saveVkHashMode(value)
                             RiskKind.WORK_MODE -> store.saveVkAuthMode(value)
                             RiskKind.STREAMS -> streams?.let { store.saveWorkersPerHash(it[0]) }
-                            else -> store.saveTurnTransport(value)
                         }
-                        when {
-                            !remembered -> Unit
-                            kind == RiskKind.TCP -> store.saveTcpTransportRiskAcknowledged(true)
-                            else -> store.saveAutoJsRiskAcknowledged(true)
-                        }
+                        if (remembered) store.saveAutoJsRiskAcknowledged(true)
                     }
                     close()
                 },
@@ -108,7 +102,6 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
                 streams != null -> stringResource(
                     if (moreHashesHelp) R.string.risk_streams_over else R.string.risk_streams_over_plain, streams[1], StreamsPlan.RECOMMENDED_PER_HASH,
                 )
-                kind == RiskKind.TCP -> stringResource(R.string.risk_tcp)
                 else -> stringResource(R.string.risk_auto_vk)
             },
             style = Type.fact, color = Csq.colors.text,

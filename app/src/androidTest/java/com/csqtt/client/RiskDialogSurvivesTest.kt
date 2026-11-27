@@ -15,6 +15,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.BeforeClass
 import org.junit.Rule
@@ -22,9 +23,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * P3 B3 (U4, the canvas's F-RiskDialog): the warning before «Авто ВК» or TCP is taken is still there, with the choice
- * it was asked for, after the screen is made again; the choice is stored only on «Понятно», «Отмена» leaves everything
- * as it was, and «Не напоминать» is remembered.
+ * P3 B3 (U4, the canvas's F-RiskDialog): the warning before «Авто ВК» is taken is still there, with the choice it was
+ * asked for, after the screen is made again; the choice is stored only on «Понятно», «Отмена» leaves everything as it
+ * was, and «Не напоминать» is remembered. TCP is taken with no question (the operator, 2026-11-27: the pop-up made the
+ * transport read as unstable), and the line under «Обход DPI» says what the picked level does.
  */
 @RunWith(AndroidJUnit4::class)
 class RiskDialogSurvivesTest {
@@ -44,14 +46,11 @@ class RiskDialogSurvivesTest {
     private val store by lazy { SettingsStore(context) }
     private val slot by lazy { SettingsStore(context, ProfileScope.Fixed(SLOT)) }
     private var autoVkBefore = false
-    private var tcpBefore = false
 
     @Before
     fun aProfileThatWasNeverWarned() = runBlocking {
         autoVkBefore = store.autoJsRiskAcknowledged.first()
-        tcpBefore = store.tcpTransportRiskAcknowledged.first()
         store.saveAutoJsRiskAcknowledged(false)
-        store.saveTcpTransportRiskAcknowledged(false)
         store.clearProfile(SLOT)
         store.saveActiveProfile(SLOT)
         store.saveCsqttLinkMode(false)
@@ -62,10 +61,10 @@ class RiskDialogSurvivesTest {
         store.saveActiveProfile(0)
         store.deleteProfile(SLOT)
         store.saveAutoJsRiskAcknowledged(autoVkBefore)
-        store.saveTcpTransportRiskAcknowledged(tcpBefore)
     }
 
-    private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
+    private fun shown(text: String, substring: Boolean = false): Boolean =
+        compose.onAllNodes(hasText(text, substring = substring)).fetchSemanticsNodes().isNotEmpty()
     private fun hashMode() = runBlocking { slot.vkHashMode.first() }
     private fun authMode() = runBlocking { slot.vkAuthMode.first() }
     private fun transport() = runBlocking { slot.turnTransport.first() }
@@ -96,34 +95,42 @@ class RiskDialogSurvivesTest {
             assertFalse("not ticked, not remembered", runBlocking { store.autoJsRiskAcknowledged.first() })
             compose.waitUntil(5_000) { !shown(WARNING) }
 
-            // «Отмена» leaves the transport as it was
-            compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
-            compose.waitUntil(5_000) { shown("Транспорт") }
-            pick("UDP", "TCP")
+            // «Отмена» leaves the mode as it was
+            pick("Авто ВК", "Ручной")
+            compose.waitUntil(5_000) { hashMode() == CsqttConstants.VkAutoHash.MODE_MANUAL }
+            pick("Ручной", "Авто ВК")
             compose.waitUntil(5_000) { shown(WARNING) }
             compose.onNodeWithText("Отмена").performClick()
             compose.waitUntil(5_000) { !shown(WARNING) }
-            assertEquals(CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT, transport())
+            assertEquals(CsqttConstants.VkAutoHash.MODE_MANUAL, hashMode())
 
-            // «Не напоминать» with «Понятно»: taken, and not asked again. This question too is still there after the
-            // screen was made again: it is one route for every kind of it
-            pick("UDP", "TCP")
+            // «Не напоминать» with «Понятно»: taken, and not asked again
+            pick("Ручной", "Авто ВК")
             compose.waitUntil(5_000) { shown(WARNING) }
-            scenario.recreateFromSavedStateAlone()
-            compose.waitUntil(10_000) { shown(WARNING) }
-            assertEquals(CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT, transport())
             compose.onNodeWithText("Не напоминать").performClick()
             compose.onNodeWithText("Понятно").performClick()
             // two writes, the choice and then the tick
             compose.waitUntil(5_000) {
-                transport() == CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS && runBlocking { store.tcpTransportRiskAcknowledged.first() }
+                hashMode() == CsqttConstants.VkAutoHash.MODE_AUTO_JS && runBlocking { store.autoJsRiskAcknowledged.first() }
             }
-            compose.waitUntil(5_000) { shown("Обход DPI (Gooby)") }
-            pick("TCP", "UDP")
-            compose.waitUntil(5_000) { transport() == CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT }
+            pick("Авто ВК", "Ручной")
+            compose.waitUntil(5_000) { hashMode() == CsqttConstants.VkAutoHash.MODE_MANUAL }
+            pick("Ручной", "Авто ВК")
+            compose.waitUntil(5_000) { hashMode() == CsqttConstants.VkAutoHash.MODE_AUTO_JS }
+            assertFalse(shown(WARNING))
+
+            // TCP is a transport like the other: taken at once, with nothing asked
+            compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
+            compose.waitUntil(5_000) { shown("Транспорт") }
             pick("UDP", "TCP")
             compose.waitUntil(5_000) { transport() == CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS }
             assertFalse(shown(WARNING))
+            // and its DPI split says what the picked level does
+            compose.waitUntil(5_000) { shown("Обход DPI (Gooby)") }
+            assertTrue(shown("Выключено: начало соединения отправляется как есть."))
+            compose.onNodeWithText("Тяжёлая").performScrollTo().performClick()
+            compose.waitUntil(5_000) { shown("По одному байту", substring = true) }
+            assertFalse(shown("Выключено", substring = true))
         }
     }
 }

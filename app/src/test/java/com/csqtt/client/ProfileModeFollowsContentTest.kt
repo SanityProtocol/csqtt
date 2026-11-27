@@ -29,13 +29,11 @@ class ProfileModeFollowsContentTest {
 
     @Test
     fun `each text action shows only for an empty profile, an empty field and an idle tunnel`() {
-        assertEquals(ProfileModeAction.ENTER_SERVER, profileModeAction(emptyProfileLinkMode = true, field = "", tunnelBusy = false))
-        assertEquals(ProfileModeAction.USE_LINK, profileModeAction(emptyProfileLinkMode = false, field = " ", tunnelBusy = false))
-        assertNull(profileModeAction(emptyProfileLinkMode = null, field = "", tunnelBusy = false))
-        assertNull(profileModeAction(emptyProfileLinkMode = true, field = "csqtt://conn", tunnelBusy = false))
-        assertNull(profileModeAction(emptyProfileLinkMode = false, field = "1.2.3.4", tunnelBusy = false))
-        assertNull(profileModeAction(emptyProfileLinkMode = true, field = "", tunnelBusy = true))
-        assertNull(profileModeAction(emptyProfileLinkMode = false, field = "", tunnelBusy = true))
+        assertEquals(ProfileModeAction.ENTER_SERVER, profileModeAction(emptyProfileLinkMode = true, field = ""))
+        assertEquals(ProfileModeAction.USE_LINK, profileModeAction(emptyProfileLinkMode = false, field = " "))
+        assertNull(profileModeAction(emptyProfileLinkMode = null, field = ""))
+        assertNull(profileModeAction(emptyProfileLinkMode = true, field = "csqtt://conn"))
+        assertNull(profileModeAction(emptyProfileLinkMode = false, field = "1.2.3.4"))
     }
 
     @Test

@@ -177,7 +177,6 @@ internal class TunnelView(
     val running: Boolean,
     val issues: TunnelIssues,
     val riskAcknowledged: Boolean,
-    val tcpAcknowledged: Boolean,
     /** The calls in the owner's pool; null when this profile's run uses none. */
     val poolSize: Int?,
 ) {
@@ -219,12 +218,8 @@ internal fun TunnelTab(
     val vkUserId by store.vkAccessTokenUserId.collectAsStateWithLifecycle(initialValue = "")
     val emptyMode by store.emptyProfileMode.collectAsStateWithLifecycle(initialValue = null)
     val riskAcknowledged by store.autoJsRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
-    val tcpAcknowledged by store.tcpTransportRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
     val pool by store.vkPoolState.collectAsStateWithLifecycle(initialValue = null)
     val running by TunnelManager.running.collectAsStateWithLifecycle()
-    val starting by TunnelManager.starting.collectAsStateWithLifecycle()
-    val stopping by TunnelManager.stopping.collectAsStateWithLifecycle()
-    val paused by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
 
     val peer = storedPeer
     val port = storedPort
@@ -291,8 +286,6 @@ internal fun TunnelTab(
         storedTokenPresent = vkTokenActive,
         manualHashCount = ownCount,
     )
-    // running, starting, stopping or paused on Wi-Fi: what a change of the profile's kind would land in at a restart
-    val busy = running || starting || stopping || paused
     val issues = tunnelIssues(
         linkMode = linkMode, address = address, port = portText, password = password, link = linkText,
         linkValid = shownLink != null, hashesReady = hashesReady, required = required,
@@ -302,7 +295,7 @@ internal fun TunnelTab(
         storedAuthMode = savedAuthMode, vkTokenActive = vkTokenActive, vkUserId = vkUserId, ownerHashes = ownerHashes,
         removedOwner = removedOwner, linkTokenActive = linkTokenActive, ownCount = ownCount,
         startHashes = hashesAStartUses(ownerHashes.filterNot { it in removedOwner } + own, results).size, results = results,
-        running = running, issues = issues, riskAcknowledged = riskAcknowledged, tcpAcknowledged = tcpAcknowledged,
+        running = running, issues = issues, riskAcknowledged = riskAcknowledged,
         poolSize = pool?.pool?.size,
     )
 
@@ -342,7 +335,7 @@ internal fun TunnelTab(
         if (linkDraft != null && !draftStands(linkDraft, linkBase, auth.csqttLink)) SecretDrafts.clear(linkKey)
     }
 
-    val modeAction = profileModeAction(emptyMode, field = if (linkMode) linkText else address, tunnelBusy = busy)
+    val modeAction = profileModeAction(emptyMode, field = if (linkMode) linkText else address)
     val entry = entries.firstOrNull { it.index == profile }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -791,12 +784,8 @@ private fun requestHashMode(view: TunnelView, nav: NavModel, mode: String) {
 /** The empty profile's one way to the other kind: a text action under the field it is the alternative to. */
 @Composable
 private fun ModeAction(view: TunnelView, text: Int, linkMode: Boolean) {
-    TextBtn(stringResource(text), {
-        // checked again at the tap; the store checks again that the profile is still empty
-        val busy = TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value ||
-            TunnelManager.autoPausedForWifi.value
-        if (!busy) TunnelManager.scope.launch { view.store.switchEmptyProfileMode(linkMode) }
-    })
+    // the store checks again that the profile is still empty
+    TextBtn(stringResource(text), { TunnelManager.scope.launch { view.store.switchEmptyProfileMode(linkMode) } })
 }
 
 @Composable

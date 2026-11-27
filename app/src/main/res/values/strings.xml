@@ -47,7 +47,7 @@
     <string name="home_stage_vk">Получение доступа VK…</string>
     <string name="home_stage_server">Соединение с сервером…</string>
     <string name="home_stage_vpn">Запуск VPN…</string>
-    <string name="home_state_wait">Ожидание</string>
+    <string name="home_state_wait">Остановка…</string>
     <string name="home_run_stays">Туннель остаётся на «%1$s»</string>
     <string name="home_vpn_on">Включить VPN</string>
     <string name="home_vpn_off">Отключить VPN</string>
@@ -55,7 +55,6 @@
     <string name="home_captcha_solve">Решить капчу</string>
     <string name="home_streams">Потоки: %1$d / %2$d</string>
     <string name="home_streams_label">Потоки:</string>
-    <string name="home_streams_in_stage">потоки</string>
     <string name="home_streams_figure">%1$d / %2$d</string>
     <string name="home_rate">%1$s/с</string>
     <string name="home_total">всего</string>
@@ -355,14 +354,17 @@
     <string name="tunnel_srtp">Режим SRTP</string>
     <string name="tunnel_transport">Транспорт</string>
     <string name="tunnel_dpi">Обход DPI (Gooby)</string>
-    <string name="tunnel_dpi_sub">Только для TCP и TLS. Применится при следующем подключении.</string>
+    <string name="tunnel_dpi_off_says">Выключено: начало соединения отправляется как есть.</string>
+    <string name="tunnel_dpi_light_says">Начало каждого соединения делится на несколько частей. Подключение почти не замедляется; помогает против простых фильтров.</string>
+    <string name="tunnel_dpi_medium_says">Мелкие части с паузами, первая отправляется так, что до сервера не доходит и её видит только фильтр. Подключение чуть дольше; подходит большинству сетей с блокировками.</string>
+    <string name="tunnel_dpi_heavy_says">По одному байту с паузами и та же первая часть только для фильтра. Подключение заметно дольше; когда средняя не помогает.</string>
+    <string name="tunnel_next_connection">Применится при следующем подключении.</string>
     <string name="tunnel_dpi_off">Выкл</string>
     <string name="tunnel_dpi_light">Лёгкая</string>
     <string name="tunnel_dpi_medium">Средняя</string>
     <string name="tunnel_dpi_heavy">Тяжёлая</string>
     <string name="tunnel_streams">Потоки</string>
-    <string name="tunnel_streams_limit">Лимит сервера — %1$d (отметка). Пока туннель включён, не меняется.</string>
-    <string name="tunnel_streams_locked">Пока туннель включён, не меняется.</string>
+    <string name="tunnel_streams_limit">Лимит сервера — %1$d (отметка). Применится при следующем подключении.</string>
     <string name="tunnel_streams_per_hash">%2$d (%1$d на хеш)</string>
     <string name="tunnel_streams_recommended">Рекомендуем не больше %1$d на хеш</string>
     <string name="tunnel_streams_recommended_plain">Рекомендуем не больше %1$d</string>
@@ -381,7 +383,6 @@
     <string name="tunnel_turn_all">Все подсети · все IP</string>
     <string name="tunnel_turn_all_ips">%1$s · все IP</string>
     <string name="tunnel_turn_ips">%1$s · IP: %2$s</string>
-    <string name="tunnel_run_locked">Пока туннель включён, не меняется</string>
 
     <string name="hashes_title">Хеши звонков VK</string>
     <string name="hashes_sub_owner">Хеш — часть ссылки на звонок VK. Нужен хотя бы один.</string>
@@ -487,7 +488,6 @@
 
     <string name="risk_title">Внимание!</string>
     <string name="risk_auto_vk">«Авто ВК» использует неофициальные браузерные методы VK API для создания звонка и получения кредов. Разработчик не может исключить блокировку VK-аккаунта и честно оценить её вероятность. Используйте этот режим на свой риск; если важен основной аккаунт, выбирайте второстепенный.</string>
-    <string name="risk_tcp">TCP — экспериментальный режим для сетей, где провайдер ограничивает UDP. Он действует только между телефоном и серверами VK TURN; дальше, до вашего сервера, трафик всегда идёт по UDP. Если UDP работает без ограничений, оставьте его: он стабильнее и быстрее.</string>
     <string name="risk_danger_title">Опасно!</string>
     <string name="risk_streams_over">Это больше рекомендуемого: %1$d потоков на один звонок VK при рекомендуемых до %2$d. Каждые десять потоков — ещё одно подключение к звонку с вашего телефона: чем их больше на одном звонке, тем вероятнее капча и отказы VK. Надёжнее добавить хеши звонков: потоки разойдутся по ним.</string>
     <string name="risk_streams_danger">Опасная нагрузка: %1$d потоков на один звонок VK — больше %2$d. VK может отказывать в подключении и часто просить капчу. Добавьте хеши звонков или уменьшите число потоков.</string>

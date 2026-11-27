@@ -162,6 +162,19 @@ class StoreMigrationsTest {
     }
 
     @Test
+    fun `step 10 takes the answered TCP question out of the store, and nothing else`() {
+        val (before, after) = migrate(
+            """{"strings": {"peer_4": "203.0.113.4", "turn_transport_4": "tcp"},
+                "ints": {"store_schema_version": 9, "workers_per_hash_4": 20},
+                "booleans": {"default_role_decided": true, "tcp_transport_risk_acknowledged": true, "auto_js_risk_acknowledged": true}}""",
+        )
+        assertEquals(setOf("tcp_transport_risk_acknowledged", "store_schema_version"), changedKeys(before, after))
+        assertNull(after["tcp_transport_risk_acknowledged"])
+        assertEquals("the transport itself is the profile's still", "tcp", after["turn_transport_4"])
+        assertEquals(true, after["auto_js_risk_acknowledged"])
+    }
+
+    @Test
     fun `a profile that never held a count keeps the 10 it ran, and only a new one starts at 20`() {
         // P3 B3 (the operator, 2026-11-27): a new profile starts at 20 from now on; until then none stored meant 10
         val prefs = load(

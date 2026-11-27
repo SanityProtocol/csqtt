@@ -39,7 +39,8 @@ internal fun connectionVisuals(
     val start = if (cooldown && configurationValid) Tap.Nothing else Tap.Start
     return when (state) {
         ConnectionState.Idle -> if (cooldown) {
-            // the short wait after a stop, before the next start is taken: «Ожидание»
+            // the short wait after a stop, before the next start is taken: it reads as the stop it ends («Остановка…»),
+            // so a disconnect shows one state on its way to «Отключено», not two in half a second
             ConnectionVisuals(state.label, Disc.Dim, StatusTone.Warn, null, start, homeLabel = R.string.home_state_wait)
         } else {
             // the hint only where a tap connects: with settings missing, the card under the button says what to do

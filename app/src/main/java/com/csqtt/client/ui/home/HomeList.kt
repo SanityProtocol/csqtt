@@ -1,6 +1,10 @@
 package com.csqtt.client.ui.home
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.annotation.StringRes
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -40,6 +45,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.node.Ref
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -53,8 +60,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionState
 import com.csqtt.client.Disc
@@ -63,11 +70,12 @@ import com.csqtt.client.ProfileKind
 import com.csqtt.client.ProfileOrder
 import com.csqtt.client.ProfileSort
 import com.csqtt.client.R
+import com.csqtt.client.StartStage
 import com.csqtt.client.Tap
+import com.csqtt.client.TrafficSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.WifiCopy
 import com.csqtt.client.formatBytes
-import com.csqtt.client.showsTraffic
 import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
 import com.csqtt.client.ui.components.Card
@@ -86,92 +94,146 @@ import com.csqtt.client.ui.shell.LocalStore
 import com.csqtt.client.ui.shell.Routes
 import kotlinx.coroutines.launch
 
-private val Activity = Type.buttonSmall.copy(fontWeight = FontWeight.Normal, fontFeatureSettings = "tnum")
-private val Timer = Type.body.copy(fontFeatureSettings = "tnum")
-private val Hint = Type.label.copy(fontWeight = FontWeight.Normal, lineHeight = 18.sp)
+// The list's own distances; its text sizes are Home's (HomeText). More room above the C than under the last line: what
+// is tapped and read sits low in its place, nearer the thumb (the operator, 2026-11-27: «The content of that area must
+// always be closer to the bottom than to the top»).
+private val AboveDisc = 30.dp
+private val UnderDisc = 14.dp
+private val LineGap = 6.dp
+private val BesideCards = 12.dp
 
 /**
- * «Список профилей», Home's other layout: the C in its disc, the status with what a start is doing under it, the timer,
- * the figures, what the app tells or asks as cards, and the profiles to pick from.
+ * «Список профилей», Home's other layout: the C in its disc, the status, the timer, the line of the moment under them,
+ * what the app tells or asks as cards, and the profiles to pick from. Nothing has room kept for it: what comes and goes
+ * opens and closes its own (HomeMotion), and the profiles glide with it.
  */
 @Composable
 internal fun HomeList(view: HomeView) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
-        Column(
-            Modifier.widthIn(max = 720.dp).fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+        Column(Modifier.widthIn(max = 720.dp).fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
             // what is lost without notifications is said before anything else
-            view.notices.filter { it is HomeNotice.NotificationsOff }.forEach { ListNotice(it, view) }
-            StateBlock(view)
-            view.notices.filterNot { it is HomeNotice.NotificationsOff }.forEach { ListNotice(it, view) }
+            val (first, rest) = view.notices.partition { it is HomeNotice.NotificationsOff }
+            Notices(first, view, above = true)
+            StateBlock(view, top = if (first.isEmpty()) AboveDisc else 6.dp)
+            // the captcha's button and the paused Wi-Fi are drawn in the state's own block
+            Notices(rest.filterNot { it is HomeNotice.Captcha || it is HomeNotice.PausedOn }, view)
             Profiles()
         }
     }
 }
 
+/** The cards of one place, with their distance from what is beside them; their room opens and closes as Home moves. */
 @Composable
-private fun StateBlock(view: HomeView) {
+private fun Notices(notices: List<HomeNotice>, view: HomeView, above: Boolean = false) {
+    Column(Modifier.fillMaxWidth().animateContentSize(HomeMotion.move())) {
+        for (notice in notices) {
+            Box(Modifier.padding(top = if (above) 0.dp else BesideCards, bottom = if (above) BesideCards else 0.dp)) { ListNotice(notice, view) }
+        }
+    }
+}
+
+/** What the line under the time says: one of these at a time, each fading into the other's place. */
+private sealed interface Moment {
+    val kind: Any
+
+    data object Speeds : Moment {
+        override val kind: Any get() = Speeds
+    }
+
+    /** What a start is doing: the next stage's words take the last one's place as they are. */
+    data class Stage(val stage: StartStage) : Moment {
+        override val kind: Any get() = Stage::class
+    }
+
+    data class Hint(@StringRes val text: Int) : Moment {
+        override val kind: Any get() = text
+    }
+}
+
+@Composable
+private fun StateBlock(view: HomeView, top: Dp) {
     val colors = Csq.colors
     val state = view.state
     val streams = rememberStreams(state)
     val pausedOn = view.notices.firstNotNullOfOrNull { it as? HomeNotice.PausedOn }
-    Column(
-        Modifier.fillMaxWidth().padding(top = if (view.notices.any { it is HomeNotice.NotificationsOff }) 6.dp else 18.dp, bottom = 2.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
+    val captcha = state is ConnectionState.CaptchaNeeded
+    Column(Modifier.fillMaxWidth().padding(top = top), horizontalAlignment = Alignment.CenterHorizontally) {
         CDisc(view.visuals.disc, tapDescription(view), enabled = view.visuals.tap != Tap.Nothing, onClick = view.actions.tap)
         Text(
-            stateLabel(view), style = Type.status, color = colors.text, textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            stateLabel(view), style = HomeText.Status, color = colors.text, textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = UnderDisc).semantics { liveRegion = LiveRegionMode.Polite },
         )
-        // the stage of a start and the streams, one line, there only while it has something to say
-        val activity = activityLine(view.stage?.let { stringResource(it.text) }, streams)
-        AnimatedVisibility(visible = activity != null) {
-            Text(activity ?: AnnotatedString(""), style = Activity, color = colors.muted, textAlign = TextAlign.Center)
+        // The time, right under the state wherever there is one, so it never changes rows; the Wi-Fi a pause is on takes
+        // its place, and a captcha's question has neither.
+        HomeLine(if (captcha) null else pausedOn ?: Unit, kind = { it::class }) { now ->
+            if (now is HomeNotice.PausedOn) {
+                Text(
+                    stringResource(R.string.home_wifi_network, now.network), style = HomeText.Timer, color = colors.muted,
+                    modifier = Modifier.padding(top = LineGap),
+                )
+            } else {
+                Uptime(HomeText.Timer, colors.muted, Modifier.padding(top = LineGap))
+            }
         }
-        when {
-            pausedOn != null -> Text(stringResource(R.string.home_wifi_network, pausedOn.network), style = Timer, color = colors.muted)
-            state !is ConnectionState.CaptchaNeeded -> Uptime(Timer, colors.muted)
+        // The line of the moment, one place for the three: the speeds while connected, else what a start is doing, else
+        // what a tap does. One takes the other's place, so nothing under it moves for that; and through a stop the place
+        // waits for the hint that follows.
+        val stage = view.stage
+        val traffic = rememberShowsTraffic(state)
+        val moment: Moment? = when {
+            traffic -> Moment.Speeds
+            stage != null -> Moment.Stage(stage)
+            else -> view.visuals.hint?.let { Moment.Hint(it) }
         }
-        view.visuals.hint?.let {
-            Text(stringResource(it), style = Hint, color = colors.muted, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 300.dp))
+        HomeLine(moment, kind = { it.kind }, lingers = true) { now ->
+            when (now) {
+                Moment.Speeds -> Figures(Modifier.padding(top = LineGap))
+                is Moment.Stage -> Text(
+                    stringResource(now.stage.text), style = HomeText.Line, color = colors.muted, textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = LineGap),
+                )
+                is Moment.Hint -> Text(
+                    stringResource(now.text), style = HomeText.Line, color = colors.muted, textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = LineGap).widthIn(max = 300.dp),
+                )
+            }
         }
-        if (showsTraffic(state)) Figures()
-        if (state is ConnectionState.CaptchaNeeded) {
+        // The streams on a line of their own (the operator, 2026-11-27: «Move "Потоки" to next line, use capital "П"»),
+        // while their count is news: the room is theirs for that time only.
+        HomeLine(streams) { (up, running) ->
+            Text(streamsLine(up, running), style = HomeText.Line, color = colors.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(top = LineGap))
+        }
+        HomeLine(Unit.takeIf { captcha }) {
             Btn(
                 stringResource(R.string.home_captcha_solve), view.actions.openCaptcha, kind = BtnKind.Primary, icon = Icons.shield,
-                modifier = Modifier.padding(top = 10.dp).widthIn(min = 190.dp),
+                modifier = Modifier.padding(top = 16.dp).widthIn(min = 190.dp),
             )
         }
     }
 }
 
-/** «Соединение с сервером… · потоки 3 / 10», «Потоки: 19 / 20», the stage alone, or nothing. */
+/** «Потоки: 19 / 20», the count in the text's own colour. */
 @Composable
-private fun activityLine(stage: String?, streams: Pair<Int, Int>?): AnnotatedString? {
-    if (stage == null && streams == null) return null
+private fun streamsLine(up: Int, running: Int): AnnotatedString {
     val strong = SpanStyle(fontWeight = FontWeight.SemiBold, color = Csq.colors.text)
-    val figure = streams?.let { (up, running) -> stringResource(R.string.home_streams_figure, up, running) }
-    val word = stringResource(if (stage != null) R.string.home_streams_in_stage else R.string.home_streams_label)
+    val label = stringResource(R.string.home_streams_label)
+    val figure = stringResource(R.string.home_streams_figure, up, running)
     return buildAnnotatedString {
-        if (stage != null) append(stage)
-        if (figure != null) {
-            if (stage != null) append(" · ")
-            append(word)
-            append(' ')
-            withStyle(strong) { append(figure) }
-        }
+        append(label)
+        append(' ')
+        withStyle(strong) { append(figure) }
     }
 }
 
 /** The speeds and the total, read only while shown; in a layer of its own: it changes on every report while bytes move. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Figures() {
+private fun Figures(modifier: Modifier = Modifier) {
     val traffic by TunnelManager.traffic.collectAsStateWithLifecycle()
-    val now = traffic ?: return
+    // the last report stays while the line fades out of a run that ended
+    val last = remember { Ref<TrafficSnapshot>() }
+    traffic?.let { last.value = it }
+    val now = last.value ?: return
     val strong = SpanStyle(fontWeight = FontWeight.SemiBold, color = Csq.colors.text)
     fun part(label: String, value: String) = buildAnnotatedString {
         append(label)
@@ -185,59 +247,82 @@ private fun Figures() {
         }
         add(part(stringResource(R.string.home_total), formatBytes(now.totalDown + now.totalUp)))
     }
+    // Each part in a line's own height: an arrow reaches a pixel past its line, and Compose would make the row that much
+    // higher than the line it takes the place of — the list under it would move by it.
+    val line = with(LocalDensity.current) { HomeText.Line.lineHeight.toDp() }
     FlowRow(
-        Modifier.fillMaxWidth().padding(top = 6.dp).graphicsLayer(),
+        modifier.fillMaxWidth().graphicsLayer(),
         horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
     ) {
-        for (text in parts) Text(text, style = Activity, color = Csq.colors.muted)
+        for (text in parts) Text(text, style = HomeText.Line, color = Csq.colors.muted, modifier = Modifier.requiredHeight(line))
     }
 }
 
-/** The C of the list, 168 dp: its ground and its ring say the state with its colour, the status under it in a word. */
+/** The letter of the disc: white on the accent, faint while there is nothing to tap, else in the logo's own gradient. */
+private enum class Letter { White, Faint, Logo }
+
+/**
+ * The C of the list, 168 dp: its ground and its ring say the state with its colour, the status under it in a word. The
+ * colours of a state turn into the next one's (HomeMotion): the disc is the largest thing that changes on this screen.
+ */
 @Composable
 private fun CDisc(disc: Disc, description: String, enabled: Boolean, onClick: () -> Unit) {
     val colors = Csq.colors
-    val ground = when (disc) {
-        Disc.On -> colors.accent
-        Disc.Busy -> colors.accentSoft
-        Disc.Warn -> colors.warnSoft
-        Disc.Off, Disc.Dim -> colors.raised
-    }
-    val ring = when (disc) {
-        Disc.On -> null
-        Disc.Busy -> 2.dp to colors.accent
-        Disc.Warn -> 2.dp to colors.warn
-        Disc.Off, Disc.Dim -> 1.dp to colors.line
-    }
+    val ground by animateColorAsState(
+        when (disc) {
+            Disc.On -> colors.accent
+            Disc.Busy -> colors.accentSoft
+            Disc.Warn -> colors.warnSoft
+            Disc.Off, Disc.Dim -> colors.raised
+        },
+        HomeMotion.move(), label = "disc-ground",
+    )
+    // «on» has no ring: the accent's own is not seen on the accent ground
+    val ring by animateColorAsState(
+        when (disc) {
+            Disc.On, Disc.Busy -> colors.accent
+            Disc.Warn -> colors.warn
+            Disc.Off, Disc.Dim -> colors.line
+        },
+        HomeMotion.move(), label = "disc-ring",
+    )
+    val ringWidth by animateDpAsState(if (disc == Disc.Off || disc == Disc.Dim) 1.dp else 2.dp, HomeMotion.move(), label = "disc-ring-width")
+    val glow by animateDpAsState(if (disc == Disc.On) 14.dp else 0.dp, HomeMotion.move(), label = "disc-glow")
     Box(
         Modifier
             .size(168.dp)
-            .then(if (disc == Disc.On) Modifier.shadow(14.dp, CircleShape, ambientColor = colors.accent, spotColor = colors.accent) else Modifier)
+            .shadow(glow, CircleShape, ambientColor = colors.accent, spotColor = colors.accent)
             .clip(CircleShape)
             .background(ground)
-            .then(if (ring != null) Modifier.border(ring.first, ring.second, CircleShape) else Modifier)
+            .border(ringWidth, ring, CircleShape)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) {
-        when (disc) {
-            Disc.On -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Color.White)
-            Disc.Dim -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = colors.faint)
-            // the letter in the logo's own gradient
-            Disc.Off, Disc.Busy, Disc.Warn -> Icon(
-                Icons.c, contentDescription = null, tint = Color.White,
-                modifier = Modifier.size(118.dp).graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithCache {
-                    val brush = Brush.linearGradient(
-                        listOf(Color(0xFF4FA3FF), Color(0xFF0474FB)),
-                        start = Offset(size.width * 28f / 108f, size.height * 36f / 108f),
-                        end = Offset(size.width * 78f / 108f, size.height * 72f / 108f),
-                    )
-                    onDrawWithContent {
-                        drawContent()
-                        drawRect(brush, blendMode = BlendMode.SrcIn)
-                    }
-                },
-            )
+        val letter = when (disc) {
+            Disc.On -> Letter.White
+            Disc.Dim -> Letter.Faint
+            Disc.Off, Disc.Busy, Disc.Warn -> Letter.Logo
+        }
+        Crossfade(letter, animationSpec = HomeMotion.move(), label = "disc-letter") { shown ->
+            when (shown) {
+                Letter.White -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Color.White)
+                Letter.Faint -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = colors.faint)
+                Letter.Logo -> Icon(
+                    Icons.c, contentDescription = null, tint = Color.White,
+                    modifier = Modifier.size(118.dp).graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithCache {
+                        val brush = Brush.linearGradient(
+                            listOf(Color(0xFF4FA3FF), Color(0xFF0474FB)),
+                            start = Offset(size.width * 28f / 108f, size.height * 36f / 108f),
+                            end = Offset(size.width * 78f / 108f, size.height * 72f / 108f),
+                        )
+                        onDrawWithContent {
+                            drawContent()
+                            drawRect(brush, blendMode = BlendMode.SrcIn)
+                        }
+                    },
+                )
+            }
         }
     }
 }
@@ -355,8 +440,8 @@ private fun Profiles() {
     val acts = profileActs(entries, active)
     val hidden = entries.count { it.hidden }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth().padding(start = 4.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.padding(top = BesideCards), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(stringResource(R.string.home_profiles), style = Type.section, color = colors.muted)
             SortMenu(sort) { picked -> TunnelManager.scope.launch { store.saveProfileSort(picked) } }
             Spacer(Modifier.weight(1f))

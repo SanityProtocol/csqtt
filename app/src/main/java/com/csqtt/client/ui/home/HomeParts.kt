@@ -1,6 +1,14 @@
 package com.csqtt.client.ui.home
 
 import android.os.SystemClock
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.TweenSpec
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
@@ -10,13 +18,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.node.Ref
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -26,8 +39,104 @@ import com.csqtt.client.R
 import com.csqtt.client.StreamsLine
 import com.csqtt.client.Tap
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.showsTraffic
+import com.csqtt.client.ui.design.Type
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+
+/**
+ * Home's text sizes, one set for both layouts (the operator, 2026-11-27: «Look at the fonts sizes - they're different.
+ * Make them same - I like the smaller single connection UI sizes»): the classic panel's own (P3-PLAN §1.3a).
+ */
+internal object HomeText {
+    val Status = Type.body.copy(fontWeight = FontWeight.Bold)
+    val Timer = Type.body.copy(fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
+
+    /**
+     * A line under the time. Its box is its line height whatever it holds: the arrows of the speeds come from another
+     * font, a little higher, and would make their line higher than the one it takes the place of.
+     */
+    val Line = Type.sub.copy(
+        lineHeight = 16.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum",
+        lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None),
+    )
+}
+
+/**
+ * How Home moves (the operator, 2026-11-27: «I don't mind moving, just make it smoother, not "flickering" and
+ * "jumping"», and «We must not solve "not moving" by adding fixed useless space»). No room is kept for what is not
+ * said: a line's room opens and closes over [MOVE_MS], so what is under it glides; a line that takes another's place
+ * fades into it; and the colours of the state turn instead of switching.
+ */
+internal object HomeMotion {
+    const val MOVE_MS = 240
+    const val FADE_OUT_MS = 90
+    const val FADE_IN_MS = 180
+
+    /**
+     * How long the room of a line that went stays before it closes, where another line follows shortly: a stop is
+     * «Остановка…» for half a second before the hint is back, and the list is not moved up and down for that.
+     */
+    const val LINGER_MS = 700
+
+    fun <T> move(delayMs: Int = 0): TweenSpec<T> = tween(MOVE_MS, delayMs, FastOutSlowInEasing)
+}
+
+/**
+ * A line of Home that is not always there: [value] is what it says, null when it says nothing. What it says changes in
+ * place; a line of another [kind] fades into its place; its room opens and closes as [HomeMotion] says, at once on the
+ * first frame. [lingers]: see [HomeMotion.LINGER_MS]. The line gives itself its distance from what is above it, inside
+ * [content], so a line that says nothing takes no room at all.
+ */
+@Composable
+internal fun <T : Any> HomeLine(
+    value: T?,
+    modifier: Modifier = Modifier,
+    kind: (T) -> Any = { Unit },
+    lingers: Boolean = false,
+    content: @Composable (T) -> Unit,
+) {
+    // read as states by the lines on screen: one that is fading out or in is not composed again by its caller
+    val now by rememberUpdatedState(value)
+    val kindOf by rememberUpdatedState(kind)
+    val draw by rememberUpdatedState(content)
+    AnimatedContent(
+        targetState = value?.let(kind),
+        modifier = modifier.fillMaxWidth(),
+        transitionSpec = {
+            val opens = initialState == null
+            val closes = targetState == null
+            (fadeIn(tween(HomeMotion.FADE_IN_MS, delayMillis = if (opens) 0 else HomeMotion.FADE_OUT_MS)) togetherWith
+                fadeOut(tween(HomeMotion.FADE_OUT_MS)))
+                .using(SizeTransform(clip = true) { _, _ -> HomeMotion.move(if (closes && lingers) HomeMotion.LINGER_MS else 0) })
+        },
+        contentAlignment = Alignment.TopCenter,
+        label = "home-line",
+    ) { shown ->
+        // as wide as its place when it says nothing too: only its height opens and closes
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            if (shown != null) {
+                // what it says now; once another line took its place, what it said last
+                val last = remember { Ref<T>() }
+                now?.takeIf { kindOf(it) == shown }?.let { last.value = it }
+                last.value?.let { draw(it) }
+            }
+        }
+    }
+}
+
+/**
+ * The speeds have something to show: in a state that shows them ([showsTraffic]), once the run has reported. It changes
+ * with that only, not on every report.
+ */
+@Composable
+internal fun rememberShowsTraffic(state: ConnectionState): Boolean {
+    val reported by remember { TunnelManager.traffic.map { it != null }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = TunnelManager.traffic.value != null)
+    return showsTraffic(state) && reported
+}
 
 /** The state's word as Home says it. */
 @Composable

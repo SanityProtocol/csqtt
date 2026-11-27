@@ -12,12 +12,13 @@ internal enum class ProfileModeAction { ENTER_SERVER, USE_LINK }
 
 /**
  * Which text action the Туннель tab offers: only while the profile is empty ([emptyProfileLinkMode], the store's
- * emptyProfileMode: its link mode, or null once it holds a link, a server or a subscription), the field on screen is
- * empty too and the tunnel is idle.
+ * emptyProfileMode: its link mode, or null once it holds a link, a server or a subscription) and the field on screen is
+ * empty too. A tunnel that runs does not take it away (the operator, 2026-11-27: nothing is held while connected): an
+ * empty profile is not the one that runs.
  */
-internal fun profileModeAction(emptyProfileLinkMode: Boolean?, field: String, tunnelBusy: Boolean): ProfileModeAction? =
+internal fun profileModeAction(emptyProfileLinkMode: Boolean?, field: String): ProfileModeAction? =
     when {
-        emptyProfileLinkMode == null || field.isNotBlank() || tunnelBusy -> null
+        emptyProfileLinkMode == null || field.isNotBlank() -> null
         emptyProfileLinkMode -> ProfileModeAction.ENTER_SERVER
         else -> ProfileModeAction.USE_LINK
     }

@@ -82,7 +82,8 @@ class TunnelFormTest {
         store.saveHomeLayout(layoutBefore)
     }
 
-    private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
+    private fun shown(text: String, substring: Boolean = false): Boolean =
+        compose.onAllNodes(hasText(text, substring = substring)).fetchSemanticsNodes().isNotEmpty()
     private fun field(label: String) = compose.onNode(hasSetTextAction() and hasText(label))
     private fun typed(label: String): String? = compose.onAllNodes(hasSetTextAction() and hasText(label))
         .fetchSemanticsNodes().firstOrNull()?.config?.getOrNull(SemanticsProperties.EditableText)?.text
@@ -439,6 +440,45 @@ class TunnelFormTest {
             compose.waitForIdle()
             Thread.sleep(500)
             assertFalse("a profile typed into the emptied slot is marked for the one deleted from it", shown(banner))
+        }
+    }
+
+    /**
+     * The operator's note of 2026-11-27: nothing is held while the tunnel runs. A setting the run took at its start
+     * is changed all the same — it is stored for the next connection, and says so.
+     */
+    @Test
+    fun aSettingIsChangedWhileTheTunnelRunsAndSaysItIsForTheNextConnection() {
+        runBlocking {
+            slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first())
+            slot.saveVkHashesOnly("H".repeat(20))
+        }
+        val next = "Применится при следующем подключении."
+        val track = hasContentDescription("Потоки")
+        ActivityScenario.launch(MainActivity::class.java).use {
+            openTunnel()
+            compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
+            compose.waitUntil(5_000) { shown("MTU") }
+            assertFalse("said with no tunnel running", shown(next))
+            // the tunnel as the manager would say it, with no tunnel: the screen reads nothing else
+            TunnelManager.running.value = true
+            try {
+                compose.waitUntil(5_000) { shown(next) }
+                assertFalse(shown("Пока туннель включён", substring = true))
+                // the count of streams, by a finger on the line at 30
+                compose.onNode(track).performScrollTo().performTouchInput {
+                    val inset = 10.dp.toPx()
+                    click(Offset(inset + (width - 2 * inset) * (30 - 5) / 95f, centerY))
+                }
+                compose.waitUntil(5_000) { runBlocking { slot.workersPerHash.first() } == 30 }
+                // the MTU
+                compose.onNodeWithText("1500").performScrollTo().performClick()
+                compose.waitUntil(5_000) { shown("1280") }
+                compose.onAllNodes(hasText("1280")).onLast().performClick()
+                compose.waitUntil(5_000) { runBlocking { slot.vpnMtu.first() } == 1280 }
+            } finally {
+                TunnelManager.running.value = false
+            }
         }
     }
 

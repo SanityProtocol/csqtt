@@ -30,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -58,7 +57,6 @@ import com.csqtt.client.TunnelManager
 import com.csqtt.client.TurnSubnetRegistry
 import com.csqtt.client.VpnMtu
 import com.csqtt.client.shouldConfirmAutoJsMode
-import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.ui.components.Card
 import com.csqtt.client.ui.components.Field
 import com.csqtt.client.ui.components.IconBtn
@@ -82,7 +80,8 @@ private val Inset = RoundedCornerShape(14.dp)
 /**
  * «Дополнительно» (the canvas, F-TunnelMore, F-TunnelMoreTcp): how the tunnel is made — where the access to VK's
  * servers comes from, the transport, the streams, the MTU. Folded until asked for; open, it stays open on every
- * profile. What a running tunnel cannot take is held until it is off, and says so.
+ * profile. Nothing is held while the tunnel runs (the operator, 2026-11-27): what a running tunnel cannot take — and
+ * every row here is a parameter the run takes at its start — is stored for its next connection, and says so.
  */
 @Composable
 internal fun MoreCard(view: TunnelView, open: Boolean, onOpen: (Boolean) -> Unit) {
@@ -169,13 +168,7 @@ private fun More(view: TunnelView) {
         Select(
             selected = transport,
             options = listOf(CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT to UDP, CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS to TCP),
-            onSelect = { picked ->
-                if (shouldConfirmTcpTransport(transport, picked, view.tcpAcknowledged)) {
-                    nav.open(Routes.risk(view.profile, RiskKind.TCP, picked))
-                } else {
-                    scope.launch { store.saveTurnTransport(picked) }
-                }
-            },
+            onSelect = { picked -> scope.launch { store.saveTurnTransport(picked) } },
             description = stringResource(R.string.tunnel_transport),
         )
     }
@@ -188,7 +181,9 @@ private fun More(view: TunnelView) {
             Seg(DpiSplitMode.entries.map { stringResource(it.text()) }, DpiSplitMode.entries.indexOf(dpi), { index ->
                 scope.launch { store.saveDpiSplit(DpiSplitMode.entries[index]) }
             })
-            Text(stringResource(R.string.tunnel_dpi_sub), style = Type.sub, color = colors.muted)
+            // what the picked level does, and what it costs: the levels' names alone say neither
+            Text(stringResource(dpi.says()), style = Type.sub, color = colors.muted)
+            Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = colors.muted)
         }
     }
 
@@ -210,6 +205,13 @@ private fun More(view: TunnelView) {
             },
         ) { nav.open(Routes.turnSubnets(view.profile)) }
     }
+}
+
+private fun DpiSplitMode.says(): Int = when (this) {
+    DpiSplitMode.OFF -> R.string.tunnel_dpi_off_says
+    DpiSplitMode.LIGHT -> R.string.tunnel_dpi_light_says
+    DpiSplitMode.MEDIUM -> R.string.tunnel_dpi_medium_says
+    DpiSplitMode.HEAVY -> R.string.tunnel_dpi_heavy_says
 }
 
 private fun DpiSplitMode.text(): Int = when (this) {
@@ -241,7 +243,7 @@ private fun Captcha(view: TunnelView) {
     val webView = mode != "rjs"
     val wbvManual = wbvMethod != "auto"
     Column(
-        Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp).alpha(if (view.running) 0.5f else 1f).background(colors.raised, Inset)
+        Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp).background(colors.raised, Inset)
             .padding(start = 12.dp, top = 4.dp, end = 12.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -258,14 +260,12 @@ private fun Captcha(view: TunnelView) {
                     }
                 }
             },
-            sub = if (view.running) stringResource(R.string.tunnel_run_locked) else null,
-            enabled = !view.running,
+            sub = if (view.running) stringResource(R.string.tunnel_next_connection) else null,
         )
-        // while the tunnel runs the choices stay in sight, and are held
         if (!auto) {
             Text(stringResource(R.string.tunnel_captcha_method), style = Type.label, color = colors.muted)
             Seg(listOf(WBV, RJS), if (webView) 0 else 1, { index ->
-                if (!view.running) scope.launch {
+                scope.launch {
                     if (index == 0) {
                         store.saveCaptchaMode("wv")
                         store.saveCaptchaSolveMethod(if (wbvManual) "manual" else "auto")
@@ -280,7 +280,7 @@ private fun Captcha(view: TunnelView) {
                 Text(stringResource(R.string.tunnel_captcha_mode), style = Type.label, color = colors.muted)
                 Seg(
                     listOf(stringResource(R.string.tunnel_captcha_manual), stringResource(R.string.tunnel_work_auto)), if (wbvManual) 0 else 1,
-                    { index -> if (!view.running) scope.launch { store.saveWbvCaptchaSolveMethod(if (index == 0) "manual" else "auto") } },
+                    { index -> scope.launch { store.saveWbvCaptchaSolveMethod(if (index == 0) "manual" else "auto") } },
                 )
             }
         }
@@ -353,7 +353,7 @@ private fun Streams(view: TunnelView) {
         )
     }
     StreamsTrack(
-        value = value, maximum = maximum, calls = calls, mark = StreamsSlider.mark(limit, maximum), enabled = !view.running,
+        value = value, maximum = maximum, calls = calls, mark = StreamsSlider.mark(limit, maximum),
         onChange = { dragged = it },
         onDone = {
             val picked = dragged
@@ -392,7 +392,7 @@ private fun Streams(view: TunnelView) {
     }
     when {
         limit != null -> Text(stringResource(R.string.tunnel_streams_limit, limit), style = Type.sub, color = colors.muted)
-        view.running -> Text(stringResource(R.string.tunnel_streams_locked), style = Type.sub, color = colors.muted)
+        view.running -> Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = colors.muted)
     }
 }
 
@@ -403,7 +403,6 @@ private fun StreamsTrack(
     maximum: Int,
     calls: Int,
     mark: Float?,
-    enabled: Boolean,
     onChange: (Int) -> Unit,
     onDone: () -> Unit,
 ) {
@@ -426,23 +425,20 @@ private fun StreamsTrack(
         .map { StreamsSlider.fraction(StreamsPlan.totalWithin(it, calls, stops.last()), maximum) } + 1f
     val zoneColors = listOf(colors.ok, colors.accent, colors.warn, colors.danger)
     Canvas(
-        Modifier.fillMaxWidth().height(44.dp).alpha(if (enabled) 1f else 0.5f)
+        Modifier.fillMaxWidth().height(44.dp)
             .semantics {
                 contentDescription = name
                 stateDescription = spoken
                 progressBarRangeInfo = ProgressBarRangeInfo(value.toFloat(), stops.first().toFloat()..stops.last().toFloat(), (stops.size - 2).coerceAtLeast(0))
-                if (enabled) {
-                    setProgress { wanted ->
-                        val picked = stops.minBy { kotlin.math.abs(it - wanted) }
-                        change(picked)
-                        done()
-                        true
-                    }
+                setProgress { wanted ->
+                    val picked = stops.minBy { kotlin.math.abs(it - wanted) }
+                    change(picked)
+                    done()
+                    true
                 }
             }
-            .focusable(enabled)
-            .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
+            .focusable()
+            .pointerInput(Unit) {
                 val inset = 10.dp.toPx()
                 fun at(x: Float) = StreamsSlider.valueAt((x - inset) / (size.width - 2 * inset).coerceAtLeast(1f), top)
                 detectTapGestures { offset ->
@@ -450,8 +446,7 @@ private fun StreamsTrack(
                     done()
                 }
             }
-            .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
+            .pointerInput(Unit) {
                 val inset = 10.dp.toPx()
                 fun at(x: Float) = StreamsSlider.valueAt((x - inset) / (size.width - 2 * inset).coerceAtLeast(1f), top)
                 detectHorizontalDragGestures(onDragEnd = { done() }, onDragCancel = { done() }) { touch, _ ->
@@ -518,7 +513,6 @@ private fun Mtu(view: TunnelView) {
                 if (preset != null && preset != stored) scope.launch { store.saveVpnMtu(preset) }
             },
             description = stringResource(R.string.tunnel_mtu),
-            enabled = !view.running,
         )
     }
     if (custom) {
@@ -530,12 +524,14 @@ private fun Mtu(view: TunnelView) {
                 VpnMtu.parse(typed)?.takeIf { it != stored }?.let { mtu -> scope.launch { store.saveVpnMtu(mtu) } }
             },
             error = if (VpnMtu.parse(typed) == null) stringResource(R.string.tunnel_port_wrong_range, VpnMtu.RANGE.first, VpnMtu.RANGE.last) else null,
-            keyboard = KeyboardOptions(keyboardType = KeyboardType.Number), enabled = !view.running,
+            keyboard = KeyboardOptions(keyboardType = KeyboardType.Number),
         )
     }
     Text(
-        if (view.running) stringResource(R.string.tunnel_run_locked)
-        else stringResource(R.string.tunnel_mtu_hint, VpnMtu.RANGE.first, VpnMtu.RANGE.last),
-        style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = 4.dp),
+        stringResource(R.string.tunnel_mtu_hint, VpnMtu.RANGE.first, VpnMtu.RANGE.last),
+        style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = if (view.running) 0.dp else 4.dp),
     )
+    if (view.running) {
+        Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = 4.dp))
+    }
 }
