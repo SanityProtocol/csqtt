@@ -225,6 +225,8 @@ struct Inner {
     last_poll: Option<Instant>,
     /// Set by such a silence, until the relay answers a request of this allocation.
     unverified: bool,
+    /// A CreatePermission the relay refused in that doubt was asked once more, and has not succeeded since.
+    permission_refused_in_doubt: bool,
     shutting_down: bool,
     destroyed: bool,
     profile: CsqttTurnProfile,
@@ -337,6 +339,7 @@ impl NativeCore {
                 keepalive: None,
                 last_poll: None,
                 unverified: false,
+                permission_refused_in_doubt: false,
                 shutting_down: false,
                 destroyed: false,
                 profile,
@@ -947,6 +950,7 @@ impl Inner {
             }
             Operation::Permission => {
                 self.permission_failures = 0;
+                self.permission_refused_in_doubt = false;
                 self.unverified = false;
                 self.complete(operation, 0, 0);
             }
@@ -973,15 +977,31 @@ impl Inner {
         stun_code: i32,
         now: Instant,
     ) {
+        // In doubt after a sleep a request that fails ends the allocation at once (§1.9) — but for a CreatePermission
+        // the relay refused with a code of its own, once. That is an answer: the relay heard the request, and it speaks
+        // of the request, not of the allocation (437 does, and never comes here). It is asked once more, a second
+        // later; the doubt stays, and the Refresh sent in the same poll is still the verdict: its answer ends the
+        // doubt, its 437 or its silence ends the allocation. Refused again before it has succeeded, in doubt or out
+        // of it, it ends the allocation as it did: whether the relay's refusal passes is not known, and a stream left
+        // without its permission would stall, where one that ended is made again on demand. (A phone's morning,
+        // 2026-11-27: right after a sleep the VK relay answered four CreatePermissions with 400, and each ended its
+        // stream.)
+        let refused = operation == Operation::Permission && stun_code != 0;
+        if refused && self.permission_refused_in_doubt {
+            self.destroy_allocation(operation, status, stun_code);
+            return;
+        }
+        let once_more = refused && self.unverified;
         if matches!(
             operation,
             Operation::Refresh | Operation::Permission | Operation::Channel
         ) && self.state == STATE_READY
-            && !self.unverified
+            && (!self.unverified || once_more)
             && self
                 .allocation_expires_at
                 .is_some_and(|deadline| now < deadline)
         {
+            self.permission_refused_in_doubt |= once_more;
             self.complete(operation, status, stun_code);
             if self.schedule_maintenance_retry(operation, now) {
                 return;
@@ -1869,6 +1889,111 @@ mod tests {
         // sent at 0, 0.2, 0.6 and 1.4 s, given up at 3.0 s: the wait of whoever woke the phone
         assert_eq!(sent, usize::from(UNVERIFIED_TRANSMISSIONS));
         assert_eq!(given_up_at - asked_at, Duration::from_millis(2_800));
+    }
+
+    /// The requests of a wake after three minutes asleep, the allocation in doubt: (method, transaction) of each.
+    fn woken_in_doubt(core: &NativeCore, key: &[u8; 16]) -> Vec<(u16, [u8; 12])> {
+        bind_ready_channel(core, key);
+        core.poll().unwrap();
+        crate::clock::tests::sleep(Duration::from_secs(180));
+        core.poll().unwrap();
+        assert!(core.lock().unverified);
+        pull_requests(core)
+    }
+
+    fn transaction_of(requests: &[(u16, [u8; 12])], method: u32) -> [u8; 12] {
+        requests.iter().find(|request| u32::from(request.0) == method).unwrap().1
+    }
+
+    /// The relay's answer to the request [transaction] of [method]: an error [code] (400 → `[4, 0]`), or a success.
+    fn answer(core: &NativeCore, key: &[u8; 16], method: u32, transaction: [u8; 12], code: Option<[u8; 2]>) {
+        let kind = (if code.is_some() { 0x0110 } else { 0x0100 }) | method as u16;
+        let mut message = MessageBuilder::with_transaction(kind, transaction);
+        if let Some([class, number]) = code {
+            message = message.attribute(ATTR_ERROR_CODE, &[0, 0, class, number]);
+        }
+        if method == METHOD_REFRESH && code.is_none() {
+            message = message.attribute(ATTR_LIFETIME, &600u32.to_be_bytes());
+        }
+        assert_eq!(core.input_stun(&message.finish_authenticated(key).unwrap()), 0);
+    }
+
+    /// The phone test of 2026-11-27: right after a sleep the VK relay refused a CreatePermission with 400, and the
+    /// stream ended for it. A refusal is the relay's answer, and it speaks of the request, not of the allocation: the
+    /// request is asked once more, the doubt stays, and the Refresh sent with it is still the verdict.
+    #[test]
+    fn a_permission_the_relay_refuses_in_doubt_is_asked_once_more() {
+        let (core, key) = ready_core();
+        let requests = woken_in_doubt(&core, &key);
+        answer(&core, &key, METHOD_CREATE_PERMISSION, transaction_of(&requests, METHOD_CREATE_PERMISSION), Some([4, 0]));
+        {
+            let inner = core.lock();
+            assert_eq!(inner.state, STATE_READY, "a refused CreatePermission ended an allocation in doubt");
+            assert!(inner.unverified, "a refusal says nothing of the allocation: the doubt stays");
+            let retry = inner.permission_retry.expect("the refused CreatePermission is not asked again") - Instant::now();
+            assert!(retry <= MAINTENANCE_RETRY_BASE && retry > MAINTENANCE_RETRY_BASE - Duration::from_millis(100));
+        }
+        // a second later it is asked again, beside the Refresh and the ChannelBind still waiting for their answers
+        crate::clock::tests::sleep(MAINTENANCE_RETRY_BASE);
+        core.poll().unwrap();
+        let again = transaction_of(&pull_requests(&core), METHOD_CREATE_PERMISSION);
+        assert_eq!(core.lock().state, STATE_READY);
+        // the Refresh's answer ends the doubt, as it did, and the permission the relay now grants is a permission as
+        // any: one it refuses at some later refresh is asked again, as ever
+        answer(&core, &key, METHOD_REFRESH, transaction_of(&requests, METHOD_REFRESH), None);
+        assert!(!core.lock().unverified);
+        answer(&core, &key, METHOD_CREATE_PERMISSION, again, None);
+        core.lock().start_operation(Operation::Permission, true, 0).unwrap();
+        let later = transaction_of(&pull_requests(&core), METHOD_CREATE_PERMISSION);
+        answer(&core, &key, METHOD_CREATE_PERMISSION, later, Some([4, 0]));
+        let inner = core.lock();
+        assert_eq!(inner.state, STATE_READY, "a refusal out of doubt, after the permission was granted, ended the allocation");
+        assert!(inner.permission_retry.is_some());
+    }
+
+    /// Once more, and no more: whether the relay's refusal passes is not known, and a stream left without its
+    /// permission would stall. Refused again, the allocation ends as it did, and its stream is made again on demand —
+    /// with the doubt still on, and after the Refresh's answer has ended it.
+    #[test]
+    fn a_permission_refused_again_ends_the_allocation() {
+        for refresh_answered in [false, true] {
+            let (core, key) = ready_core();
+            let requests = woken_in_doubt(&core, &key);
+            answer(&core, &key, METHOD_CREATE_PERMISSION, transaction_of(&requests, METHOD_CREATE_PERMISSION), Some([4, 0]));
+            if refresh_answered {
+                answer(&core, &key, METHOD_REFRESH, transaction_of(&requests, METHOD_REFRESH), None);
+                assert!(!core.lock().unverified);
+            }
+            crate::clock::tests::sleep(MAINTENANCE_RETRY_BASE);
+            core.poll().unwrap();
+            let again = transaction_of(&pull_requests(&core), METHOD_CREATE_PERMISSION);
+            assert_eq!(core.lock().state, STATE_READY);
+            answer(&core, &key, METHOD_CREATE_PERMISSION, again, Some([4, 0]));
+            assert_eq!(
+                core.lock().state,
+                STATE_DESTROYING,
+                "refused twice (the Refresh answered: {refresh_answered}), the allocation stayed"
+            );
+        }
+    }
+
+    /// The exception is the refused CreatePermission alone. In doubt a Refresh the relay refuses, its 437 to the
+    /// CreatePermission and a CreatePermission it does not answer at all still end the allocation at once.
+    #[test]
+    fn in_doubt_nothing_but_a_refused_permission_keeps_the_allocation() {
+        for (method, code) in [(METHOD_REFRESH, [4, 0]), (METHOD_CREATE_PERMISSION, [4, 37])] {
+            let (core, key) = ready_core();
+            let requests = woken_in_doubt(&core, &key);
+            answer(&core, &key, method, transaction_of(&requests, method), Some(code));
+            assert_eq!(core.lock().state, STATE_DESTROYING, "method {method} refused with {code:?} kept an allocation in doubt");
+        }
+        // silence in doubt is the end, whoever does not answer: a timeout carries no code
+        let (core, key) = ready_core();
+        bind_ready_channel(&core, &key);
+        let mut inner = core.lock();
+        inner.unverified = true;
+        inner.complete_failure(Operation::Permission, RESULT_TIMEOUT, 0, Instant::now());
+        assert_eq!(inner.state, STATE_DESTROYING);
     }
 
     /// §1.9: an allocation whose 600 s ran out in the phone's sleep is gone on the relay, and here at the first look.

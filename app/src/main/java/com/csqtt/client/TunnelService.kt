@@ -978,10 +978,13 @@ class TunnelService : Service() {
                     while (isActive && !physicalNetworks.isUsable(network)) {
                         if (probeVkThrough(network)) {
                             if (!isActive || !isPhysicalCandidate(network)) return@launch
+                            // said only where the silence was said: the log then has both ends of it
+                            if (vkProbeSaidUnanswered(failures)) logVkProbe(vkProbeAnswersLine(vkProbeNetwork(network)))
                             updatePhysicalNetwork(network, true)
                             return@launch
                         }
                         failures++
+                        if (vkProbeSaysUnanswered(failures)) logVkProbe(vkProbeUnansweredLine(vkProbeNetwork(network)))
                         delay(vkProbeRetryDelayMs(failures))
                     }
                 } finally {
@@ -996,6 +999,16 @@ class TunnelService : Service() {
             job.start()
         }
     }
+
+    private fun vkProbeNetwork(network: Network): String {
+        val capabilities = runCatching { connectivityManager.getNetworkCapabilities(network) }.getOrNull()
+        return vkProbeNetworkName(
+            wifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true,
+            cellular = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true,
+        )
+    }
+
+    private fun logVkProbe(line: String) = TunnelManager.updateLog("vk_probe", line, 2, false, LogLevel.NET)
 
     private fun forgetPhysicalNetwork(network: Network) {
         synchronized(vkProbeLock) {
