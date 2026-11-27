@@ -97,11 +97,11 @@ internal fun tunnelIssues(
 }
 
 /**
- * The «Потоки» slider (the canvas, F-TunnelMore): it stops at whole groups of ten, from one group to the profile's
- * maximum, and the server's limit, when the server named one, is marked on its track (S10's hint).
+ * The «Потоки» slider (the canvas, F-TunnelMore): it stops at every five, from five to the profile's maximum (the
+ * operator, 2026-11-27), and the server's limit, when the server named one, is marked on its track (S10's hint).
  */
 internal object StreamsSlider {
-    private const val STEP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
+    private const val STEP = WorkerCountPolicy.STEP
 
     /** The counts the slider stops at. */
     fun stops(maximum: Int): List<Int> = (STEP..maximum.coerceAtLeast(STEP) step STEP).toList()
@@ -121,48 +121,73 @@ internal object StreamsSlider {
 
     /**
      * The server's limit as a place on the track; null when the server named none. A limit the track has no place for
-     * (fewer than one group, more than the profile's maximum) is marked at the end it lies beyond.
+     * (fewer than the first stop, more than the profile's maximum) is marked at the end it lies beyond.
      */
     fun mark(serverLimit: Int?, maximum: Int): Float? = serverLimit?.let { fraction(it, maximum) }
 }
 
+/** Where a count of streams on one hash stands (the operator, 2026-11-27): the slider's four colours. */
+internal enum class StreamZone { Green, Blue, Orange, Red }
+
 /**
- * How a profile's streams land on its calls (the operator, 2026-11-27: the count is said per hash, and what is
- * recommended is a count per hash, not a total). The core deals the streams out in tens — each ten on one VK
- * credential, which is one more guest in the call — a ten to a hash in turn (`group_hash_index`), so with fewer hashes
- * than tens some calls carry several.
+ * How a profile's streams land on its calls, and what that load is called (the operator, 2026-11-27: the count is
+ * said per hash, and the zones are counts per hash — a hash is a call, and two calls with twenty streams each are no
+ * worse off than one call with twenty). The core deals the streams out in tens — each ten on one VK credential, which
+ * is one more guest in the call — a ten to a hash in turn (`group_hash_index`); the last ten may be a part of one.
  */
 internal object StreamsPlan {
-    private const val STEP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
+    private const val GROUP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
 
-    /**
-     * The most streams recommended on one hash: three credentials on a call. The 2.1 line enforced the same three (27
-     * streams, in its groups of nine) and 2.0 ran two by default; 2.5 enforces nothing, and a total of 70 on a single
-     * hash was seven guests in one call. One constant: what the red part of the slider and its warning go by.
-     */
-    const val RECOMMENDED_PER_HASH = 30
+    /** The most streams on a hash that is still green, blue (what is recommended), orange; above the last, red. */
+    const val GREEN_PER_HASH = 20
+    const val RECOMMENDED_PER_HASH = 50
+    const val ORANGE_PER_HASH = 70
 
     /** The most streams any one hash carries when [total] streams go over [hashes] calls. */
     fun perHash(total: Int, hashes: Int): Int {
-        val tens = (total + STEP - 1) / STEP
-        return (tens + hashes - 1) / hashes.coerceAtLeast(1) * STEP
+        val calls = hashes.coerceAtLeast(1)
+        val groups = (total + GROUP - 1) / GROUP
+        var most = 0
+        for (call in 0 until minOf(calls, groups)) {
+            var carried = 0
+            for (group in call until groups step calls) {
+                carried += if (group == groups - 1) total - GROUP * (groups - 1) else GROUP
+            }
+            most = maxOf(most, carried)
+        }
+        return most
     }
 
-    /** The largest total that keeps every one of [hashes] calls within [RECOMMENDED_PER_HASH]; never above [maximum]. */
-    fun recommended(hashes: Int, maximum: Int): Int = (hashes.coerceAtLeast(1) * RECOMMENDED_PER_HASH).coerceAtMost(maximum)
+    fun zone(perHash: Int): StreamZone = when {
+        perHash <= GREEN_PER_HASH -> StreamZone.Green
+        perHash <= RECOMMENDED_PER_HASH -> StreamZone.Blue
+        perHash <= ORANGE_PER_HASH -> StreamZone.Orange
+        else -> StreamZone.Red
+    }
+
+    /** The zone of [total] streams over [hashes] calls. */
+    fun zone(total: Int, hashes: Int): StreamZone = zone(perHash(total, hashes))
+
+    /**
+     * The largest total that keeps every one of [hashes] calls within [perHashLimit] (one of the three limits above,
+     * whole tens); never above [maximum]. Where a zone ends on the slider's line.
+     */
+    fun totalWithin(perHashLimit: Int, hashes: Int, maximum: Int): Int = (hashes.coerceAtLeast(1) * perHashLimit).coerceAtMost(maximum)
 
     /**
      * Over how many calls a profile's streams go. With the user's own hashes or a link's, the ones in use ([manual]),
-     * no more than the tunnel takes. In «Авто API» the app makes a call for every ten streams, up to that same count.
-     * Null where the count says nothing: «Авто ВК», whose one call is the account's own and is served by the account's
-     * sessions, and a profile that has no hash yet.
+     * no more than the tunnel takes; a profile with no hash yet is judged as with one, the fewest it will have. In
+     * «Авто API» the app makes a call for every ten streams, up to that same count. «Авто ВК» has one call, the
+     * account's own.
      */
-    fun hashes(autoVk: Boolean, autoApi: Boolean, manual: Int): Int? = when {
-        autoVk -> null
+    fun calls(autoVk: Boolean, autoApi: Boolean, manual: Int): Int = when {
+        autoVk -> 1
         autoApi -> CsqttConstants.Tunnel.MAX_VK_HASHES
-        manual <= 0 -> null
-        else -> manual.coerceAtMost(CsqttConstants.Tunnel.MAX_VK_HASHES)
+        else -> manual.coerceIn(1, CsqttConstants.Tunnel.MAX_VK_HASHES)
     }
+
+    /** Whether the count is said per hash: where the profile has hashes to say it of. */
+    fun saidPerHash(autoVk: Boolean, autoApi: Boolean, manual: Int): Boolean = !autoVk && (autoApi || manual > 0)
 }
 
 /**

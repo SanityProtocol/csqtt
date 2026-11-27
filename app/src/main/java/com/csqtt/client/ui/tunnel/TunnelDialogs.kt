@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.csqtt.client.R
+import com.csqtt.client.StreamZone
 import com.csqtt.client.StreamsPlan
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.ui.components.Btn
@@ -24,8 +25,8 @@ import com.csqtt.client.ui.design.Type
 import kotlinx.coroutines.launch
 
 /**
- * What a risk question is about: a mode that signs in to VK's unofficial API, the TCP transport, or more streams than
- * are recommended for the profile's hashes (its value: the count picked and the recommended one, «60:30»).
+ * What a risk question is about: a mode that signs in to VK's unofficial API, the TCP transport, or a count of streams
+ * in the slider's orange or red zone (its value: the count picked and the most one hash would carry, «120:60»).
  */
 internal object RiskKind {
     const val HASH_MODE = "hash"
@@ -40,6 +41,7 @@ internal object InfoTopic {
     const val WORK_MODE = "work"
     const val TRANSPORT = "transport"
     const val STREAMS = "streams"
+    const val SRTP = "srtp"
 }
 
 /**
@@ -54,17 +56,20 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
     val profile = parts.getOrNull(0)?.toIntOrNull()
     val kind = parts.getOrNull(1)
     val value = parts.getOrNull(2).orEmpty()
-    // a count of streams comes with the recommended one it is above
+    // a count of streams comes with the most one hash would carry of it: which says the zone it is in
     val streams = value.split(':').mapNotNull(String::toIntOrNull).takeIf { kind == RiskKind.STREAMS && it.size == 2 }
-    val known = kind in setOf(RiskKind.HASH_MODE, RiskKind.WORK_MODE, RiskKind.TCP) || streams != null
+    val streamsZone = streams?.let { StreamsPlan.zone(it[1]) }
+    val known = kind in setOf(RiskKind.HASH_MODE, RiskKind.WORK_MODE, RiskKind.TCP) ||
+        streamsZone == StreamZone.Orange || streamsZone == StreamZone.Red
     if (profile == null || !known || value.isEmpty()) {
         LaunchedEffect(Unit) { close() }
         return
     }
     val store = rememberProfileStore(profile)
     var dontRemind by rememberSaveable { mutableStateOf(false) }
+    val danger = streamsZone == StreamZone.Red
     DialogFrame(
-        title = stringResource(R.string.risk_title), onDismiss = close, dismissOnOutside = false,
+        title = stringResource(if (danger) R.string.risk_danger_title else R.string.risk_title), onDismiss = close, dismissOnOutside = false,
         actions = {
             TextBtn(stringResource(R.string.action_cancel), close)
             Btn(
@@ -87,19 +92,21 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
                     }
                     close()
                 },
-                kind = BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp),
+                // the danger zone's «Понятно» is drawn as what it is
+                kind = if (danger) BtnKind.Destroy else BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp),
             )
         },
     ) {
         Text(
             when {
-                streams != null -> stringResource(R.string.risk_streams, StreamsPlan.RECOMMENDED_PER_HASH, streams[1], streams[0])
+                danger -> stringResource(R.string.risk_streams_danger, streams[1], StreamsPlan.ORANGE_PER_HASH)
+                streams != null -> stringResource(R.string.risk_streams_over, streams[1], StreamsPlan.RECOMMENDED_PER_HASH)
                 kind == RiskKind.TCP -> stringResource(R.string.risk_tcp)
                 else -> stringResource(R.string.risk_auto_vk)
             },
             style = Type.fact, color = Csq.colors.text,
         )
-        // a count of streams is asked about every time it goes into the red part: there is nothing to remember
+        // a count of streams is asked about every time it goes up into a zone: there is nothing to remember
         if (streams == null) CheckRow(stringResource(R.string.risk_dont_remind), dontRemind, { dontRemind = it })
     }
 }
@@ -112,6 +119,7 @@ internal fun InfoDialog(topic: String, close: () -> Unit) {
         InfoTopic.WORK_MODE -> R.string.info_work_title to listOf(R.string.info_work_captcha, R.string.info_work_auto, R.string.info_work_auto_vk)
         InfoTopic.TRANSPORT -> R.string.info_transport_title to listOf(R.string.info_transport_udp, R.string.info_transport_tcp, R.string.info_transport_when)
         InfoTopic.STREAMS -> R.string.info_streams_title to listOf(R.string.info_streams, R.string.info_streams_hashes, R.string.info_streams_server)
+        InfoTopic.SRTP -> R.string.info_srtp_title to listOf(R.string.info_srtp_auto, R.string.info_srtp_dtls, R.string.info_srtp_wrap)
         else -> {
             LaunchedEffect(Unit) { close() }
             return
@@ -122,8 +130,12 @@ internal fun InfoDialog(topic: String, close: () -> Unit) {
         actions = { Btn(stringResource(R.string.action_understood), close, kind = BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp)) },
     ) {
         for (paragraph in paragraphs) {
-            // the one paragraph with a number in it: what is recommended on a hash
-            val text = if (paragraph == R.string.info_streams_hashes) stringResource(paragraph, StreamsPlan.RECOMMENDED_PER_HASH) else stringResource(paragraph)
+            // the one paragraph with numbers in it: where the zones end on a hash
+            val text = if (paragraph == R.string.info_streams_hashes) {
+                stringResource(paragraph, StreamsPlan.GREEN_PER_HASH, StreamsPlan.RECOMMENDED_PER_HASH, StreamsPlan.ORANGE_PER_HASH)
+            } else {
+                stringResource(paragraph)
+            }
             Text(text, style = Type.fact, color = Csq.colors.text)
         }
     }

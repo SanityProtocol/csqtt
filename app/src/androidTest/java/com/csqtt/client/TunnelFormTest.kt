@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -126,49 +127,75 @@ class TunnelFormTest {
     }
 
     /**
-     * The operator, 2026-11-27: the count of streams is said per hash, the part of the line above what is recommended
-     * for the profile's hashes is red, and a thumb let go there is asked about before it is stored.
+     * The operator, 2026-11-27: the count of streams moves in fives and is said per hash; the line has four zones,
+     * counted per hash (green to 20, blue to 50, orange to 70, red above), and a thumb let go in the orange or the red
+     * zone, from a zone below it, is asked about before the count is stored.
      */
     @Test
-    fun aCountAboveTheRecommendedOneIsAskedAboutBeforeItIsStored() {
+    fun aCountIsAskedAboutWhenItGoesUpIntoTheOrangeOrTheRedZone() {
         runBlocking {
             slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first())
             slot.saveVkHashesOnly("H".repeat(20))
         }
         fun streams() = runBlocking { slot.workersPerHash.first() }
-        val track = hasContentDescription("Потоки") and hasProgressBarRangeInfo(ProgressBarRangeInfo(10f, 10f..100f, 8))
+        val track = hasContentDescription("Потоки")
+        // a finger on the line at a stop: the track's own arithmetic, a stop every five from 5 to 100
+        fun tap(stop: Int) = compose.onNode(track).performScrollTo().performTouchInput {
+            val inset = 10.dp.toPx()
+            click(Offset(inset + (width - 2 * inset) * (stop - 5) / 95f, centerY))
+        }
         ActivityScenario.launch(MainActivity::class.java).use {
             openTunnel()
             compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
-            compose.waitUntil(5_000) { shown("10 на хеш (всего 10)") }
-            assertTrue("one hash: thirty at most is recommended", shown("Рекомендуем до 30: не больше 30 на хеш"))
+            // a new profile starts at twenty, the top of the green zone
+            compose.waitUntil(5_000) { shown("20 на хеш (всего 20)") }
+            compose.onNode(track and hasProgressBarRangeInfo(ProgressBarRangeInfo(20f, 5f..100f, 18))).assertExists()
+            assertTrue("one hash: fifty at most is recommended", shown("Рекомендуем не больше 50 на хеш"))
 
-            // a finger on the line at the fifth stop of ten: asked about, and nothing stored yet
-            compose.onNode(track).performScrollTo().performTouchInput { click(Offset(width * 0.45f, centerY)) }
+            // the blue zone asks nothing
+            tap(40)
+            compose.waitUntil(5_000) { streams() == 40 }
+            assertFalse(shown("Внимание!"))
+
+            // up into the orange zone: asked about, and nothing stored yet
+            tap(60)
             compose.waitUntil(5_000) { shown("Внимание!") }
-            assertEquals(10, streams())
+            assertEquals(40, streams())
             compose.onNodeWithText("Отмена").performClick()
             compose.waitUntil(5_000) { !shown("Внимание!") }
-            assertEquals(10, streams())
-            assertTrue("the thumb is back where the store has it", shown("10 на хеш (всего 10)"))
+            assertEquals(40, streams())
+            assertTrue("the thumb is back where the store has it", shown("40 на хеш (всего 40)"))
 
             // the same again, and «Понятно» stores it
-            compose.onNode(hasContentDescription("Потоки") and hasProgressBarRangeInfo(ProgressBarRangeInfo(10f, 10f..100f, 8)))
-                .performTouchInput { click(Offset(width * 0.45f, centerY)) }
+            tap(60)
             compose.waitUntil(5_000) { shown("Внимание!") }
             compose.onNodeWithText("Понятно").performClick()
-            compose.waitUntil(5_000) { streams() == 50 }
-            compose.waitUntil(5_000) { shown("50 на хеш (всего 50)") }
+            compose.waitUntil(5_000) { streams() == 60 }
+            compose.waitUntil(5_000) { shown("60 на хеш (всего 60)") && shown("Больше рекомендуемого: не больше 50 на хеш") }
 
-            // within what is recommended nothing is asked: a second hash makes sixty of it
-            runBlocking { slot.saveVkHashesOnly("H".repeat(20) + "," + "J".repeat(20)) }
-            compose.waitUntil(5_000) { shown("Рекомендуем до 60: не больше 30 на хеш") }
-            compose.waitUntil(5_000) { shown("30 на хеш (всего 50)") }
-            compose.onNode(hasContentDescription("Потоки") and hasProgressBarRangeInfo(ProgressBarRangeInfo(50f, 10f..100f, 8)))
-                .performTouchInput { click(Offset(width * 0.12f, centerY)) }
-            compose.waitUntil(5_000) { streams() == 20 }
+            // up into the red zone: the danger question, and then within the zone nothing more is asked
+            tap(85)
+            compose.waitUntil(5_000) { shown("Опасно!") }
+            assertEquals(60, streams())
+            compose.onNodeWithText("Понятно").performClick()
+            compose.waitUntil(5_000) { streams() == 85 }
+            compose.waitUntil(5_000) { shown("Опасно: больше 70 на хеш") }
+            tap(95)
+            compose.waitUntil(5_000) { streams() == 95 }
+            assertFalse(shown("Опасно!"))
+            // and down a zone nothing is asked either
+            tap(60)
+            compose.waitUntil(5_000) { streams() == 60 }
             assertFalse(shown("Внимание!"))
-            assertTrue(shown("10 на хеш (всего 20)"))
+
+            // a second hash: the zones are counts per hash, so they stretch — the whole line is green and blue now
+            runBlocking { slot.saveVkHashesOnly("H".repeat(20) + "," + "J".repeat(20)) }
+            compose.waitUntil(5_000) { shown("30 на хеш (всего 60)") }
+            assertFalse(shown("Больше рекомендуемого: не больше 50 на хеш"))
+            tap(95)
+            compose.waitUntil(5_000) { streams() == 95 }
+            assertFalse(shown("Внимание!") || shown("Опасно!"))
+            assertTrue(shown("50 на хеш (всего 95)"))
         }
     }
 

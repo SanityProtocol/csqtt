@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
@@ -50,6 +51,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DpiSplitMode
 import com.csqtt.client.R
+import com.csqtt.client.StreamZone
 import com.csqtt.client.StreamsPlan
 import com.csqtt.client.StreamsSlider
 import com.csqtt.client.TunnelManager
@@ -151,7 +153,7 @@ private fun More(view: TunnelView) {
     }
     if (view.authMode == CsqttConstants.VkAuth.MODE_CAPTCHA) Captcha(view)
 
-    SettingRow(stringResource(R.string.tunnel_srtp)) {
+    SettingRow(stringResource(R.string.tunnel_srtp), onInfo = { nav.open(Routes.info(InfoTopic.SRTP)) }) {
         Select(
             selected = srtp,
             options = listOf(
@@ -285,11 +287,24 @@ private fun Captcha(view: TunnelView) {
     }
 }
 
+/** A zone's colour, and the ground of a pill in it: as a chip of the same kind pairs them. */
+@Composable
+private fun StreamZone.colors(): Pair<Color, Color> {
+    val colors = Csq.colors
+    return when (this) {
+        StreamZone.Green -> colors.ok to colors.okSoft
+        StreamZone.Blue -> colors.accentText to colors.accentSoft
+        StreamZone.Orange -> colors.warn to colors.warnSoft
+        StreamZone.Red -> colors.danger to colors.dangerSoft
+    }
+}
+
 /**
- * «Потоки»: the count the profile asks for, said as the most one hash carries and the total (the operator,
- * 2026-11-27). The part of the track above what is recommended — [StreamsPlan.RECOMMENDED_PER_HASH] on a hash — is
- * red, and a thumb let go there is asked about before it is stored. The server's limit, when the server named one, is
- * marked on the track (S10).
+ * «Потоки» (the operator, 2026-11-27): the count the profile asks for, in fives, said as the most one hash carries
+ * and the total. The line has four zones, counted per hash — green to 20, blue to 50, orange to 70, red above — so
+ * with more hashes they stretch along it. A thumb let go in the orange or the red zone, from a zone below it, is asked
+ * about before the count is stored; nothing caps a count. The server's limit, when the server named one, is marked on
+ * the track (S10).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -307,14 +322,14 @@ private fun Streams(view: TunnelView) {
     // while a finger moves the thumb the count follows it; the store gets the one it is let go on
     var dragged by remember(saved, maximum) { mutableStateOf<Int?>(null) }
     val value = dragged ?: saved
-    val hashes = StreamsPlan.hashes(
-        autoVk = view.authMode == CsqttConstants.VkAuth.MODE_AUTO_JS || view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS,
-        // a link's own hashes are what its streams go over, whatever the mode says
-        autoApi = view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API && view.ownerHashes.isEmpty(),
-        manual = view.ownerInUse + view.ownCount,
-    )
-    val recommended = hashes?.let { StreamsPlan.recommended(it, maximum) } ?: maximum
-    val over = value > recommended
+    val autoVk = view.authMode == CsqttConstants.VkAuth.MODE_AUTO_JS || view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS
+    // a link's own hashes are what its streams go over, whatever the mode says
+    val autoApi = view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API && view.ownerHashes.isEmpty()
+    val manual = view.ownerInUse + view.ownCount
+    val calls = StreamsPlan.calls(autoVk, autoApi, manual)
+    val perHashSaid = StreamsPlan.saidPerHash(autoVk, autoApi, manual)
+    val zone = StreamsPlan.zone(value, calls)
+    val (zoneColor, zoneGround) = zone.colors()
 
     // the count is long («50 на хеш (всего 90)»): where it does not fit beside the label — a narrow screen, a large
     // font — it goes under the label, whole, and the label is never broken inside its word
@@ -328,33 +343,48 @@ private fun Streams(view: TunnelView) {
             Text(name, style = Type.body, color = colors.text)
             IconBtn(Icons.help, stringResource(R.string.setting_about, name), { nav.open(Routes.info(InfoTopic.STREAMS)) }, small = true, tint = colors.faint)
         }
-        // the count in its pill, as the canvas has it; in the danger colours once it is above what is recommended
+        // the count in its pill, as the canvas has it, in its zone's colours
         Text(
-            if (hashes == null) value.toString() else stringResource(R.string.tunnel_streams_per_hash, StreamsPlan.perHash(value, hashes), value),
-            style = Type.figure, color = if (over) colors.danger else colors.accentText, softWrap = false,
-            modifier = Modifier.background(if (over) colors.dangerSoft else colors.accentSoft, Shape.pill).padding(horizontal = 10.dp, vertical = 5.dp),
+            if (perHashSaid) stringResource(R.string.tunnel_streams_per_hash, StreamsPlan.perHash(value, calls), value) else value.toString(),
+            style = Type.figure, color = zoneColor, softWrap = false,
+            modifier = Modifier.background(zoneGround, Shape.pill).padding(horizontal = 10.dp, vertical = 5.dp),
         )
     }
     StreamsTrack(
-        value = value, maximum = maximum, recommended = recommended, mark = StreamsSlider.mark(limit, maximum), enabled = !view.running,
+        value = value, maximum = maximum, calls = calls, mark = StreamsSlider.mark(limit, maximum), enabled = !view.running,
         onChange = { dragged = it },
         onDone = {
             val picked = dragged
+            val into = picked?.let { StreamsPlan.zone(it, calls) }
             when {
-                picked == null || picked == saved -> dragged = null
-                // into the red part: asked about first, and stored only on the answer (the thumb goes back meanwhile)
-                picked > recommended && saved <= recommended -> {
+                picked == null || into == null || picked == saved -> dragged = null
+                // into the orange or the red zone from a zone below it: asked about first, and stored only on the
+                // answer (the thumb goes back meanwhile)
+                into >= StreamZone.Orange && into > StreamsPlan.zone(saved, calls) -> {
                     dragged = null
-                    nav.open(Routes.risk(view.profile, RiskKind.STREAMS, "$picked:$recommended"))
+                    nav.open(Routes.risk(view.profile, RiskKind.STREAMS, "$picked:${StreamsPlan.perHash(picked, calls)}"))
                 }
                 else -> TunnelManager.scope.launch { store.saveWorkersPerHash(picked) }
             }
         },
     )
-    if (recommended < maximum) {
-        Text(
-            stringResource(R.string.tunnel_streams_recommended, recommended, StreamsPlan.RECOMMENDED_PER_HASH),
-            style = Type.sub, color = if (over) colors.danger else colors.muted,
+    // what is recommended, said while the line has a part above it; in that part, and above it, what the count is
+    val recommended = StreamsPlan.totalWithin(StreamsPlan.RECOMMENDED_PER_HASH, calls, maximum)
+    when {
+        zone == StreamZone.Red -> Text(
+            stringResource(if (perHashSaid) R.string.tunnel_streams_danger else R.string.tunnel_streams_danger_plain, StreamsPlan.ORANGE_PER_HASH),
+            style = Type.sub, color = colors.danger,
+        )
+        zone == StreamZone.Orange -> Text(
+            stringResource(if (perHashSaid) R.string.tunnel_streams_over else R.string.tunnel_streams_over_plain, StreamsPlan.RECOMMENDED_PER_HASH),
+            style = Type.sub, color = colors.warn,
+        )
+        recommended < StreamsSlider.stops(maximum).last() -> Text(
+            stringResource(
+                if (perHashSaid) R.string.tunnel_streams_recommended else R.string.tunnel_streams_recommended_plain,
+                StreamsPlan.RECOMMENDED_PER_HASH,
+            ),
+            style = Type.sub, color = colors.muted,
         )
     }
     when {
@@ -368,7 +398,7 @@ private fun Streams(view: TunnelView) {
 private fun StreamsTrack(
     value: Int,
     maximum: Int,
-    recommended: Int,
+    calls: Int,
     mark: Float?,
     enabled: Boolean,
     onChange: (Int) -> Unit,
@@ -378,9 +408,20 @@ private fun StreamsTrack(
     val top by rememberUpdatedState(maximum)
     val change by rememberUpdatedState(onChange)
     val done by rememberUpdatedState(onDone)
-    val spoken = pluralText(R.plurals.profile_streams, value)
-    val name = stringResource(R.string.tunnel_streams)
     val stops = StreamsSlider.stops(maximum)
+    val zone = StreamsPlan.zone(value, calls)
+    val count = pluralText(R.plurals.profile_streams, value)
+    // the zone is said, not only coloured
+    val spoken = when (zone) {
+        StreamZone.Orange -> stringResource(R.string.tunnel_streams_state_over, count)
+        StreamZone.Red -> stringResource(R.string.tunnel_streams_state_danger, count)
+        else -> count
+    }
+    val name = stringResource(R.string.tunnel_streams)
+    // where each zone ends on the line: the largest total that keeps every hash within the zone's count
+    val ends = listOf(StreamsPlan.GREEN_PER_HASH, StreamsPlan.RECOMMENDED_PER_HASH, StreamsPlan.ORANGE_PER_HASH)
+        .map { StreamsSlider.fraction(StreamsPlan.totalWithin(it, calls, stops.last()), maximum) } + 1f
+    val zoneColors = listOf(colors.ok, colors.accent, colors.warn, colors.danger)
     Canvas(
         Modifier.fillMaxWidth().height(44.dp).alpha(if (enabled) 1f else 0.5f)
             .semantics {
@@ -419,22 +460,26 @@ private fun StreamsTrack(
         val inset = 10.dp.toPx()
         val y = size.height / 2
         val width = size.width - 2 * inset
-        val at = inset + width * StreamsSlider.fraction(value, maximum)
-        val edge = inset + width * StreamsSlider.fraction(recommended, maximum)
+        val thumb = StreamsSlider.fraction(value, maximum)
         val stroke = 4.dp.toPx()
-        // the track, and red where a count is above what is recommended
-        drawLine(colors.line, Offset(inset, y), Offset(edge, y), stroke, StrokeCap.Round)
-        if (recommended < maximum) drawLine(colors.danger.copy(alpha = 0.45f), Offset(edge, y), Offset(inset + width, y), stroke, StrokeCap.Round)
-        // what is chosen: in the accent up to the edge, in red past it
-        drawLine(colors.accent, Offset(inset, y), Offset(minOf(at, edge), y), stroke, StrokeCap.Round)
-        if (at > edge) drawLine(colors.danger, Offset(edge, y), Offset(at, y), stroke, StrokeCap.Round)
-        // the server's limit: a tick across the track, in the warning colour and taller than the track, so that it is
-        // read without the colour too
-        if (mark != null) {
-            drawRect(colors.warn, Offset(inset + width * mark - 1.dp.toPx(), y - 6.dp.toPx()), Size(2.dp.toPx(), 12.dp.toPx()))
+        // the four zones along the whole line, pale; and up to the thumb in full colour
+        var from = 0f
+        ends.forEachIndexed { index, end ->
+            if (end > from) {
+                val color = zoneColors[index]
+                drawLine(color.copy(alpha = 0.3f), Offset(inset + width * from, y), Offset(inset + width * end, y), stroke, StrokeCap.Butt)
+                val filled = minOf(end, thumb)
+                if (filled > from) drawLine(color, Offset(inset + width * from, y), Offset(inset + width * filled, y), stroke, StrokeCap.Butt)
+                from = end
+            }
         }
+        // the server's limit: a tick across the track, taller than the track, so that it is read without its colour too
+        if (mark != null) {
+            drawRect(colors.text, Offset(inset + width * mark - 1.dp.toPx(), y - 7.dp.toPx()), Size(2.dp.toPx(), 14.dp.toPx()))
+        }
+        val at = inset + width * thumb
         drawCircle(colors.surface, 10.dp.toPx(), Offset(at, y))
-        drawCircle(if (at > edge) colors.danger else colors.accent, 7.dp.toPx(), Offset(at, y))
+        drawCircle(zoneColors[zone.ordinal], 7.dp.toPx(), Offset(at, y))
     }
 }
 

@@ -169,15 +169,21 @@ internal object StoreBackup {
             putTyped(prefs, key, kind, settings.get(name))
         }
         // a backup taken before the store's step 9 holds what such a store held, and the numbered steps do not run again
-        // on a restore, so the step's two rules run here: one subscription kept twice is one (harmless on any file),
-        // and a count of streams is what it ran as while «Экстра потоки» existed (a file of this step names its schema)
+        // on a restore, so the step's rules run here: one subscription kept twice is one (harmless on any file), and
+        // a profile runs the count of streams it ran — the one it holds as «Экстра потоки» left it, and 10 where it
+        // holds none (a file of this step names its schema)
         SettingsStore.mergeSubscriptionTwins(prefs)
         if (root.optInt("store_schema", 0) < 9) {
             for (i in 0 until profiles.length()) {
                 val entry = profiles.optJSONObject(i) ?: continue
                 val index = (entry.opt("index") as? Int)?.takeIf { it in indices } ?: continue
                 val count = intPreferencesKey(SettingsStore.slotKeyName("workers_per_hash", index))
-                prefs[count]?.let { prefs[count] = SettingsStore.countAsItRan(it, entry.opt("extra_workers") as? Boolean) }
+                val stored = prefs[count]
+                if (stored != null) {
+                    prefs[count] = SettingsStore.countAsItRan(stored, entry.opt("extra_workers") as? Boolean)
+                } else if (SettingsStore.profileInUse(prefs, index)) {
+                    prefs[count] = CsqttConstants.Tunnel.WORKERS_BEFORE_DEFAULT_20
+                }
             }
         }
         SettingsStore.bumpProfileEpoch(prefs)

@@ -630,9 +630,9 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                     step { normalizeVkModes(prefs, profile) }
                     step { dropLinkHashesFromOwn(prefs, profile) }
                     step {
-                        // what the core runs: 18 and 5 ran as 10
+                        // what the core ran: 18 and 5 ran as 10
                         val key = getProfileKey(WORKERS_PER_HASH, profile)
-                        prefs[key]?.let { prefs[key] = WorkerCountPolicy.normalize(it) }
+                        prefs[key]?.let { prefs[key] = WorkerCountPolicy.wholeGroups(it) }
                     }
                 }
             }
@@ -682,14 +682,21 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 // 2.6.0, P3 B3: a subscription kept under two spellings of its link is one (2.5.3's «Скачивать по HTTP»
                 // kept a link as http:// beside its https:// record)
                 step { mergeSubscriptionTwins(prefs) }
-                // «Экстра потоки» goes, and with it the limit of 70 it lifted: what is recommended is said per hash on
-                // the slider. A profile runs what it ran ([countAsItRan]); a backup and a settings file written before
-                // this step get the same on their way in (StoreBackup.restore, importConfigJson)
+                // «Экстра потоки» goes, and with it the limit of 70 it lifted: the slider's zones say what a count is,
+                // and nothing caps it. A new profile starts at 20 from now on, where it started at 10. A profile runs
+                // what it ran ([countAsItRan]): the count it holds, 70 for a higher one the switch did not lift, and
+                // 10 where it never held one. A backup and a settings file written before this step get the same on
+                // their way in (StoreBackup.restore, importConfigJson)
                 for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
                     val extra = booleanPreferencesKey(slotKeyName("extra_workers", profile))
                     step {
                         val count = getProfileKey(WORKERS_PER_HASH, profile)
-                        prefs[count]?.let { stored -> prefs[count] = countAsItRan(stored, prefs[extra]) }
+                        val stored = prefs[count]
+                        if (stored != null) {
+                            prefs[count] = countAsItRan(stored, prefs[extra])
+                        } else if (profileInUse(prefs, profile)) {
+                            prefs[count] = CsqttConstants.Tunnel.WORKERS_BEFORE_DEFAULT_20
+                        }
                     }
                     prefs.remove(extra)
                 }
@@ -1044,13 +1051,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             val power = write.power?.coerceIn(1, CsqttConstants.Tunnel.MAX_WORKERS)
             val storedWorkers = prefs[getProfileKey(WORKERS_PER_HASH, profile)]
             val targetWorkers = when {
-                power == null -> storedWorkers ?: 10
-                // a new node starts within what is recommended for the hashes its link brings (P3 B3: nothing holds a
-                // count at 70 any more); above it is the user's own choice, asked about on the slider
-                storedWorkers == null -> {
-                    val hashes = StreamsPlan.hashes(autoVk = false, autoApi = false, manual = parseCsqttLink(write.link)?.hashes.orEmpty().size)
-                    if (hashes == null) power else power.coerceAtMost(StreamsPlan.recommended(hashes, CsqttConstants.Tunnel.MAX_WORKERS))
-                }
+                power == null -> storedWorkers ?: CsqttConstants.Tunnel.DEFAULT_WORKERS
+                // a new node starts where every new profile does, or at what its server allows if that is less (the
+                // operator, 2026-11-27: nothing holds a count at 70 any more, and the power may be 100); above it is
+                // the user's own choice on the slider
+                storedWorkers == null -> power.coerceAtMost(CsqttConstants.Tunnel.DEFAULT_WORKERS)
                 else -> storedWorkers.coerceAtMost(power)
             }
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(
@@ -1257,7 +1262,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
         /**
          * A count of streams stored while «Экстра потоки» existed, as it ran: with the switch off, or never touched
-         * ([extra] null), a count above 70 ran as 70 — a subscription's node starts at its power, which may be 100 —
+         * ([extra] null), a count above 70 ran as 70 — a subscription's node started at its power, which may be 100 —
          * so 70 is what the profile holds once nothing caps a count any more; with the switch on, the count itself.
          */
         internal fun countAsItRan(count: Int, extra: Boolean?): Int =

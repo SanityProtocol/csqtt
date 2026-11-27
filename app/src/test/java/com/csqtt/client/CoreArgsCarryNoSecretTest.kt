@@ -36,6 +36,18 @@ class CoreArgsCarryNoSecretTest {
     }
 
     @Test
+    fun theCoreIsToldToRunTheCountAsItIsHeld() {
+        // P3 B3: the slider moves in fives; without the flag the core rounds a count down to whole tens
+        val params = TunnelParams(
+            peer = "203.0.113.7:56000", vkHashes = hashes.joinToString(","), workersPerHash = 15, port = 9000,
+            connectionPassword = password, sessionSalt = "salt", generationId = 3,
+        )
+        val command = coreBaseCommand("/native/libclient.so", params, 15, "vkcalls")
+        val count = command.indexOf("-n")
+        assertEquals(listOf("-n", "15", "-exact-workers"), command.subList(count, count + 3))
+    }
+
+    @Test
     fun secretsTravelInTheEnvironment() {
         val env = coreSecretEnv(password, hashes)
         assertEquals(password, env["CSQTT_PASSWORD"])

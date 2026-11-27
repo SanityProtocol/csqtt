@@ -117,7 +117,8 @@ internal fun coreBaseCommand(
         listOf(
             binaryPath,
             "-peer", params.peer,
-            "-n", totalWorkers.toString(),
+            // the count as it is held, a half group too (P3 B3): without the flag the core rounds it down to tens
+            "-n", totalWorkers.toString(), "-exact-workers",
             "-listen", "${CsqttConstants.Network.LOCAL_LISTEN_HOST}:${params.port}",
             "-tun-uds", "csqtt_tun_uds",
         )

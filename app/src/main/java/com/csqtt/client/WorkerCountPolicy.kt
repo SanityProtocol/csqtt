@@ -1,14 +1,28 @@
 package com.csqtt.client
 
 internal object WorkerCountPolicy {
+    /** The slider's step, and the fewest streams a profile runs (the operator, 2026-11-27). */
+    const val STEP = 5
+
+    /**
+     * What a profile may hold: a whole number of fives, from one five up to [maximum]. The core is started with
+     * `-exact-workers`, so the count held is the count that runs: its last group of ten may be half a group.
+     */
     fun normalize(
         requested: Int,
         maximum: Int = CsqttConstants.Tunnel.MAX_WORKERS,
     ): Int {
-        // what the core runs: whole groups of 10, at least one (5 used to be stored and ran as 10, M-84)
+        val top = (maximum.coerceAtLeast(STEP) / STEP) * STEP
+        return (requested.coerceIn(STEP, top) / STEP) * STEP
+    }
+
+    /**
+     * What a count ran as before the core was given exact counts (2.5.3 and the builds before P3 B3): whole groups of
+     * ten, at least one — 18 and 5 ran as 10 (M-84). The store's first step keeps to it.
+     */
+    fun wholeGroups(requested: Int): Int {
         val group = CsqttConstants.Tunnel.WORKERS_PER_GROUP
-        val normalizedMaximum = (maximum.coerceAtLeast(group) / group) * group
-        return (requested.coerceIn(group, normalizedMaximum) / group) * group
+        return (requested.coerceIn(group, CsqttConstants.Tunnel.MAX_WORKERS) / group) * group
     }
 
     fun maximumForHashes(hashCount: Int): Int {
@@ -25,7 +39,7 @@ internal object WorkerCountPolicy {
 
     /**
      * The most streams a profile runs: what the core takes, and in «Авто ВК» ([accountAutoVk]) that mode's own limit.
-     * What is recommended below it is a count per hash ([StreamsPlan]), which warns and never caps.
+     * Below it nothing caps a count: the zones of [StreamsPlan] colour the slider and warn.
      */
     fun maximum(accountAutoVk: Boolean): Int =
         if (accountAutoVk) CsqttConstants.Tunnel.AUTO_VK_MAX_WORKERS else CsqttConstants.Tunnel.MAX_WORKERS

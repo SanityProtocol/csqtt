@@ -139,6 +139,27 @@ class StoreMigrationsTest {
     }
 
     @Test
+    fun `a profile that never held a count keeps the 10 it ran, and only a new one starts at 20`() {
+        // P3 B3 (the operator, 2026-11-27): a new profile starts at 20 from now on; until then none stored meant 10
+        val prefs = load(
+            """{"strings": {"peer_4": "203.0.113.4", "csqtt_link_6": "${Store253Snapshots.participantLink}"},
+                "ints": {"store_schema_version": 8, "active_profile": 9},
+                "booleans": {"csqtt_link_mode_6": true, "default_role_decided": true}}""",
+        )
+        SettingsStore.migrateStore(prefs)
+        assertEquals(10, prefs[intPreferencesKey("workers_per_hash_4")])
+        assertEquals(10, prefs[intPreferencesKey("workers_per_hash_6")])
+        // a slot nobody uses holds nothing: the profile made in it later is a new one
+        assertNull(prefs[intPreferencesKey("workers_per_hash_9")])
+        assertNull(prefs[intPreferencesKey("workers_per_hash_5")])
+        assertEquals(20, CsqttConstants.Tunnel.DEFAULT_WORKERS)
+        // a new install has no profile to keep anything for
+        val fresh = load("""{"booleans": {"default_role_decided": true}}""")
+        SettingsStore.migrateStore(fresh)
+        assertEquals(emptySet<String>(), Store253Snapshots.asMap(fresh).keys.filter { it.startsWith("workers_per_hash") }.toSet())
+    }
+
+    @Test
     fun `a 2_5_3 store gets no role and no tab switch, and its owner has a server by what it holds`() {
         for (snapshot in listOf(Store253Snapshots.owner, Store253Snapshots.participant, Store253Snapshots.subscriptionAndToken)) {
             val after = migrate(snapshot).second

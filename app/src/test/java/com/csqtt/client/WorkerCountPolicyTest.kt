@@ -19,12 +19,26 @@ class WorkerCountPolicyTest {
     }
 
     @Test
-    fun belowOneGroupIsOneGroupAsTheCoreRunsIt() {
-        // the core runs fewer than 10 as 10, and the old stored default 18 as 10 (M-84)
+    fun belowOneGroupWasOneGroupAsTheCoreRanIt() {
+        // before the core was given exact counts it ran fewer than 10 as 10, and the old stored default 18 as 10
+        // (M-84): the store's first step keeps to that
         for (requested in listOf(Int.MIN_VALUE, 0, 3, 5, 9, 10, 18, 19)) {
-            assertEquals("requested $requested", 10, WorkerCountPolicy.normalize(requested))
+            assertEquals("requested $requested", 10, WorkerCountPolicy.wholeGroups(requested))
         }
-        assertEquals(CsqttConstants.Tunnel.WORKERS_PER_GROUP, CsqttConstants.Tunnel.DEFAULT_WORKERS)
+        assertEquals(70, WorkerCountPolicy.wholeGroups(75))
+        assertEquals(100, WorkerCountPolicy.wholeGroups(250))
+    }
+
+    @Test
+    fun aCountIsHeldInFivesFromFiveUp() {
+        // the operator, 2026-11-27: the slider moves in fives, and the count held is the count that runs
+        for ((requested, held) in listOf(Int.MIN_VALUE to 5, 0 to 5, 3 to 5, 5 to 5, 9 to 5, 10 to 10, 14 to 10, 15 to 15, 18 to 15, 99 to 95, 100 to 100, 250 to 100)) {
+            assertEquals("requested $requested", held, WorkerCountPolicy.normalize(requested))
+        }
+        assertEquals("a subscription's node capped at 37", 35, WorkerCountPolicy.normalize(100, maximum = 37))
+        assertEquals("a cap below the first stop", 5, WorkerCountPolicy.normalize(100, maximum = 3))
+        assertEquals(5, WorkerCountPolicy.STEP)
+        assertEquals("a new profile starts at the top of the green zone", StreamsPlan.GREEN_PER_HASH, CsqttConstants.Tunnel.DEFAULT_WORKERS)
     }
 
     @Test
@@ -79,12 +93,12 @@ class WorkerCountPolicyTest {
     }
 
     @Test
-    fun invalidPersistedCountsAreBoundedAndNeverCreatePartialCredentialGroup() {
+    fun invalidPersistedCountsAreBoundedAndInFives() {
         for (requested in -1_000..1_000) {
             val normalized = WorkerCountPolicy.normalize(requested)
-            assertTrue(normalized in 10..CsqttConstants.Tunnel.MAX_WORKERS)
-            assertEquals(0, normalized % CsqttConstants.Tunnel.WORKERS_PER_GROUP)
-            assertTrue(normalized <= requested.coerceAtLeast(10) || normalized == 100)
+            assertTrue(normalized in WorkerCountPolicy.STEP..CsqttConstants.Tunnel.MAX_WORKERS)
+            assertEquals(0, normalized % WorkerCountPolicy.STEP)
+            assertTrue(normalized <= requested.coerceAtLeast(WorkerCountPolicy.STEP))
         }
     }
 
@@ -115,7 +129,7 @@ class WorkerCountPolicyTest {
             for (hashCount in 1..CsqttConstants.Tunnel.MAX_VK_HASHES) {
                 val admitted = WorkerCountPolicy.normalizeForHashes(requested, hashCount)
                 assertTrue(admitted in 5..WorkerCountPolicy.maximumForHashes(hashCount))
-                assertTrue(admitted == 5 || admitted % CsqttConstants.Tunnel.WORKERS_PER_GROUP == 0)
+                assertEquals(0, admitted % WorkerCountPolicy.STEP)
             }
         }
         assertEquals(

@@ -180,7 +180,8 @@ class SubscriptionTwinsMergeTest {
         val two = store(metaJson(Record(https, minutes = 60), Record("https://other.example.invalid/s/abc")), mapOf(1 to https, 2 to "https://other.example.invalid/s/abc"))
         val before = asMap(two)
         SettingsStore.migrateStore(two)
-        assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(two)))
+        // and a profile that never held a count of streams is given the 10 it ran (a new one starts at 20 now)
+        assertEquals(setOf("store_schema_version", "workers_per_hash_1", "workers_per_hash_2"), changedKeys(before, asMap(two)))
     }
 
     @Test
@@ -195,9 +196,10 @@ class SubscriptionTwinsMergeTest {
         val before = asMap(prefs)
         SettingsStore.migrateStore(prefs)
 
+        // (the same step gives a profile that never held a count of streams the 10 it ran)
         assertEquals(
             setOf("store_schema_version", "subscription_meta_v1", "subscription_url_1", "subscription_url_6"),
-            changedKeys(before, asMap(prefs)),
+            changedKeys(before, asMap(prefs)) - setOf("workers_per_hash_1", "workers_per_hash_2", "workers_per_hash_6"),
         )
         assertEquals(6, prefs[intPreferencesKey("active_profile")])
         assertEquals(1, prefs[intPreferencesKey("run_profile")])

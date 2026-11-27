@@ -364,7 +364,14 @@
     <string name="tunnel_streams_limit">Лимит сервера — %1$d (отметка). Пока туннель включён, не меняется.</string>
     <string name="tunnel_streams_locked">Пока туннель включён, не меняется.</string>
     <string name="tunnel_streams_per_hash">%1$d на хеш (всего %2$d)</string>
-    <string name="tunnel_streams_recommended">Рекомендуем до %1$d: не больше %2$d на хеш</string>
+    <string name="tunnel_streams_recommended">Рекомендуем не больше %1$d на хеш</string>
+    <string name="tunnel_streams_recommended_plain">Рекомендуем не больше %1$d</string>
+    <string name="tunnel_streams_over">Больше рекомендуемого: не больше %1$d на хеш</string>
+    <string name="tunnel_streams_over_plain">Больше рекомендуемого: не больше %1$d</string>
+    <string name="tunnel_streams_danger">Опасно: больше %1$d на хеш</string>
+    <string name="tunnel_streams_danger_plain">Опасно: больше %1$d</string>
+    <string name="tunnel_streams_state_over">%1$s, больше рекомендуемого</string>
+    <string name="tunnel_streams_state_danger">%1$s, опасно</string>
     <string name="tunnel_mtu">MTU</string>
     <string name="tunnel_mtu_custom">Своё значение</string>
     <string name="tunnel_mtu_field">MTU, %1$d–%2$d</string>
@@ -478,7 +485,9 @@
     <string name="risk_title">Внимание!</string>
     <string name="risk_auto_vk">«Авто ВК» использует неофициальные браузерные методы VK API для создания звонка и получения кредов. Разработчик не может исключить блокировку VK-аккаунта и честно оценить её вероятность. Используйте этот режим на свой риск; если важен основной аккаунт, выбирайте второстепенный.</string>
     <string name="risk_tcp">TCP — экспериментальный режим для сетей, где провайдер ограничивает UDP. Он действует только между телефоном и серверами VK TURN; дальше, до вашего сервера, трафик всегда идёт по UDP. Если UDP работает без ограничений, оставьте его: он стабильнее и быстрее.</string>
-    <string name="risk_streams">Это больше рекомендуемого: не более %1$d потоков на один хеш — с вашими хешами до %2$d, вы выбрали %3$d. Каждые десять потоков — ещё одно подключение к звонку VK с вашего телефона: чем их больше на одном звонке, тем вероятнее капча и отказы VK. Надёжнее добавить хеши звонков.</string>
+    <string name="risk_danger_title">Опасно!</string>
+    <string name="risk_streams_over">Это больше рекомендуемого: %1$d потоков на один звонок VK при рекомендуемых до %2$d. Каждые десять потоков — ещё одно подключение к звонку с вашего телефона: чем их больше на одном звонке, тем вероятнее капча и отказы VK. Надёжнее добавить хеши звонков: потоки разойдутся по ним.</string>
+    <string name="risk_streams_danger">Опасная нагрузка: %1$d потоков на один звонок VK — больше %2$d. VK может отказывать в подключении и часто просить капчу. Добавьте хеши звонков или уменьшите число потоков.</string>
     <string name="risk_dont_remind">Не напоминать</string>
 
     <string name="info_hash_title">Режимы хешей</string>
@@ -495,8 +504,12 @@
     <string name="info_transport_when">Изменение применится при следующем подключении.</string>
     <string name="info_streams_title">Потоки</string>
     <string name="info_streams">Один поток даёт около 2 Мбит/с. Выбирайте число потоков по реальной скорости вашего интернета, не больше её: 10 потоков — для 20 Мбит/с, 20 — для 40 Мбит/с, 30 — для 60 Мбит/с и так далее.</string>
-    <string name="info_streams_hashes">Потоки расходятся по хешам десятками, по очереди. Рекомендуем не больше %1$d на один хеш: красная часть линии — выше этого. Больше хешей — больше потоков без риска.</string>
+    <string name="info_streams_hashes">Потоки расходятся по хешам десятками, по очереди. Цвет линии — сколько потоков приходится на один хеш: до %1$d — зелёный, до %2$d — синий, это рекомендуемый предел; до %3$d — оранжевый, выше — красный. Больше хешей — больше потоков без риска.</string>
     <string name="info_streams_server">Сервер может разрешить меньше, чем выбрано: тогда работает его лимит.</string>
+    <string name="info_srtp_title">Режим SRTP</string>
+    <string name="info_srtp_auto">Авто. Сначала согласует ключи шифрования по DTLS, как в обычном звонке; если не получилось за 8 секунд — берёт ключи из пароля подключения (WRAP). Подходит почти всем: не меняйте, если туннель работает.</string>
+    <string name="info_srtp_dtls">DTLS-SRTP. Только согласование по DTLS: ключи новые при каждом подключении. Если сеть его не пропускает, туннель не подключится.</string>
+    <string name="info_srtp_wrap">WRAP-SRTP. Без согласования: ключи получаются из пароля подключения и не меняются, пока не сменится пароль. Подключение быстрее. Выбирайте, только если с «Авто» каждое подключение задерживается на шаге DTLS.</string>
 
     <string name="exceptions_search_label">Поиск приложений</string>
     <string name="exceptions_search_placeholder">Название или package name</string>

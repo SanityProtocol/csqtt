@@ -51,8 +51,11 @@ object CsqttConstants {
         const val MAX_VK_HASHES = 7
         // the most «Авто ВК» runs (as V2 had it): its one call is held by the account
         const val AUTO_VK_MAX_WORKERS = 70
-        // a new profile's workers: one group, what the old stored default of 18 ran as (M-84)
-        const val DEFAULT_WORKERS = 10
+        // a new profile's streams (the operator, 2026-11-27): the top of the slider's green zone. Until P3 B3 it was
+        // 10, what the old stored default of 18 ran as (M-84): the store's step 9 writes that 10 into every profile
+        // that ran it, so only profiles made from then on start at this
+        const val DEFAULT_WORKERS = 20
+        const val WORKERS_BEFORE_DEFAULT_20 = 10
         const val MAX_WORKERS = 100
     }
 

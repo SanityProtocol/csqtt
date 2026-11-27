@@ -21,6 +21,13 @@ class RoleSwitchesMigrationTest {
     private fun atVersion(version: Int, json: String): MutablePreferences =
         load(json).also { it[intPreferencesKey("store_schema_version")] = version }
 
+    /**
+     * What these steps change. A later step (9, P3 B3) gives a profile that never held a count of streams the 10 it
+     * ran: that key is its own test's (StoreMigrationsTest), not theirs.
+     */
+    private fun changed(before: Map<String, Any>, after: Map<String, Any>): Set<String> =
+        changedKeys(before, after).filterNot { it.startsWith("workers_per_hash") }.toSet()
+
     private fun migrate(prefs: MutablePreferences): Pair<Map<String, Any>, Map<String, Any>> {
         val before = asMap(prefs)
         SettingsStore.migrateStore(prefs)
@@ -31,7 +38,7 @@ class RoleSwitchesMigrationTest {
     fun `the role goes and no switch is written, and an owner still has a server`() {
         val prefs = atVersion(4, """{"strings": {"peer": "203.0.113.5"}, "booleans": {"ui_owner_mode": true}}""")
         val (before, after) = migrate(prefs)
-        assertEquals(setOf("ui_owner_mode", "store_schema_version"), changedKeys(before, after))
+        assertEquals(setOf("ui_owner_mode", "store_schema_version"), changed(before, after))
         assertNull(after["ui_owner_mode"])
         assertNull(after["show_deploy_tab"])
         assertNull(after["show_logs_tab"])
@@ -51,7 +58,7 @@ class RoleSwitchesMigrationTest {
         assertEquals(
             setOf("ui_owner_mode", "participant_show_logs", "participant_show_logs_3", "participant_show_logs_31",
                 "store_schema_version"),
-            changedKeys(before, after),
+            changed(before, after),
         )
         assertFalse("a link and a blank address are no server", SettingsStore.userHasServer(prefs))
     }
@@ -64,7 +71,7 @@ class RoleSwitchesMigrationTest {
                 """{"strings": {"peer": "203.0.113.5"}, "booleans": {"show_deploy_tab": true, "show_logs_tab": false}}""",
             )
             val (before, after) = migrate(prefs)
-            assertEquals("from $version", setOf("show_deploy_tab", "show_logs_tab", "store_schema_version"), changedKeys(before, after))
+            assertEquals("from $version", setOf("show_deploy_tab", "show_logs_tab", "store_schema_version"), changed(before, after))
             assertNull(after["show_deploy_tab"])
             assertNull(after["show_logs_tab"])
         }
@@ -86,7 +93,7 @@ class RoleSwitchesMigrationTest {
                 "from $version",
                 setOf("battery_saver_mode", "battery_saver_percent", "battery_optimization_prompt_handled",
                     "permission_intro_shown", "store_schema_version"),
-                changedKeys(before, after),
+                changed(before, after),
             )
             for (gone in listOf("battery_saver_mode", "battery_saver_percent", "battery_optimization_prompt_handled",
                 "permission_intro_shown")) {

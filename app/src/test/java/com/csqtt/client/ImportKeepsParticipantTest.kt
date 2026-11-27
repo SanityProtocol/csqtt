@@ -42,8 +42,9 @@ class ImportKeepsParticipantTest {
     }
 
     @Test
-    fun `a new node starts within what is recommended for its link's hashes, and keeps its count after that`() {
-        // P3 B3: nothing holds a count at 70 any more, and a subscription's power may be 100
+    fun `a new node starts at 20 or at what its server allows, and keeps its count after that`() {
+        // P3 B3 (the operator, 2026-11-27): nothing holds a count at 70 any more, a subscription's power may be 100,
+        // and every new profile starts at 20
         fun link(hashes: Int) = "csqtt://connect?v=2&host=203.0.113.50&peer=46100&password=pw" +
             if (hashes == 0) "" else "&hashes=" + (0 until hashes).joinToString("+") { ('A' + it).toString().repeat(20) }
         fun node(hashes: Int, power: Int) = SubscriptionProfileWrite(
@@ -51,12 +52,12 @@ class ImportKeepsParticipantTest {
         )
         val count = intPreferencesKey(SettingsStore.slotKeyName("workers_per_hash", 3))
         fun started(hashes: Int, power: Int): Int? = mutablePreferencesOf().also { SettingsStore.writeSubscriptionNode(it, node(hashes, power)) }[count]
-        assertEquals(30, started(hashes = 1, power = 100))
-        assertEquals(60, started(hashes = 2, power = 100))
-        assertEquals(90, started(hashes = 3, power = 100))
-        assertEquals(100, started(hashes = 4, power = 100))
-        assertEquals("a power below it is the count", 20, started(hashes = 1, power = 20))
-        assertEquals("a link that brings no hashes says nothing of them", 100, started(hashes = 0, power = 100))
+        assertEquals(20, started(hashes = 1, power = 100))
+        assertEquals("whatever hashes its link brings", 20, started(hashes = 4, power = 100))
+        assertEquals(20, started(hashes = 0, power = 100))
+        assertEquals(20, started(hashes = 2, power = 20))
+        assertEquals("a power below it is the count", 10, started(hashes = 1, power = 10))
+        assertEquals("in fives", 15, started(hashes = 1, power = 17))
 
         // refreshed in its slot, a node keeps the count the user set, within its power
         val prefs = mutablePreferencesOf()

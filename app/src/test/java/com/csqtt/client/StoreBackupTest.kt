@@ -96,10 +96,11 @@ class StoreBackupTest {
         source[intPreferencesKey("workers_per_hash_5")] = 90
         val file = JSONObject(StoreBackup.encode(source, serverSecrets = false, decrypt = decrypt, exportedAt = 1L))
         assertEquals(SettingsStore.STORE_SCHEMA, file.getInt("store_schema"))
-        // this build's own file: the counts are the user's own
+        // this build's own file: the counts are the user's own, and a profile that holds none starts as a new one does
         val same = otherPhone().also { StoreBackup.restore(it, file.toString(), encrypt, decrypt) }
         assertEquals(100, same[intPreferencesKey("workers_per_hash_3")])
         assertEquals(90, same[intPreferencesKey("workers_per_hash_5")])
+        assertNull(same[intPreferencesKey("workers_per_hash")])
 
         // an older build's file names no schema, and the switch where it was ever touched
         file.remove("store_schema")
@@ -108,6 +109,7 @@ class StoreBackupTest {
         val old = otherPhone().also { StoreBackup.restore(it, file.toString(), encrypt, decrypt) }
         assertEquals("the switch never touched: the count ran as 70", 70, old[intPreferencesKey("workers_per_hash_3")])
         assertEquals("the switch on: the count ran as stored", 90, old[intPreferencesKey("workers_per_hash_5")])
+        assertEquals("no count in the file: the profile ran 10", 10, old[intPreferencesKey("workers_per_hash")])
         assertNull("the switch itself is not restored", asMap(old)["extra_workers_5"])
     }
 
