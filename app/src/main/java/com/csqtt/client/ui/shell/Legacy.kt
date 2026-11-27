@@ -9,12 +9,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -28,7 +31,7 @@ import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.pickProfile
-import com.csqtt.client.refusalMarksStand
+import com.csqtt.client.RefusedProfile
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.home.HomeTab
 import com.csqtt.client.ui.legacy.DeployTab
@@ -40,6 +43,7 @@ import com.csqtt.client.ui.legacy.design.CsqttLightExtendedColors
 import com.csqtt.client.ui.legacy.design.CsqttMaterialShapes
 import com.csqtt.client.ui.legacy.design.LocalCsqttExtendedColors
 import com.csqtt.client.ui.tunnel.TunnelTab
+import com.csqtt.client.ui.tunnel.leftNoteEpoch
 import kotlinx.coroutines.launch
 
 /*
@@ -64,34 +68,57 @@ internal fun LegacyFrame(content: @Composable () -> Unit) {
 }
 
 /** A tab's screen: the new design's where its card is done, else classic's in its frame. */
+/** A map of short texts in the screen's saved state, key and value in turn. */
+private val StringMapSaver = listSaver<SnapshotStateMap<String, String>, String>(
+    save = { map -> map.flatMap { (key, value) -> listOf(key, value) } },
+    restore = { saved -> mutableStateMapOf<String, String>().apply { saved.chunked(2).forEach { (key, value) -> put(key, value) } } },
+)
+
 @Composable
 internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
     val store = LocalStore.current
     val nav = LocalNav.current
     val forms = rememberSaveableStateHolder()
+    // the open profile, and the store's epoch read with it: the epoch changes when a slot's profile is replaced (delete,
+    // add, restore), and the old profile's edited form must not come back, and be stored, into the new one
     val auth by store.tunnelAuthSnapshot.collectAsStateWithLifecycle(initialValue = TunnelAuthSnapshot())
-    // the epoch changes when a slot's profile is replaced (delete, add, restore): the old profile's edited form must not
-    // come back, and be stored, into the new one
-    val epoch by store.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
+    // the drafts of «Туннель» that left with their screen (draftLeft), by field: kept here, above the form, because the
+    // form's own saved state is written before its fields' last commit runs. Saved with the screen, as the drafts
+    // they speak of are: a note that died with the process would let its draft come back
+    val tunnelLeft = rememberSaveable(saver = StringMapSaver) { mutableStateMapOf<String, String>() }
+    LaunchedEffect(auth.isLoaded, auth.epoch) {
+        // a form of another epoch is never drawn again: its notes go
+        if (auth.isLoaded) tunnelLeft.keys.filter { leftNoteEpoch(it) != auth.epoch }.forEach(tunnelLeft::remove)
+    }
     // a start refused for a profile's settings opens «Туннель» on what that profile lacks: the count of them, and
-    // whose the last one was — the slot, and the profile that held it then (when it was added, whether it held
-    // anything). The marks are that profile's (refusalMarksStand): they stay whatever is added or deleted beside it,
-    // another profile's form is not full of errors for it, and neither is the next profile to take the slot
+    // whose the last one was — the slot, and the profile that held it as the slot read then ([RefusedProfile]). The
+    // marks are that profile's: they follow it through what its own form writes, stay whatever is added or deleted
+    // beside it, and go with it — another profile's form is not full of errors for it, the next one to take the slot
+    // neither
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
     var tunnelValidationProfile by rememberSaveable { mutableIntStateOf(-1) }
     var tunnelValidationAdded by rememberSaveable { mutableLongStateOf(0L) }
     var tunnelValidationInUse by rememberSaveable { mutableStateOf(false) }
+    var tunnelValidationEpoch by rememberSaveable { mutableIntStateOf(0) }
     val marked = auth.isLoaded && tunnelValidationProfile == auth.profile
-    val marksStand = marked && refusalMarksStand(tunnelValidationAdded, tunnelValidationInUse, auth.addedAt, auth.inUse)
-    LaunchedEffect(marked, marksStand, auth.inUse) {
+    val refused = if (marked) {
+        RefusedProfile(tunnelValidationAdded, tunnelValidationInUse, tunnelValidationEpoch).seenAs(auth.addedAt, auth.inUse, auth.epoch)
+    } else {
+        null
+    }
+    LaunchedEffect(auth.isLoaded, auth.profile, refused) {
         when {
-            !marked -> Unit
-            // seen gone from its slot, the refused profile takes its marks with it for good: what is typed into the
-            // emptied slot next is another profile
-            !marksStand -> tunnelValidationProfile = -1
-            // the empty form a start was refused for holds something now: from here on, the slot seen empty is the
-            // profile deleted
-            auth.inUse -> tunnelValidationInUse = true
+            !auth.isLoaded || tunnelValidationProfile < 0 -> Unit
+            // another profile is open: the marks wait for theirs — unless theirs was an empty form, which is no
+            // profile once it is left (nothing leads back to it, and what «+» makes in its slot is a new one)
+            !marked -> if (!tunnelValidationInUse) tunnelValidationProfile = -1
+            // seen gone from its slot, the refused profile takes its marks with it for good
+            refused == null -> tunnelValidationProfile = -1
+            else -> {
+                tunnelValidationAdded = refused.added
+                tunnelValidationInUse = refused.inUse
+                tunnelValidationEpoch = refused.epoch
+            }
         }
     }
     // «Дополнительно» of «Туннель» stays open from one profile to the next: it is how the screen is read, not a profile's
@@ -111,15 +138,17 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
                         tunnelValidationProfile = auth.profile
                         tunnelValidationAdded = auth.addedAt
                         tunnelValidationInUse = auth.inUse
+                        tunnelValidationEpoch = auth.epoch
                         tunnelValidationRequest += 1
                     },
                 )
             }
             // a form's saved state is its profile's: one profile's draft never reaches another
-            else -> forms.SaveableStateProvider("tunnel:${auth.profile}:$epoch") {
+            else -> forms.SaveableStateProvider("tunnel:${auth.profile}:${auth.epoch}") {
                 TunnelTab(
-                    auth, epoch,
-                    validationRequest = if (marksStand) tunnelValidationRequest else 0,
+                    auth, auth.epoch,
+                    left = tunnelLeft,
+                    validationRequest = if (refused != null) tunnelValidationRequest else 0,
                     moreOpen = tunnelMoreOpen, onMoreOpen = { tunnelMoreOpen = it },
                 )
             }

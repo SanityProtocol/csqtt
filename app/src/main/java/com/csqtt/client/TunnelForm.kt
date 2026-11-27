@@ -229,14 +229,26 @@ internal fun <T> draftStands(draft: T?, base: T?, stored: T): Boolean =
 internal fun draftLeft(draft: String?, left: String?): Boolean = draft != null && draft == left
 
 /**
- * Whether the marks of a refused start are still their profile's. They were made for the profile that held the slot
- * then: added at [markedAdded] (0 for one from before that was kept, or one typed into an empty slot) and holding
- * something or not ([markedInUse]). They stay with it whatever is added or deleted beside it, and go when the slot is
- * seen with a profile added at another time, or empty after it held the refused one: what takes the slot next does
- * not open full of errors for it.
+ * The profile the marks of a refused start were made for, as its slot read then: when the profile was [added] (0 for
+ * one from before that was kept, or one typed into an empty slot), whether the slot held anything ([inUse]), and the
+ * store's [epoch].
  */
-internal fun refusalMarksStand(markedAdded: Long, markedInUse: Boolean, added: Long, inUse: Boolean): Boolean =
-    added == markedAdded && (inUse || !markedInUse)
+internal data class RefusedProfile(val added: Long, val inUse: Boolean, val epoch: Int) {
+    /**
+     * What the marks are kept with once the slot reads as [added], [inUse] under [epoch], or null when they go.
+     * A slot that reads as it did holds the same profile, whatever was added or deleted beside it: the marks stay. The
+     * empty form a start was refused for, holding something now with no profile added, deleted or restored since (the
+     * epoch changes at each of those, and at nothing a form writes), was filled by its own fields — an address typed,
+     * a link pasted, which dates it: the marks follow it. Anything else is another profile in the slot, or none — the
+     * refused one deleted, a profile made in its slot by «+» or an import, a backup restored over the empty form — and
+     * the marks go: what takes the slot next does not open full of errors for it.
+     */
+    fun seenAs(added: Long, inUse: Boolean, epoch: Int): RefusedProfile? = when {
+        added == this.added && inUse == this.inUse -> copy(epoch = epoch)
+        !this.inUse && inUse && epoch == this.epoch -> RefusedProfile(added, inUse = true, epoch)
+        else -> null
+    }
+}
 
 /** What a participant's link is short of, said on a card of its own (the canvas, F-TunnelLinkStates). */
 internal enum class LinkNote { OwnerToken, NeedsHashes, Outdated }

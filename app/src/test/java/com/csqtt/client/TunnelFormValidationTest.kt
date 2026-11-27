@@ -1,5 +1,8 @@
 package com.csqtt.client
 
+import com.csqtt.client.ui.tunnel.addressLeftKey
+import com.csqtt.client.ui.tunnel.leftNoteEpoch
+import com.csqtt.client.ui.tunnel.portLeftKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -167,22 +170,59 @@ class TunnelFormValidationTest {
         assertFalse(draftLeft(draft = null, left = null))
     }
 
-    // the verify of the fix round (V3), and the review's F10: the marks of a refused start are the profile's
+    // the verify of the fix round (V3), the review's F10 and the second round's check (C2): the marks of a refused
+    // start are the profile's. The epoch changes when any profile is added, deleted or restored, and at nothing a form
+    // writes
 
     @Test
-    fun `the marks of a refused start stay with their profile and go with it`() {
-        // refused while it held something, added at 1 000: whatever is added or deleted beside it, it is still it
-        assertTrue(refusalMarksStand(markedAdded = 1_000, markedInUse = true, added = 1_000, inUse = true))
-        assertFalse("deleted: the slot is empty", refusalMarksStand(1_000, true, added = 0, inUse = false))
-        assertFalse("another profile was added into the slot", refusalMarksStand(1_000, true, added = 2_000, inUse = true))
+    fun `the marks of a refused start stay while another profile is added or deleted beside theirs`() {
+        val stamped = RefusedProfile(added = 1_000, inUse = true, epoch = 5)
+        assertEquals(stamped.copy(epoch = 6), stamped.seenAs(added = 1_000, inUse = true, epoch = 6))
+        assertEquals("seen again only many changes later", stamped.copy(epoch = 9), stamped.seenAs(1_000, true, epoch = 9))
         // a profile from before the date was kept, or one typed into an empty slot, has none
-        assertTrue(refusalMarksStand(markedAdded = 0, markedInUse = true, added = 0, inUse = true))
-        assertFalse("deleted: nothing but the empty slot tells", refusalMarksStand(0, true, added = 0, inUse = false))
-        assertFalse(refusalMarksStand(0, true, added = 2_000, inUse = true))
-        // refused on an empty form: the same form still, empty or being filled in
-        assertTrue(refusalMarksStand(markedAdded = 0, markedInUse = false, added = 0, inUse = false))
-        assertTrue(refusalMarksStand(markedAdded = 0, markedInUse = false, added = 0, inUse = true))
-        assertFalse("a profile was added into it", refusalMarksStand(0, false, added = 2_000, inUse = true))
+        val typed = RefusedProfile(added = 0, inUse = true, epoch = 5)
+        assertEquals(typed.copy(epoch = 6), typed.seenAs(0, true, epoch = 6))
+        // the empty form a start was refused for, still empty
+        val empty = RefusedProfile(added = 0, inUse = false, epoch = 5)
+        assertEquals(empty.copy(epoch = 6), empty.seenAs(0, false, epoch = 6))
+        assertEquals("nothing changed at all", stamped, stamped.seenAs(1_000, true, epoch = 5))
+    }
+
+    @Test
+    fun `the marks follow the empty form a start was refused for when its own fields fill it`() {
+        val empty = RefusedProfile(added = 0, inUse = false, epoch = 5)
+        assertEquals("an address typed into it", RefusedProfile(0, true, 5), empty.seenAs(0, true, epoch = 5))
+        assertEquals("a link pasted into it, which dates the profile", RefusedProfile(7_000, true, 5), empty.seenAs(7_000, true, epoch = 5))
+        // and from there on they stay beside other profiles' changes, as any marks do
+        assertEquals(RefusedProfile(0, true, 6), empty.seenAs(0, true, 5)!!.seenAs(0, true, 6))
+        assertEquals(RefusedProfile(7_000, true, 6), empty.seenAs(7_000, true, 5)!!.seenAs(7_000, true, 6))
+    }
+
+    @Test
+    fun `the marks go with their profile, and the next one in its slot has none`() {
+        val stamped = RefusedProfile(added = 1_000, inUse = true, epoch = 5)
+        assertNull("deleted: the slot is empty", stamped.seenAs(added = 0, inUse = false, epoch = 6))
+        assertNull("another profile was made in the slot", stamped.seenAs(added = 2_000, inUse = true, epoch = 7))
+        val typed = RefusedProfile(added = 0, inUse = true, epoch = 5)
+        assertNull("deleted, as the only profile: its emptied slot stays open", typed.seenAs(0, false, epoch = 6))
+        assertNull(typed.seenAs(2_000, true, epoch = 7))
+        assertNull("its address emptied: an empty form again, which nothing was refused for", typed.seenAs(0, false, epoch = 5))
+        val empty = RefusedProfile(added = 0, inUse = false, epoch = 5)
+        assertNull("a backup restored over the refused empty form", empty.seenAs(0, true, epoch = 6))
+        assertNull("a profile made in its slot after it was left", empty.seenAs(7_000, true, epoch = 6))
+        // an address typed into the refused form, and the profile then deleted
+        assertNull(empty.seenAs(0, true, 5)!!.seenAs(0, false, epoch = 6))
+        // seen only after both happened — an address typed, and another profile added or deleted: not told from a
+        // restore, and the marks go rather than show on a profile no start was refused for
+        assertNull(empty.seenAs(0, true, epoch = 6))
+    }
+
+    @Test
+    fun `a note names the epoch of its form`() {
+        assertEquals(7, leftNoteEpoch(addressLeftKey(profile = 3, epoch = 7)))
+        assertEquals(12, leftNoteEpoch(portLeftKey(profile = 31, epoch = 12)))
+        assertNull(leftNoteEpoch("tunnel:3:7:password"))
+        assertNull(leftNoteEpoch("home"))
     }
 
     // the review of P3 B3 (F3): the zones count the hashes a start connects with

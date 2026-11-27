@@ -25,6 +25,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.csqtt.client.ShellTestKit.recreateFromSavedStateAlone
+import com.csqtt.client.ui.shell.SecretDrafts
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -365,6 +366,34 @@ class TunnelFormTest {
     }
 
     /**
+     * The second round's check (C1): the note of a draft that left with its screen is saved with the screen, as the
+     * draft is. After the process was killed in the background the two come back together, and the draft still does
+     * not come back over the store: here the screen is made again from its saved state alone, with nothing of the
+     * form left in the process's memory.
+     */
+    @Test
+    fun aFieldWrittenAsItsScreenWasLeftDoesNotComeBackAfterTheProcessWasKilled() {
+        runBlocking { slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first()) }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            openTunnel()
+            compose.waitUntil(5_000) { typed(PORT) == "46000" }
+            field(PORT).performTextReplacement("46100")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { port() == 46100 }
+            // a deploy's end writes the server's own again; then the app is left and its process killed
+            runBlocking { slot.saveFormPort(46000, store.profileEpoch.first()) }
+            scenario.onActivity { SecretDrafts.clear("tunnel:") }
+            scenario.recreateFromSavedStateAlone()
+            openTunnel()
+            compose.waitUntil(5_000) { typed(PORT) == "46000" }
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitForIdle()
+            Thread.sleep(1_000)
+            assertEquals("the port typed before the process was killed was written back", 46000, port())
+        }
+    }
+
+    /**
      * The verify of the fix round (V3) and the review's F10: the marks of a refused start are the profile's. They are
      * still there after another profile was deleted beside it, and gone once the profile itself is: the slot it held
      * does not open full of errors for it.
@@ -381,6 +410,8 @@ class TunnelFormTest {
             field(ADDRESS).performTextReplacement("203.0.113.9")
             compose.onNodeWithText("Главная").performClick()
             compose.waitUntil(5_000) { peer() == "203.0.113.9" }
+            // the screen has seen it stored: nobody deletes another profile within a frame of leaving a field
+            compose.waitForIdle()
 
             // another profile is deleted: every form is made anew, and this one is still marked
             runBlocking { store.deleteProfile(OTHER) }
@@ -399,6 +430,15 @@ class TunnelFormTest {
             Thread.sleep(500)
             assertFalse("the emptied slot is marked for the profile that was deleted from it", shown(banner))
             assertFalse(shown("Укажите пароль подключения"))
+
+            // and what is typed into the emptied slot next is another profile: the marks went with the first for good
+            field(ADDRESS).performTextReplacement("203.0.113.10")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { peer() == "203.0.113.10" }
+            openTunnel()
+            compose.waitForIdle()
+            Thread.sleep(500)
+            assertFalse("a profile typed into the emptied slot is marked for the one deleted from it", shown(banner))
         }
     }
 

@@ -128,13 +128,17 @@ internal fun linkDraftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:li
 internal fun draftBaseKey(key: String) = "$key:base"
 
 /**
- * Where the draft an address or a port field left with is noted ([draftLeft]): in memory, beside the secrets' drafts
- * and under the same profile and epoch. The draft itself is in the tab's saved state, and that is written before the
- * field's last commit runs when the tab goes: the note is how that copy is known for what it is when it comes back.
+ * Where the draft an address or a port field left with is noted ([draftLeft]), under the profile and the epoch of its
+ * form. The draft itself is in the tab's saved state, and that is written before the field's last commit runs when the
+ * tab goes: the note is how that copy is known for what it is when it comes back. The notes are kept by the shell, in
+ * the screen's saved state as the drafts are, so the two are restored together after the process was killed.
  */
 internal fun addressLeftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:address:left"
 
 internal fun portLeftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:port:left"
+
+/** The epoch of the form a note was made for, or null for a key that is no note's. */
+internal fun leftNoteEpoch(key: String): Int? = key.split(':').takeIf { it.size == 5 && it[0] == "tunnel" && it[4] == "left" }?.get(2)?.toIntOrNull()
 
 /** How many hashes of its own a profile holds: the fields of «Хеши звонков VK», and the «N из 6» of its button. */
 internal const val OWN_HASH_FIELDS = 6
@@ -185,11 +189,19 @@ internal class TunnelView(
  * «Туннель» (the canvas, F-Tunnel and its states): the open profile's connection — its own server, or the link it
  * connects by — and under «Дополнительно» how the tunnel is made. There is no «Сохранить»: a field is stored when it is
  * left, a choice when it is made. [epoch] is the store's count of replaced profiles the tab was mounted under (the tab
- * is mounted anew when it moves). [validationRequest] grows each time a start was refused for this profile's settings
- * (0: never for this one): from then on what the form lacks is said, not only what it holds wrongly.
+ * is mounted anew when it moves). [left] holds the notes of the drafts that left with their screen ([addressLeftKey]),
+ * kept by the shell. [validationRequest] grows each time a start was refused for this profile's settings (0: never for
+ * this one): from then on what the form lacks is said, not only what it holds wrongly.
  */
 @Composable
-internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: Int, moreOpen: Boolean, onMoreOpen: (Boolean) -> Unit) {
+internal fun TunnelTab(
+    auth: TunnelAuthSnapshot,
+    epoch: Int,
+    left: MutableMap<String, String>,
+    validationRequest: Int,
+    moreOpen: Boolean,
+    onMoreOpen: (Boolean) -> Unit,
+) {
     val profile = auth.profile
     val store = rememberProfileStore(profile)
     val entries by LocalStore.current.profileEntries.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -232,8 +244,8 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
     var portBase by rememberSaveable { mutableStateOf<Int?>(null) }
     val addressNote = addressLeftKey(profile, epoch)
     val portNote = portLeftKey(profile, epoch)
-    val addressLeft = SecretDrafts.typed(addressNote)
-    val portLeft = SecretDrafts.typed(portNote)
+    val addressLeft = left[addressNote]
+    val portLeft = left[portNote]
     val passwordKey = passwordDraftKey(profile, epoch)
     val linkKey = linkDraftKey(profile, epoch)
     val passwordDraft = SecretDrafts.typed(passwordKey)
@@ -313,7 +325,7 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
             addressDraft = null
             addressBase = null
         }
-        if (addressDraft == null && addressLeft != null) SecretDrafts.clear(addressNote)
+        if (addressDraft == null && addressLeft != null) left.remove(addressNote)
     }
     LaunchedEffect(portDraft, portBase, port, portLeft) {
         val typed = portDraft
@@ -321,7 +333,7 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
             portDraft = null
             portBase = null
         }
-        if (portDraft == null && portLeft != null) SecretDrafts.clear(portNote)
+        if (portDraft == null && portLeft != null) left.remove(portNote)
     }
     LaunchedEffect(passwordDraft, passwordBase, auth.connectionPassword) {
         if (passwordDraft != null && !draftStands(passwordDraft, passwordBase, auth.connectionPassword)) SecretDrafts.clear(passwordKey)
@@ -361,12 +373,12 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
                     onAddress = {
                         if (addressDraft == null || draftLeft(addressDraft, addressLeft)) addressBase = peer
                         addressDraft = it.filterNot(Char::isWhitespace)
-                        SecretDrafts.clear(addressNote)
+                        left.remove(addressNote)
                     },
                     onPort = {
                         if (portDraft == null || draftLeft(portDraft, portLeft)) portBase = port
                         portDraft = it.filter(Char::isDigit).take(5)
-                        SecretDrafts.clear(portNote)
+                        left.remove(portNote)
                     },
                     // a commit writes only a draft that still stands, and writes it once: one the store already holds,
                     // one typed over a value the store no longer holds and one that left with its screen before are
@@ -377,8 +389,8 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
                         val text = addressDraft
                         when {
                             text == null -> Unit
-                            draftLeft(text, SecretDrafts.typed(addressNote)) || !draftStands(text, addressBase, peer) -> {
-                                if (leaving) SecretDrafts.type(addressNote, text)
+                            draftLeft(text, left[addressNote]) || !draftStands(text, addressBase, peer) -> {
+                                if (leaving) left[addressNote] = text
                                 addressDraft = null
                                 addressBase = null
                             }
@@ -386,9 +398,9 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
                                 // «203.0.113.5:46000» is the two it holds, each in its own field
                                 val apart = splitHostPort(text)
                                 if (leaving) {
-                                    SecretDrafts.type(addressNote, text)
+                                    left[addressNote] = text
                                     // the port it brings is the port from now on: a draft of the port field goes with it
-                                    if (apart != null) portDraft?.let { SecretDrafts.type(portNote, it) }
+                                    if (apart != null) portDraft?.let { left[portNote] = it }
                                 } else if (apart != null) {
                                     addressDraft = apart.first
                                     portDraft = null
@@ -404,14 +416,14 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
                         when {
                             text == null -> Unit
                             // an emptied field left as it is means "as it was"
-                            text.isEmpty() || draftLeft(text, SecretDrafts.typed(portNote)) ||
+                            text.isEmpty() || draftLeft(text, left[portNote]) ||
                                 !draftStands(typed ?: NO_PORT, portBase, port) -> {
-                                if (leaving) SecretDrafts.type(portNote, text)
+                                if (leaving) left[portNote] = text
                                 portDraft = null
                                 portBase = null
                             }
                             typed != null && typed in 1..65535 -> {
-                                if (leaving) SecretDrafts.type(portNote, text)
+                                if (leaving) left[portNote] = text
                                 TunnelManager.scope.launch { store.saveFormPort(typed, epoch) }
                             }
                         }

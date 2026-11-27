@@ -118,8 +118,10 @@ internal data class DeploySettingsSnapshot(
 internal data class VkPoolState(val pool: List<String>, val sent: List<String>, val handOver: HandOverResult?)
 
 /**
- * The open profile as the shell reads it. [addedAt] and [inUse] say which profile holds the slot: when it was added (0
- * for one from before that was kept, or one typed into an empty slot) and whether the slot holds anything.
+ * The open profile as the shell reads it, in one read of the store. [addedAt] and [inUse] say which profile holds the
+ * slot: when it was added (0 for one from before that was kept, or one typed into an empty slot) and whether the slot
+ * holds anything. [epoch] is the store's (see PROFILE_EPOCH), read with them: the form's saved state is keyed on the
+ * slot and it, and what is kept for the profile across an epoch is told by the three together ([RefusedProfile]).
  */
 internal data class TunnelAuthSnapshot(
     val profile: Int = -1,
@@ -129,6 +131,7 @@ internal data class TunnelAuthSnapshot(
     val csqttLinkMode: Boolean = false,
     val addedAt: Long = 0L,
     val inUse: Boolean = false,
+    val epoch: Int = 0,
 ) {
     val isLoaded: Boolean
         get() = profile >= 0
@@ -1897,6 +1900,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             csqttLinkMode = prefs[getProfileKey(CSQTT_LINK_MODE, profile)] ?: false,
             addedAt = prefs[getProfileKey(PROFILE_ADDED_AT, profile)] ?: 0L,
             inUse = profileInUse(prefs, profile),
+            epoch = epochOf(prefs),
         )
     }.onIo()
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->

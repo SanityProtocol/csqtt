@@ -10,6 +10,7 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -112,12 +113,16 @@ class HashCheckSurvivesDialogTest {
 
     /**
      * The verify of P3 B3's fix round (V2): a hash a check found dead and entered again — its call was started again —
-     * reads as not checked. The check asked for next says what it finds of it, and «Сохранить» keeps that: the sheet
-     * forgot the old verdict, not the new one.
+     * reads as not checked. A check that cannot reach it leaves it so, and drops what the old check said of it; the
+     * check that does reach it says what it finds, and «Сохранить» keeps that: the sheet forgot the old verdict, not
+     * the new one.
      */
     @Test
     fun aHashEnteredAgainIsShownAndKeptAsTheNextCheckFindsIt() {
-        VkHashCheck.validator = { _, hashes, _, _ -> hashes.associateWith { VkHashValidationStatus.Invalid } }
+        val reached = AtomicBoolean(false)
+        VkHashCheck.validator = { _, hashes, _, _ ->
+            if (reached.get()) hashes.associateWith { VkHashValidationStatus.Invalid } else emptyMap()
+        }
         runBlocking {
             store.clearProfile(OTHER)
             store.clearProfile(SLOT)
@@ -140,6 +145,14 @@ class HashCheckSurvivesDialogTest {
             compose.onNode(first).performTextReplacement(HASH)
             compose.waitUntil(5_000) { shown("Не проверен") && !shown("Недействителен") }
 
+            // a check that reaches nothing: the hash is unchecked still, and the old verdict went with the asking
+            compose.onNodeWithText("Проверить актив").performScrollTo().performClick()
+            compose.waitUntil(10_000) { VkHashCheck.state.value == VkHashCheck.State.Done(SLOT, listOf(HASH), 1) }
+            compose.waitUntil(5_000) { storedResults(SLOT)[HASH] == null }
+            compose.waitUntil(5_000) { shown("Не проверен") && !shown("Недействителен") }
+
+            // the check that reaches it: what it found is shown, and «Сохранить» keeps it
+            reached.set(true)
             compose.onNodeWithText("Проверить актив").performScrollTo().performClick()
             compose.waitUntil(10_000) { shown("Недействителен") }
             compose.onNodeWithText("Сохранить").performScrollTo().performClick()
