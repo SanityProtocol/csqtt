@@ -77,13 +77,18 @@ internal object SubscriptionSync {
     }
 
     /**
-     * How [url]'s server is trusted, and the URL as it is kept. Marked by the user ([allowHttp]: V2's «Скачивать по
-     * HTTP», or an http:// URL they typed), it is fetched over HTTPS all the same and trusted by its pinned certificate
-     * (M-171).
+     * The URL a subscription is kept under, and how its server is trusted. The key comes first — the link with its
+     * scheme, as the store keeps it — and the record is the one under that key: a link typed again without its scheme
+     * is judged against the certificate it was trusted with, never trusted afresh. Marked by the user ([allowHttp]: the
+     * import sheet's switch, an http:// link, or the record's own mark), the server is fetched over HTTPS all the same
+     * and trusted by its pinned certificate (M-171).
      */
-    private fun trustOf(meta: SubscriptionMeta?, url: String, allowHttp: Boolean): Pair<String, SubscriptionTrust> {
+    internal fun trustFor(metas: Map<String, SubscriptionMeta>, rawUrl: String, allowHttp: Boolean): Pair<String, SubscriptionTrust> {
+        val typed = rawUrl.trim()
+        val url = normalizeSubscriptionUrl(typed, allowHttp || typed.startsWith("http://", ignoreCase = true))
+        val meta = metas[url]
         val pinned = allowHttp || meta?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
-        return normalizeSubscriptionUrl(url, pinned) to SubscriptionTrust(pinned, meta?.trusted)
+        return url to SubscriptionTrust(pinned, meta?.trusted)
     }
 
     /**
@@ -91,7 +96,7 @@ internal object SubscriptionSync {
      * written. Nothing is stored. The URL the result belongs to comes back with it: [importPreviewed] takes that one.
      */
     suspend fun preview(store: SettingsStore, rawUrl: String, allowHttp: Boolean): Pair<String, SubscriptionFetchResult> {
-        val (url, trust) = trustOf(store.subscriptionMeta.first()[rawUrl.trim()], rawUrl.trim(), allowHttp)
+        val (url, trust) = trustFor(store.subscriptionMeta.first(), rawUrl, allowHttp)
         return url to SubscriptionImporter.fetch(url, trust)
     }
 
@@ -106,9 +111,9 @@ internal object SubscriptionSync {
         cert: SubscriptionCertRecord?,
         allowHttp: Boolean,
     ): SubscriptionRefreshOutcome = lockFor(url).withLock {
-        val known = store.subscriptionMeta.first()[url]
-        val pinned = allowHttp || known?.allowHttp == true || url.startsWith("http://", ignoreCase = true)
-        val outcome = written(store, url, known, preview, cert, pinned)
+        val metas = store.subscriptionMeta.first()
+        val known = metas[url]
+        val outcome = written(store, url, known, preview, cert, trustFor(metas, url, allowHttp).second.pinned)
         if (known == null) {
             // nothing of it went into a profile (every node's server is a profile already, or none is free): there is
             // no subscription to keep, and nothing for a refresh to come back to
@@ -136,8 +141,9 @@ internal object SubscriptionSync {
         store: SettingsStore,
         url: String,
     ): SubscriptionRefreshOutcome {
-        val meta = store.subscriptionMeta.first()[url]
-        val (normalized, trust) = trustOf(meta, url, allowHttp = false)
+        val metas = store.subscriptionMeta.first()
+        val (normalized, trust) = trustFor(metas, url, allowHttp = false)
+        val meta = metas[normalized]
         store.markSubscriptionAttempt(normalized)
         val outcome = when (val result = SubscriptionImporter.fetch(normalized, trust)) {
             is SubscriptionFetchResult.Success -> written(store, normalized, meta, result.preview, result.cert, trust.pinned)

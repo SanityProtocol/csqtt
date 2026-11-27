@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -55,6 +54,7 @@ import com.csqtt.client.TunnelManager
 import com.csqtt.client.pickProfile
 import com.csqtt.client.ui.components.Cell
 import com.csqtt.client.ui.components.IconBtn
+import com.csqtt.client.ui.components.Menu
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.design.Icons
 import com.csqtt.client.ui.design.Type
@@ -217,7 +217,7 @@ internal fun ProfileRow(
                             Icons.more, stringResource(R.string.profile_actions, entry.name), { menuOpen = true },
                             small = true, tint = colors.muted,
                         )
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        Menu(menuOpen, { menuOpen = false }) {
                             for (action in items) {
                                 ActionItem(look(action)) {
                                     menuOpen = false
@@ -287,7 +287,7 @@ internal fun SortMenu(sort: ProfileSort, onPick: (ProfileSort) -> Unit) {
     var open by rememberSaveable { mutableStateOf(false) }
     Box {
         IconBtn(Icons.sort, stringResource(R.string.home_sort), { open = true }, small = true, tint = Csq.colors.muted)
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        Menu(open, { open = false }) {
             for ((choice, label) in SortChoices) {
                 DropdownMenuItem(
                     // TalkBack says which order is the chosen one: the check mark alone is a picture

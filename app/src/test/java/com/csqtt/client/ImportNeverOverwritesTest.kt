@@ -65,16 +65,50 @@ class ImportNeverOverwritesTest {
         assertNull(elsewhere.same)
         assertNull(elsewhere.emptyOpen)
         assertTrue(elsewhere.freeProfile)
-        // the owner's own server, by its address and port
-        val own = SettingsStore.linkImportState(owner, "203.0.113.5:46100", runProfile = 0)
-        assertEquals(0, own.same)
-        assertEquals(0, own.runProfile)
-        assertFalse(LinkImport.plan(own).update)
-        // a participant's link profile, by its link's server
-        assertEquals(3, SettingsStore.linkImportState(load(Store253Snapshots.participant), "198.51.100.9:46000", null).same)
+        // a participant's link profile, by its link's server; while the tunnel is on it, it is not written
+        val participant = load(Store253Snapshots.participant)
+        assertEquals(3, SettingsStore.linkImportState(participant, "198.51.100.9:46000", null).same)
+        val under = SettingsStore.linkImportState(participant, "198.51.100.9:46000", runProfile = 3)
+        assertEquals(3, under.runProfile)
+        assertFalse(LinkImport.plan(under).update)
         assertFalse(SettingsStore.linkImportState(load(Store253Snapshots.allSlots), linkEndpoint, null).freeProfile)
         // a first start: the open profile waits for a link and holds nothing
         assertEquals(0, SettingsStore.linkImportState(load("""{"booleans": {"csqtt_link_mode": true}}"""), linkEndpoint, null).emptyOpen)
+    }
+
+    @Test fun theUsersOwnServerIsNeverTheProfileToUpdate() {
+        // a link to the server the owner typed in by hand (the one they are about to give out) is added beside their
+        // profile: «Обновить» would make it a participant's, its address, password and own hashes gone
+        val own = SettingsStore.linkImportState(load(Store253Snapshots.owner), "203.0.113.5:46100", runProfile = null)
+        assertNull(own.same)
+        assertTrue(LinkImport.plan(own).add)
+        assertNull(LinkImport.plan(own).addInto)
+    }
+
+    @Test fun ofTwoProfilesOnTheServerTheOpenOneIsTheOneToUpdate() {
+        val prefs = load(Store253Snapshots.owner)
+        assertEquals(1, SettingsStore.importLinkKeys(prefs, link, target = null))
+        assertEquals(2, SettingsStore.importLinkKeys(prefs, link, target = null))
+        assertEquals(1, SettingsStore.linkImportState(prefs, linkEndpoint, null).same)
+        SettingsStore.openProfileKeys(prefs, 2)
+        assertEquals(2, SettingsStore.linkImportState(prefs, linkEndpoint, null).same)
+    }
+
+    @Test fun aProfileThatWaitsForItsServersInstallDoesNotTakeALink() {
+        // the owner saved the server's SSH data and has no address yet: the open profile links that record
+        val waiting = load("""{"strings": {"deploy_ip_4": "203.0.113.40"}, "ints": {"vps_ref": 4}}""")
+        val state = SettingsStore.linkImportState(waiting, linkEndpoint, null)
+        assertNull(state.emptyOpen)
+        assertNull(LinkImport.plan(state).addInto)   // a new profile takes it
+    }
+
+    @Test fun aProfileALinkFillsIsAddedThen() {
+        val first = load("""{"booleans": {"csqtt_link_mode": true}}""")
+        assertEquals(0, SettingsStore.importLinkKeys(first, link, target = 0, name = "Дом", now = 5L))
+        assertEquals(5L, SettingsStore.profileEntries(first).single().addedAt)
+        // one that is updated keeps the date it has
+        assertEquals(0, SettingsStore.importLinkKeys(first, link, target = 0, now = 9L))
+        assertEquals(5L, SettingsStore.profileEntries(first).single().addedAt)
     }
 
     @Test fun aSubscriptionsNodeIsNeverTheProfileToUpdate() {

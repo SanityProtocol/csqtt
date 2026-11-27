@@ -61,6 +61,19 @@ class NavModelTest {
     }
 
     @Test
+    fun `a flow that is done takes the routes it came through with it, and only those`() {
+        val nav = NavModel(SavedStateHandle())
+        listOf(screen, sheet, dialog).forEach(nav::open)
+        nav.closeRoutes(sheet.route, "not-open")
+        assertEquals(listOf(screen, dialog), nav.stack)
+        nav.closeRoutes(screen.route, dialog.route)
+        assertEquals(emptyList<Dest>(), nav.stack)
+        // nothing to close: nothing changes
+        nav.closeRoutes(sheet.route)
+        assertEquals(emptyList<Dest>(), nav.stack)
+    }
+
+    @Test
     fun `showing a tab closes the screens over the tabs and keeps a question in a dialog`() {
         val nav = NavModel(SavedStateHandle())
         nav.open(screen)

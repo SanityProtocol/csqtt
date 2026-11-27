@@ -90,6 +90,11 @@ class QuestionsInBothLayoutsTest {
         val said = notices(ConnectionState.Idle, subscription = failed).single() as HomeNotice.Outcome
         assertTrue(said.bad)
         assertTrue("Мой VPN" in said.text)
+        // a failure that is not about the certificate leads nowhere; one that kept the certificate it was shown leads to
+        // the question about it
+        assertEquals(null, said.certOf)
+        val refused = failed.copy(url = "https://sub.example.net/c/1", refusedSha256 = "ab".repeat(32))
+        assertEquals("https://sub.example.net/c/1", (notices(ConnectionState.Idle, subscription = refused).single() as HomeNotice.Outcome).certOf)
         val warned = notices(ConnectionState.Idle, subscription = skipped).single() as HomeNotice.Outcome
         assertFalse(warned.bad)
         assertTrue(warned.warn)

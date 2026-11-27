@@ -1273,34 +1273,29 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             return all.values.firstOrNull { it.lastError.isNotEmpty() && it.url in inUse }
         }
 
-        /** host:port [profile] connects to, lower-cased: its link's server, or its own; null when it has neither. */
-        private fun endpointOf(prefs: Preferences, profile: Int): String? =
-            if (prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true) {
-                parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty())?.let { LinkImport.endpoint(it.host, it.port) }
-            } else {
-                prefs[getProfileKey(PEER, profile)]?.takeIf { it.isNotBlank() }?.let { peer ->
-                    LinkImport.endpoint(
-                        peer,
-                        prefs[getProfileKey(SERVER_PEER_PORT, profile)] ?: CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT,
-                    )
-                }
-            }
-
         /**
          * M-70, I15: where a link to [linkEndpoint] could go, read in one pass. [runProfile] is the profile the tunnel is
-         * on while it is on, else null. A subscription's node is never the profile "already on this server": it is its
-         * subscription's, and a link written into it would take it out of there.
+         * on while it is on, else null. The profile "already on this server" is one that connects there by a link, the
+         * open one before another: never a subscription's node (it is its subscription's, and a link written into it
+         * would take it out of there), and never the user's own server (the link would make it a participant's profile:
+         * its address, password and own hashes gone, and the owner's «Сервер» tab with them). The open profile takes
+         * the link when it holds nothing — no address, link or subscription, and no server record waiting for its
+         * install.
          */
         internal fun linkImportState(prefs: Preferences, linkEndpoint: String, runProfile: Int?): LinkImportState {
             val open = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
-            // the open profile before another on the same server
-            val same = (listOf(open) + profileIndices.filter { it != open && profileInUse(prefs, it) }).firstOrNull {
-                prefs[getProfileKey(SUBSCRIPTION_URL, it)].isNullOrBlank() && endpointOf(prefs, it) == linkEndpoint
+            val same = (listOf(open) + profileIndices.filter { it != open && profileInUse(prefs, it) }).firstOrNull { profile ->
+                prefs[getProfileKey(CSQTT_LINK_MODE, profile)] == true &&
+                    prefs[getProfileKey(SUBSCRIPTION_URL, profile)].isNullOrBlank() &&
+                    parseCsqttLink(prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty())
+                        ?.let { LinkImport.endpoint(it.host, it.port) } == linkEndpoint
             }
+            val openIsEmpty = linkedVps(prefs, open) == null &&
+                listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL).all { key -> prefs[getProfileKey(key, open)].isNullOrBlank() }
             return LinkImportState(
                 same = same,
                 sameName = same?.let { profileDisplayName(prefs, it) }.orEmpty(),
-                emptyOpen = open.takeIf { listOf(PEER, CSQTT_LINK, SUBSCRIPTION_URL).all { key -> prefs[getProfileKey(key, open)].isNullOrBlank() } },
+                emptyOpen = open.takeIf { openIsEmpty },
                 freeProfile = profileIndices.any { it != open && !profileInUse(prefs, it) },
                 runProfile = runProfile,
                 runName = runProfile?.let { profileDisplayName(prefs, it) }.orEmpty(),
@@ -1427,10 +1422,31 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             return true
         }
 
-        /** Classic's dropdown (M-97): the profiles in use and the active one, with their names. */
+        /**
+         * Classic's dropdown (M-97): the profiles in use and the active one, with their names. A hidden profile is in
+         * none of the lists, this one included (P3 B2); the sheet's «Скрытые» is where it is found.
+         */
         internal fun profileList(prefs: Preferences): List<Pair<Int, String>> {
             val active = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX
-            return profileIndices.filter { it == active || profileInUse(prefs, it) }.map { it to profileDisplayName(prefs, it) }
+            return profileIndices
+                .filter { it == active || (profileInUse(prefs, it) && prefs[getProfileKey(PROFILE_HIDDEN, it)] != true) }
+                .map { it to profileDisplayName(prefs, it) }
+        }
+
+        /**
+         * A row was moved (P3 B2): [order] is the user's own order from now on, and the lists follow it whatever order
+         * they were in. What was stored before comes back, for «Отменить»: [restoreProfileOrderKeys] takes it.
+         */
+        internal fun moveProfileKeys(prefs: MutablePreferences, order: List<Int>): Pair<String?, String?> {
+            val before = prefs[PROFILE_SORT] to prefs[PROFILE_ORDER]
+            prefs[PROFILE_SORT] = ProfileSort.Custom.stored
+            prefs[PROFILE_ORDER] = ProfileOrder.encode(order)
+            return before
+        }
+
+        internal fun restoreProfileOrderKeys(prefs: MutablePreferences, before: Pair<String?, String?>) {
+            before.first?.let { prefs[PROFILE_SORT] = it } ?: prefs.remove(PROFILE_SORT)
+            before.second?.let { prefs[PROFILE_ORDER] = it } ?: prefs.remove(PROFILE_ORDER)
         }
 
         /** P3 B1: Home's layout as stored; nothing stored is the default, one connection. */
@@ -1930,29 +1946,15 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { it[PROFILE_SORT] = sort.stored }
     }
 
-    internal suspend fun saveProfileOrder(order: List<Int>) {
-        dataStore.edit { it[PROFILE_ORDER] = ProfileOrder.encode(order) }
-    }
-
-    /**
-     * A row was moved (P3 B2): [order] is the user's own order from now on, and the lists follow it whatever order they
-     * were in. What was stored before comes back, for «Отменить»: [restoreProfileOrder] takes it.
-     */
+    /** A row was moved (moveProfileKeys): what was stored before comes back, for «Отменить». */
     internal suspend fun saveProfileMove(order: List<Int>): Pair<String?, String?> {
         var before: Pair<String?, String?> = null to null
-        dataStore.edit { prefs ->
-            before = prefs[PROFILE_SORT] to prefs[PROFILE_ORDER]
-            prefs[PROFILE_SORT] = ProfileSort.Custom.stored
-            prefs[PROFILE_ORDER] = ProfileOrder.encode(order)
-        }
+        dataStore.edit { before = moveProfileKeys(it, order) }
         return before
     }
 
     internal suspend fun restoreProfileOrder(before: Pair<String?, String?>) {
-        dataStore.edit { prefs ->
-            before.first?.let { prefs[PROFILE_SORT] = it } ?: prefs.remove(PROFILE_SORT)
-            before.second?.let { prefs[PROFILE_ORDER] = it } ?: prefs.remove(PROFILE_ORDER)
-        }
+        dataStore.edit { restoreProfileOrderKeys(it, before) }
     }
 
     internal suspend fun setProfilePinned(profile: Int, pinned: Boolean) {
@@ -1996,10 +1998,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
 
     internal suspend fun renameProfile(profile: Int, name: String) {
         dataStore.edit { renameProfileKeys(it, profile, name) }
-    }
-
-    internal suspend fun revertProfileName(profile: Int) {
-        dataStore.edit { revertProfileNameKeys(it, profile) }
     }
 
     /** «Скрыть» / «Показать»; false when [profile] is the open one, which is never hidden. */

@@ -32,6 +32,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.LinkImport
@@ -162,7 +163,7 @@ internal fun LinkImportDialog(id: String, close: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(Icons.info, contentDescription = null, modifier = Modifier.size(20.dp), tint = colors.warn)
-                Text(stringResource(R.string.link_same_server, known.sameName), style = Type.fact, color = colors.text)
+                Text(stringResource(R.string.link_same_server, known.sameName), style = Type.fact.copy(fontWeight = FontWeight.SemiBold), color = colors.text)
             }
             Column(Modifier.fillMaxWidth().clip(Shape.context).border(1.dp, colors.line, Shape.context).selectableGroup()) {
                 Choice(
@@ -181,7 +182,7 @@ internal fun LinkImportDialog(id: String, close: () -> Unit) {
         }
         // said only while it is true and not obvious: the tunnel is on, and this import leaves it where it is
         if (possible && known.runProfile != null && !update) {
-            Text(stringResource(R.string.home_run_stays, known.runName), style = Type.sub, color = colors.muted)
+            Text(stringResource(R.string.link_run_stays, known.runName), style = Type.sub, color = colors.muted)
         }
     }
 }

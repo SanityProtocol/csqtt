@@ -177,6 +177,7 @@
     <string name="link_added">Добавлен профиль «%1$s»</string>
     <string name="link_updated">Профиль «%1$s» обновлён</string>
     <string name="link_pick">Выбрать</string>
+    <string name="link_run_stays">Туннель останется на «%1$s».</string>
     <string name="link_tunnel_on_profile">Туннель работает на этом профиле: он не обновлён</string>
     <string name="qr_title">Сканирование QR-кода</string>
     <string name="qr_hint">Наведите камеру на QR-код · щипок или кнопки для зума</string>
@@ -215,6 +216,8 @@
     <string name="sub_name">Название подписки</string>
     <string name="sub_link">Ссылка</string>
     <string name="sub_copy_link">Копировать ссылку</string>
+    <string name="sub_link_copied">Ссылка скопирована</string>
+    <string name="sub_link_taken">Эта ссылка уже добавлена как другая подписка</string>
     <string name="sub_auto_update">Автообновление</string>
     <string name="sub_interval_15m">раз в 15 мин</string>
     <string name="sub_interval_30m">раз в 30 мин</string>

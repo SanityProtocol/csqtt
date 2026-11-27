@@ -59,6 +59,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionState
 import com.csqtt.client.Disc
 import com.csqtt.client.HomeNotice
+import com.csqtt.client.ProfileKind
 import com.csqtt.client.ProfileOrder
 import com.csqtt.client.ProfileSort
 import com.csqtt.client.R
@@ -376,8 +377,9 @@ private fun Profiles() {
                     ProfileRow(entry = entry, line = profileLine(entry), selected = entry.index == active, divided = index > 0, acts = acts)
                 }
             }
-            // every profile and subscription is in the sheet; with one profile it would hold nothing more than this
-            if (entries.size > 1) {
+            // every profile and subscription is in the sheet. With one profile it would hold nothing more than this row,
+            // unless that one is a subscription's node: its subscription is refreshed, edited and deleted there
+            if (entries.size > 1 || entries.any { it.kind == ProfileKind.Subscription }) {
                 Row(
                     Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp)
                         .drawBehind { drawLine(colors.lineSoft, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }

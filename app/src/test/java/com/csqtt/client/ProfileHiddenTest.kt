@@ -40,8 +40,22 @@ class ProfileHiddenTest {
         // it is still a profile: its link is there, and the sheet lists it among the hidden ones
         assertEquals(link, prefs[stringPreferencesKey("csqtt_link_1")])
         assertEquals(listOf(1), SettingsStore.profileEntries(prefs).filter { it.hidden }.map { it.index })
+        // classic's picker, the only list of «Одно подключение», leaves it out too
+        assertEquals(listOf(0, 5, 6), SettingsStore.profileList(prefs).map { it.first })
         assertTrue(SettingsStore.setProfileHiddenKeys(prefs, 1, hidden = false))
         assertEquals(listOf(0, 1, 5, 6), shown(prefs))
+        assertEquals(listOf(0, 1, 5, 6), SettingsStore.profileList(prefs).map { it.first })
+    }
+
+    @Test fun theSheetsRowsHaveWhatTheirLinesAndGroupsAreMadeOf() {
+        val entries = SettingsStore.profileEntries(store()).associateBy { it.index }
+        // a node: its subscription (the sheet's group), the streams it is set to
+        assertEquals(url, entries.getValue(5).subscriptionUrl)
+        assertEquals(url, entries.getValue(6).subscriptionUrl)
+        assertEquals(20, entries.getValue(5).workers)
+        assertEquals("", entries.getValue(1).subscriptionUrl)
+        // the owner's server: the port beside its address
+        assertEquals(46100, entries.getValue(0).port)
     }
 
     @Test fun theOpenProfileIsNeverHidden() {

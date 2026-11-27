@@ -90,19 +90,24 @@ internal fun ProfilesSheet(close: () -> Unit) {
     Sheet(onDismiss = close, title = stringResource(R.string.profiles_title), messages = LocalOwners.current.messages) {
         if (own.isNotEmpty()) {
             Heading(stringResource(R.string.profiles_mine), sortControl)
-            Group(own, shown, order, active, acts) { profileSheetLine(it) }
+            Group(own, shown, order, sort, active, acts) { profileSheetLine(it) }
         }
         var first = own.isEmpty()
         for ((url, nodes) in subscriptions) {
             SubscriptionHeading(url, nodes, metas[url], if (first) sortControl else null)
             first = false
             val rows = shown.filter { it.kind == ProfileKind.Subscription && it.subscriptionUrl == url }
-            if (rows.isNotEmpty()) Group(rows, shown, order, active, acts) { profileSheetLine(it) }
+            if (rows.isNotEmpty()) Group(rows, shown, order, sort, active, acts) { profileSheetLine(it) }
         }
         if (hidden.isNotEmpty()) Hidden(hidden, acts)
         Btn(
-            stringResource(R.string.profiles_add), { nav.open(Routes.addProfile()) }, icon = Icons.plus,
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            stringResource(R.string.profiles_add),
+            {
+                // «Добавить профиль» takes this sheet's place, as on the board: one sheet at a time on the way in
+                nav.closeRoutes(Routes.PROFILES)
+                nav.open(Routes.addProfile())
+            },
+            icon = Icons.plus, modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
         )
         Text(
             stringResource(R.string.profiles_foot), style = Type.sub, color = Csq.colors.muted, textAlign = TextAlign.Center,
@@ -131,6 +136,7 @@ private fun Group(
     rows: List<ProfileEntry>,
     shown: List<ProfileEntry>,
     order: List<Int>,
+    sort: ProfileSort,
     active: Int,
     acts: ProfileActs,
     line: @Composable (ProfileEntry) -> String,
@@ -143,10 +149,11 @@ private fun Group(
     val moveUp = stringResource(R.string.profile_move_up)
     val moveDown = stringResource(R.string.profile_move_down)
 
-    // the rows as a drop left them, until the store's own order arrives: no jump back in between
+    // the rows as a drop left them, until the store answers — with its rows, or with its order and sort when the rows
+    // it shows did not change: no jump back in between, and nothing left drawn that the store does not hold
     val stored = rows.map { it.index }
     var dropped by remember { mutableStateOf<List<Int>?>(null) }
-    LaunchedEffect(stored) { dropped = null }
+    LaunchedEffect(stored, order, sort) { dropped = null }
     val drawn = dropped?.mapNotNull { index -> rows.firstOrNull { it.index == index } }?.takeIf { it.size == rows.size } ?: rows
 
     var lifted by remember { mutableStateOf<Int?>(null) }
@@ -154,8 +161,12 @@ private fun Group(
     val heights = remember { mutableStateMapOf<Int, Int>() }
     // a gesture outlives the composition it began in: what it reads is read through state, as it is now
     val group by rememberUpdatedState(drawn.map { it.index })
+    val pinned by rememberUpdatedState(drawn.filter { it.pinned }.mapTo(HashSet()) { it.index })
     val shownNow by rememberUpdatedState(shown)
     val orderNow by rememberUpdatedState(order)
+    // a long press that lifts a row and is let go in place ends as the row's own tap: it picks nothing while a row is
+    // lifted (read at the tap, which comes before the gesture's end)
+    val guarded = ProfileActs(pick = { if (lifted == null) acts.pick(it) }, run = acts.run)
 
     /** Where the lifted row would land: past each neighbour whose middle it has crossed; -1 with none lifted. */
     fun landing(): Int {
@@ -165,7 +176,8 @@ private fun Group(
         var passed = 0f
         val step = if (dragged > 0) 1 else -1
         var next = from + step
-        while (next in group.indices) {
+        // pinned rows stay first whatever the order: a row is not moved past a neighbour whose pin differs from its own
+        while (next in group.indices && (group[next] in pinned) == (lifted in pinned)) {
             val height = heights[group[next]] ?: break
             if (abs(dragged) <= passed + height / 2f) break
             passed += height
@@ -177,7 +189,7 @@ private fun Group(
 
     fun move(profile: Int, to: Int) {
         val at = group.indexOf(profile)
-        if (at < 0 || to == at || to !in group.indices) return
+        if (at < 0 || to == at || to !in group.indices || (group[to] in pinned) != (profile in pinned)) return
         val next = ProfileOrder.movedInGroup(shownNow, orderNow, group, profile, to) ?: return
         dropped = group.toMutableList().apply { remove(profile); add(to, profile) }
         // on the app's scope: the order is stored even if the sheet goes the same moment
@@ -212,17 +224,23 @@ private fun Group(
                     line = line(entry),
                     selected = entry.index == active,
                     divided = position > 0,
-                    acts = acts,
+                    acts = guarded,
                     menu = true,
                     swipe = lifted == null,
+                    // offered where the move does something: a neighbour of the same pin
                     more = listOfNotNull(
-                        if (position > 0) CustomAccessibilityAction(moveUp) { move(entry.index, position - 1); true } else null,
-                        if (position < drawn.lastIndex) CustomAccessibilityAction(moveDown) { move(entry.index, position + 1); true } else null,
+                        if (drawn.getOrNull(position - 1)?.pinned == entry.pinned) CustomAccessibilityAction(moveUp) { move(entry.index, position - 1); true } else null,
+                        if (drawn.getOrNull(position + 1)?.pinned == entry.pinned) CustomAccessibilityAction(moveDown) { move(entry.index, position + 1); true } else null,
                     ),
                     modifier = Modifier
                         .onSizeChanged { heights[entry.index] = it.height }
                         .zIndex(if (isLifted) 1f else 0f)
-                        .offset { IntOffset(0, if (isLifted) dragged.roundToInt() else shift) }
+                        // the neighbours make room only while a row is lifted: at the drop the rows are in their new
+                        // places already, and a shift still running out would throw them a row too far
+                        .offset {
+                            val up = lifted
+                            IntOffset(0, if (up == entry.index) dragged.roundToInt() else if (up != null) shift else 0)
+                        }
                         .then(if (isLifted) Modifier.shadow(8.dp).background(colors.raised) else Modifier)
                         .pointerInput(entry.index) {
                             detectDragGesturesAfterLongPress(

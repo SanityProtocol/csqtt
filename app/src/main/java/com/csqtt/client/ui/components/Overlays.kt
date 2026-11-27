@@ -1,5 +1,6 @@
 package com.csqtt.client.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -156,6 +158,16 @@ internal fun DialogFrame(
             }
         }
     }
+}
+
+/** A menu under its control: the theme's surface with an edge, so it stands off a sheet in the dark theme too. */
+@Composable
+internal fun Menu(expanded: Boolean, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val colors = Csq.colors
+    DropdownMenu(
+        expanded = expanded, onDismissRequest = onDismiss, shape = Shape.field, containerColor = colors.surface,
+        border = BorderStroke(1.dp, colors.line), content = content,
+    )
 }
 
 /** A screen of its own over the tabs («Настройки»): the way back at the top, its title, and what it holds. */

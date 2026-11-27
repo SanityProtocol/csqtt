@@ -24,22 +24,13 @@ import com.csqtt.client.R
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.verticalScroll
 import com.csqtt.client.CsqttConstants
-import com.csqtt.client.TunnelManager
 import com.csqtt.client.ui.legacy.components.CsqttSettingRow
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
-import android.Manifest
-import android.content.pm.PackageManager
-import android.widget.Toast
-import com.csqtt.client.showRaisedToast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
 import com.csqtt.client.ui.legacy.dialogs.ImportExportDialog
 import com.csqtt.client.ui.legacy.dialogs.TurnSubnetsDialog
@@ -61,13 +52,14 @@ fun FloatingToolbar(
     onOpenServer: (() -> Unit)? = null,
     /** «+ Добавить профиль» of the picker: the shell's «Добавить профиль» (P3 B2). */
     onAddProfile: () -> Unit = {},
+    /** «Все профили и подписки» of the picker: the shell's profiles sheet, where a profile is renamed, hidden or deleted. */
+    onAllProfiles: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(
         initialValue = CsqttConstants.VkAuth.MODE_CALLS,
     )
-    val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val selectedTurnSubnet by settingsStore.selectedTurnSubnet.collectAsStateWithLifecycle(
         initialValue = "",
     )
@@ -170,13 +162,18 @@ fun FloatingToolbar(
                         title = "Профиль конфигурации",
                         selectedKey = activeProfile.toString(),
                         options = profileList.map { (profile, name) -> profile.toString() to name } +
-                            (ADD_PROFILE_KEY to "+ Добавить профиль"),
+                            (ADD_PROFILE_KEY to "+ Добавить профиль") + (ALL_PROFILES_KEY to "Все профили и подписки"),
                         enabled = true,
                         onSelected = { key ->
                             if (key == ADD_PROFILE_KEY) {
                                 // the ways to add a profile are the shell's sheet now; this dialog would lie over it
                                 isExpanded = false
                                 onAddProfile()
+                            } else if (key == ALL_PROFILES_KEY) {
+                                // rename, hide, delete and the subscriptions are the shell's sheet: the way to it from
+                                // «Одно подключение», which has no list of its own
+                                isExpanded = false
+                                onAllProfiles()
                             } else {
                                 key.toIntOrNull()?.let(onActiveProfileChange)
                             }
@@ -268,6 +265,7 @@ fun FloatingToolbar(
 }
 
 private const val ADD_PROFILE_KEY = "add"
+private const val ALL_PROFILES_KEY = "all"
 
 /** An action at the foot of «Настройки»: the sheet's outlined pill, the width of the sheet. */
 @Composable

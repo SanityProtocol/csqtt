@@ -63,6 +63,28 @@ class SubCertRetrustTest {
     }
 
     @Test
+    fun `a link typed again without its scheme is judged against the certificate it was trusted with`() {
+        // imported with the switch on and no scheme: kept under http://, its server trusted by the certificate it showed
+        val kept = "http://panel.example.net:8443/sub/abc"
+        val metas = mapOf(kept to SubscriptionMeta(url = kept, allowHttp = true, certSha256 = old.sha256, certNotAfter = future))
+        val (url, trust) = SubscriptionSync.trustFor(metas, " panel.example.net:8443/sub/abc ", allowHttp = true)
+        assertEquals(kept, url)
+        assertTrue(trust.pinned)
+        assertEquals(old.sha256, trust.record!!.sha256)   // not a first use: another certificate is turned away
+        // a refresh of a stored link: the record's own mark pins it, with no switch to say so
+        val https = "https://sub.example.net/c/1"
+        val marked = mapOf(https to SubscriptionMeta(url = https, allowHttp = true, certSha256 = old.sha256))
+        assertTrue(SubscriptionSync.trustFor(marked, https, allowHttp = false).second.pinned)
+        assertEquals(old.sha256, SubscriptionSync.trustFor(marked, https, allowHttp = false).second.record!!.sha256)
+        // a link nobody marked gets the platform's checks and has no record; an http:// one is marked by itself
+        val plain = SubscriptionSync.trustFor(emptyMap(), "sub.example.net/c/2", allowHttp = false)
+        assertEquals("https://sub.example.net/c/2", plain.first)
+        assertFalse(plain.second.pinned)
+        assertNull(plain.second.record)
+        assertTrue(SubscriptionSync.trustFor(emptyMap(), "http://sub.example.net/c/2", allowHttp = false).second.pinned)
+    }
+
+    @Test
     fun `a refresh that fails for another reason, or works, leaves no certificate to ask about`() = withHttps { url ->
         val prefs = load("{}")
         val refused = (SubscriptionImporter.fetch(url, SubscriptionTrust(true, old)) as SubscriptionFetchResult.Failure).refused

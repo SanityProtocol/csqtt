@@ -184,6 +184,7 @@ internal fun LegacyHeaderActions(themeMode: String, onOpenServer: (() -> Unit)?)
             onAutoPauseOnWifiChange = { enabled -> scope.launch { store.saveAutoPauseOnWifi(enabled) } },
             onOpenServer = onOpenServer,
             onAddProfile = { nav.open(Routes.addProfile()) },
+            onAllProfiles = { nav.open(Routes.profiles()) },
         )
     }
 }

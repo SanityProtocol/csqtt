@@ -4,6 +4,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
@@ -32,7 +33,8 @@ import org.junit.runner.RunWith
  * The profiles' rows on a device (the canvas, F-Profiles, F-ProfileActions, F-HomeSwipe), which «Главная» and the sheet
  * share: a tap picks and the sheet closes once the pick is stored (M-97); the menu hides with the way back; the swipe
  * shows the same actions in the row; a rename and its revert; TalkBack's move makes the order the user's own; the
- * selected profile is not offered «Скрыть»; a delete asks first.
+ * selected profile is not offered «Скрыть»; a hidden one that is picked is shown again; a long press let go in place
+ * picks nothing, and one that is dragged moves the row; a delete asks first.
  */
 @RunWith(AndroidJUnit4::class)
 class ProfilesSheetTest {
@@ -66,6 +68,10 @@ class ProfilesSheetTest {
     private fun last(text: String): SemanticsNodeInteraction = compose.onAllNodes(hasText(text, substring = true)).onLast()
     private fun menuOf(name: String): SemanticsNodeInteraction = compose.onAllNodes(hasContentDescription("Действия: $name")).onLast()
 
+    /** A profile's row in the sheet: what can be tapped, not a message that names the profile. */
+    private fun row(name: String): SemanticsNodeInteraction =
+        compose.onAllNodes(hasText(name, substring = true) and hasClickAction()).onLast()
+
     private fun openSheet() {
         compose.waitUntil(10_000) { shown(ALL) }
         last(ALL).performClick()
@@ -89,8 +95,7 @@ class ProfilesSheetTest {
     fun restore() = runBlocking {
         store.saveActiveProfile(0)
         listOf(SLOT, beta, gamma).forEach { store.deleteProfile(it) }
-        store.saveProfileSort(sortBefore)
-        store.saveProfileOrder(orderBefore)
+        store.restoreProfileOrder(sortBefore.stored to ProfileOrder.encode(orderBefore))
         store.saveHomeLayout(layoutBefore)
     }
 
@@ -99,7 +104,7 @@ class ProfilesSheetTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             // a tap picks, and the sheet closes once the pick is stored
             openSheet()
-            last("Бета").performClick()
+            row("Бета").performClick()
             compose.waitUntil(5_000) { !shown(SHEET) }
             assertEquals(beta, runBlocking { store.activeProfile.first() })
 
@@ -112,6 +117,20 @@ class ProfilesSheetTest {
             last("Отменить").performClick()
             compose.waitUntil(5_000) { !entry(gamma).hidden }
 
+            // a hidden profile that is picked is shown again: hidden once more, found under «Скрытые», tapped
+            menuOf("Гамма").performClick()
+            last("Скрыть").performClick()
+            compose.waitUntil(5_000) { entry(gamma).hidden }
+            compose.onAllNodes(hasContentDescription("Показать скрытые")).onLast().performClick()
+            compose.waitUntil(5_000) { compose.onAllNodes(hasContentDescription("Свернуть скрытые")).fetchSemanticsNodes().isNotEmpty() }
+            row("Гамма").performClick()
+            compose.waitUntil(5_000) { !shown(SHEET) }
+            compose.waitUntil(5_000) { runBlocking { store.activeProfile.first() } == gamma && !entry(gamma).hidden }
+            openSheet()
+            row("Бета").performClick()
+            compose.waitUntil(5_000) { !shown(SHEET) && runBlocking { store.activeProfile.first() } == beta }
+            openSheet()
+
             // the selected profile is never hidden: it is not offered
             menuOf("Бета").performClick()
             compose.waitUntil(5_000) { shown("Закрепить") }
@@ -121,7 +140,7 @@ class ProfilesSheetTest {
             compose.waitUntil(5_000) { !shown("Закрепить") }
 
             // a swipe left shows the same actions in the row: rename
-            last("Гамма").performTouchInput { swipeLeft() }
+            row("Гамма").performTouchInput { swipeLeft() }
             compose.waitUntil(5_000) { compose.onAllNodes(hasContentDescription("Переименовать")).fetchSemanticsNodes().isNotEmpty() }
             compose.onAllNodes(hasContentDescription("Переименовать")).onLast().performClick()
             compose.waitUntil(5_000) { shown("Переименовать профиль") }
@@ -139,7 +158,7 @@ class ProfilesSheetTest {
 
             // TalkBack's «Переместить вверх»: the order becomes the user's own, the row one place up in its card
             compose.waitUntil(5_000) { shown("Гамма") }
-            val actions = last("Гамма").fetchSemanticsNode().config.getOrNull(SemanticsActions.CustomActions).orEmpty()
+            val actions = row("Гамма").fetchSemanticsNode().config.getOrNull(SemanticsActions.CustomActions).orEmpty()
             assertTrue("the row has no move action: ${actions.map { it.label }}", actions.any { it.label == "Переместить вверх" })
             compose.runOnUiThread { actions.first { it.label == "Переместить вверх" }.action() }
             compose.waitUntil(5_000) { runBlocking { store.profileSort.first() } == ProfileSort.Custom }
@@ -148,8 +167,19 @@ class ProfilesSheetTest {
                 order.indexOf(gamma) in 0 until order.indexOf(beta)
             }
 
+            // a long press that lifts a row and is let go in place picks nothing: the sheet stays, the open profile too
+            row("Альфа").performTouchInput {
+                down(center)
+                advanceEventTime(viewConfiguration.longPressTimeoutMillis + 100)
+                up()
+            }
+            compose.waitForIdle()
+            Thread.sleep(500)
+            assertTrue("a long press picked the row", shown(SHEET))
+            assertEquals(beta, runBlocking { store.activeProfile.first() })
+
             // a long press lifts a row, and it is dropped where it is let go: «Бета» one place up, over «Гамма» again
-            last("Бета").performTouchInput {
+            row("Бета").performTouchInput {
                 down(center)
                 advanceEventTime(viewConfiguration.longPressTimeoutMillis + 100)
                 moveBy(Offset(0f, -height.toFloat()))

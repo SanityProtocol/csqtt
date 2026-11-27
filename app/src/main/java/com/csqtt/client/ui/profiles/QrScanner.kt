@@ -9,6 +9,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.view.ScaleGestureDetector
 import android.view.ViewGroup
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
@@ -37,6 +38,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,7 +52,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -61,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -70,7 +81,9 @@ import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
 import com.csqtt.client.ui.components.IconBtn
 import com.csqtt.client.ui.components.MessageHost
+import com.csqtt.client.ui.design.DarkPalette
 import com.csqtt.client.ui.design.Icons
+import com.csqtt.client.ui.design.LocalPalette
 import com.csqtt.client.ui.design.Type
 import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import com.csqtt.client.ui.shell.LocalNav
@@ -89,6 +102,7 @@ import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.detector.Detector
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -142,13 +156,16 @@ internal fun QrScanner(close: () -> Unit) {
     val noCode = stringResource(R.string.qr_image_none)
 
     fun granted() = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    val activity = LocalActivity.current
     var camera by remember { mutableStateOf(granted()) }
     var asked by rememberSaveable { mutableStateOf(false) }
-    var askedByButton by remember { mutableStateOf(false) }
+    // «Разрешить» was pressed while Android would no longer show its question (it gives no rationale after a refusal
+    // it took as final): the refusal that comes back then was not the user's answer to anything
+    var notAsking by remember { mutableStateOf(false) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { given ->
         camera = given
-        // Android no longer asks: the app's page in the system settings is where the permission is given
-        if (!given && askedByButton) {
+        // the app's page in the system settings is where the permission is given then
+        if (!given && notAsking) {
             runCatching {
                 context.startActivity(
                     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
@@ -156,7 +173,7 @@ internal fun QrScanner(close: () -> Unit) {
                 )
             }
         }
-        askedByButton = false
+        notAsking = false
     }
     LaunchedEffect(Unit) {
         if (!camera && !asked) {
@@ -188,11 +205,31 @@ internal fun QrScanner(close: () -> Unit) {
         }
     }
 
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
+    Dialog(
+        onDismissRequest = close,
+        // the camera's picture fills the screen, under the system's bars too; what is drawn over it keeps clear of them
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false, decorFitsSystemWindows = false),
+    ) {
+        // the scanner is dark whatever the app's theme: its pieces are drawn in the dark palette
+        CompositionLocalProvider(LocalPalette provides DarkPalette) {
         Box(Modifier.fillMaxSize().background(ScannerGround)) {
             var zoom by remember { mutableFloatStateOf(1f) }
             var active by remember { mutableStateOf<Camera?>(null) }
-            if (camera) CameraView({ take(it, foreign) }, { active = it }, { zoom = it })
+            var frame by remember { mutableStateOf(Rect.Zero) }
+            if (camera) {
+                CameraView({ take(it, foreign) }, { active = it }, { zoom = it })
+                // the picture around the frame is dimmed, so the frame is where the eye goes and the text over the
+                // picture is read
+                Box(
+                    Modifier.fillMaxSize().graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawBehind {
+                        drawRect(Color.Black.copy(alpha = 0.45f))
+                        drawRoundRect(
+                            Color.Black, topLeft = frame.topLeft, size = frame.size, cornerRadius = CornerRadius(28.dp.toPx()),
+                            blendMode = BlendMode.Clear,
+                        )
+                    },
+                )
+            }
             Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                 Row(
                     Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp),
@@ -209,7 +246,8 @@ internal fun QrScanner(close: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
                     Box(
-                        Modifier.size(260.dp).border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(28.dp)),
+                        Modifier.size(260.dp).onGloballyPositioned { frame = it.boundsInRoot() }
+                            .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(28.dp)),
                         contentAlignment = Alignment.Center,
                     ) {
                         if (!camera) {
@@ -221,7 +259,7 @@ internal fun QrScanner(close: () -> Unit) {
                                 Btn(
                                     stringResource(R.string.qr_allow_camera),
                                     {
-                                        askedByButton = true
+                                        notAsking = activity?.let { !ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.CAMERA) } ?: false
                                         permission.launch(Manifest.permission.CAMERA)
                                     },
                                     kind = BtnKind.Primary, small = true,
@@ -255,6 +293,7 @@ internal fun QrScanner(close: () -> Unit) {
                 MessageHost(messages, Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
             }
         }
+        }
     }
 }
 
@@ -270,9 +309,12 @@ private fun CameraView(onText: (String) -> Boolean, onCamera: (Camera?) -> Unit,
     var scanned by remember { mutableStateOf(false) }
     var active by remember { mutableStateOf<Camera?>(null) }
     var bound by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    val gone = remember { AtomicBoolean(false) }
     DisposableEffect(Unit) {
         onDispose {
-            // the camera is the activity's, not this window's: it is let go with the scanner, not left on behind it
+            // the camera is the activity's, not this window's: it is let go with the scanner, not left on behind it —
+            // and a start that ends after the scanner has closed binds nothing
+            gone.set(true)
             runCatching { bound?.unbindAll() }
             executor.shutdown()
             onCamera(null)
@@ -299,7 +341,9 @@ private fun CameraView(onText: (String) -> Boolean, onCamera: (Camera?) -> Unit,
             }
             val providers = ProcessCameraProvider.getInstance(ctx)
             providers.addListener({
-                val provider = providers.get()
+                // a camera that fails to start leaves the scanner with «Из галереи»; it throws nothing here
+                val provider = runCatching { providers.get() }.getOrNull()
+                if (provider == null || gone.get()) return@addListener
                 val preview = Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
                 val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                 val reader = MultiFormatReader().apply { setHints(QrHints) }

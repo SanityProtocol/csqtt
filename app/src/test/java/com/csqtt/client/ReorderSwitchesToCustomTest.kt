@@ -61,6 +61,26 @@ class ReorderSwitchesToCustomTest {
         assertEquals(listOf(0, 1, 5), ProfileOrder.homeRows(shown, selected = -1).map { it.index })
     }
 
+    @Test fun aMoveMakesTheOrderTheUsersOwnAndItsUndoGivesBackWhatWasThere() {
+        val sortKey = androidx.datastore.preferences.core.stringPreferencesKey("profile_sort")
+        val orderKey = androidx.datastore.preferences.core.stringPreferencesKey("profile_order")
+        // the lists were by name, with an order of the user's from before
+        val prefs = Store253Snapshots.load(Store253Snapshots.owner)
+        prefs[sortKey] = "name"
+        prefs[orderKey] = "0,1"
+        val before = SettingsStore.moveProfileKeys(prefs, listOf(6, 7, 5, 1, 0))
+        assertEquals("custom", prefs[sortKey])
+        assertEquals("6,7,5,1,0", prefs[orderKey])
+        SettingsStore.restoreProfileOrderKeys(prefs, before)
+        assertEquals("name", prefs[sortKey])
+        assertEquals("0,1", prefs[orderKey])
+        // nothing was stored before: nothing is left stored after the undo
+        val fresh = Store253Snapshots.load(Store253Snapshots.owner)
+        SettingsStore.restoreProfileOrderKeys(fresh, SettingsStore.moveProfileKeys(fresh, listOf(1, 0)))
+        assertNull(fresh[sortKey])
+        assertNull(fresh[orderKey])
+    }
+
     @Test fun aDeletedProfileLeavesTheOrder() {
         val prefs = Store253Snapshots.load(Store253Snapshots.owner)
         prefs[androidx.datastore.preferences.core.stringPreferencesKey("profile_order")] = "3,0,1"

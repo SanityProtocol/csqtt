@@ -1,19 +1,16 @@
 package com.csqtt.client.ui.profiles
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -29,13 +26,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ProfileEntry
@@ -47,6 +41,8 @@ import com.csqtt.client.SubscriptionMeta
 import com.csqtt.client.SubscriptionPreview
 import com.csqtt.client.SubscriptionSync
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.copySensitive
+import com.csqtt.client.normalizeSubscriptionUrl
 import com.csqtt.client.noticeTime
 import com.csqtt.client.ui.components.Btn
 import com.csqtt.client.ui.components.BtnKind
@@ -57,6 +53,7 @@ import com.csqtt.client.ui.components.ChipKind
 import com.csqtt.client.ui.components.DialogFrame
 import com.csqtt.client.ui.components.Field
 import com.csqtt.client.ui.components.IconBtn
+import com.csqtt.client.ui.components.Menu
 import com.csqtt.client.ui.components.Sheet
 import com.csqtt.client.ui.components.SwitchRow
 import com.csqtt.client.ui.components.TextBtn
@@ -74,6 +71,7 @@ import com.csqtt.client.ui.shell.Routes
 import com.csqtt.client.ui.shell.SecretDrafts
 import java.net.URI
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /*
@@ -93,8 +91,11 @@ private fun hostOf(url: String): String = runCatching { URI(url.trim()).host }.g
 private const val IMPORT_URL = "sub-import:url"
 private const val EDIT_URL = "sub-edit:url"
 
-/** What «Загрузить» brought: kept in memory only — the nodes' links hold their passwords. */
-private class Fetched(val url: String, val preview: SubscriptionPreview, val cert: SubscriptionCertRecord?)
+/**
+ * What «Загрузить» brought, with the switch it was loaded under: kept in memory only — the nodes' links hold their
+ * passwords.
+ */
+private class Fetched(val url: String, val preview: SubscriptionPreview, val cert: SubscriptionCertRecord?, val allowHttp: Boolean)
 
 /**
  * «Импорт подписки»: the link, then «Загрузить» shows what the subscription holds — its nodes, what was left out, and
@@ -111,7 +112,8 @@ internal fun SubImportSheet(close: () -> Unit) {
     val colors = Csq.colors
     var allowHttp by rememberSaveable { mutableStateOf(false) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(false) }
+    var load by remember { mutableStateOf<Job?>(null) }
+    val loading = load != null
     var fetched by remember { mutableStateOf<Fetched?>(null) }
     val url = SecretDrafts[IMPORT_URL]
     val needUrl = stringResource(R.string.sub_error_url)
@@ -119,8 +121,10 @@ internal fun SubImportSheet(close: () -> Unit) {
         SecretDrafts.clear(IMPORT_URL)
         close()
     }
-    // what was loaded belongs to the link and the switch as they were
+    // what was loaded, and what is still loading, belongs to the link and the switch as they were
     fun changed() {
+        load?.cancel()
+        load = null
         fetched = null
         error = null
     }
@@ -181,14 +185,15 @@ internal fun SubImportSheet(close: () -> Unit) {
                         when {
                             typed.isEmpty() -> error = needUrl
                             else -> {
-                                loading = true
                                 error = null
-                                // on the sheet's own scope: a load nobody waits for any more writes nothing and is dropped
-                                scope.launch {
-                                    val (kept, result) = SubscriptionSync.preview(store, typed, allowHttp)
-                                    loading = false
+                                val marked = allowHttp
+                                // on the sheet's own scope: a load nobody waits for any more writes nothing and is
+                                // dropped; an edit of the link or the switch cancels it
+                                load = scope.launch {
+                                    val (kept, result) = SubscriptionSync.preview(store, typed, marked)
+                                    load = null
                                     when (result) {
-                                        is SubscriptionFetchResult.Success -> fetched = Fetched(kept, result.preview, result.cert)
+                                        is SubscriptionFetchResult.Success -> fetched = Fetched(kept, result.preview, result.cert, marked)
                                         is SubscriptionFetchResult.Failure -> error = result.message
                                     }
                                 }
@@ -203,7 +208,7 @@ internal fun SubImportSheet(close: () -> Unit) {
                     {
                         // on the app's scope: what the user confirmed is written whatever becomes of the sheet
                         TunnelManager.scope.launch(Dispatchers.Main) {
-                            messages.show(SubscriptionSync.importPreviewed(store, shown.url, shown.preview, shown.cert, allowHttp).message)
+                            messages.show(SubscriptionSync.importPreviewed(store, shown.url, shown.preview, shown.cert, shown.allowHttp).message)
                         }
                         nav.closeRoutes(Routes.ADD_PROFILE)
                         done()
@@ -216,7 +221,7 @@ internal fun SubImportSheet(close: () -> Unit) {
 }
 
 /** A subscription a sheet or a dialog is about: its URL, what is kept of it, and its nodes. */
-private class Subscription(val url: String, val meta: SubscriptionMeta, val nodes: List<ProfileEntry>) {
+private class Subscription(val url: String, val meta: SubscriptionMeta, val nodes: List<ProfileEntry>, val others: Set<String>) {
     val title: String get() = meta.title.ifBlank { nodes.firstOrNull()?.subscriptionTitle.orEmpty() }
 }
 
@@ -232,12 +237,13 @@ private fun rememberSubscription(key: String, close: () -> Unit): Subscription? 
     val loadedMetas = metas ?: return null
     val loadedEntries = entries ?: return null
     val nodes = loadedEntries.filter { it.kind == ProfileKind.Subscription }
-    val url = (loadedMetas.keys + nodes.map { it.subscriptionUrl }).firstOrNull { Routes.subscriptionKey(it) == key }
+    val known = loadedMetas.keys + nodes.map { it.subscriptionUrl }
+    val url = known.firstOrNull { Routes.subscriptionKey(it) == key }
     if (url == null) {
         LaunchedEffect(Unit) { close() }
         return null
     }
-    return Subscription(url, loadedMetas[url] ?: SubscriptionMeta(url = url), nodes.filter { it.subscriptionUrl == url })
+    return Subscription(url, loadedMetas[url] ?: SubscriptionMeta(url = url), nodes.filter { it.subscriptionUrl == url }, known - url)
 }
 
 /** Whether the tunnel is on one of [subscription]'s nodes: those are not deleted from under it. */
@@ -262,10 +268,15 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
     var pickedInterval by rememberSaveable { mutableStateOf<Int?>(null) }
     var urlError by rememberSaveable { mutableStateOf<String?>(null) }
     var refreshing by remember { mutableStateOf(false) }
+    // the link field is its draft once it was edited — an emptied one too; until then, the stored link. The draft is in
+    // memory only (the link may carry the subscription's token) and goes with the sheet
+    var linkEdited by remember { mutableStateOf(false) }
     val title = typedTitle ?: subscription.title
-    val url = SecretDrafts[EDIT_URL].ifEmpty { subscription.url }
+    val url = if (linkEdited) SecretDrafts[EDIT_URL] else subscription.url
     val interval = pickedInterval ?: meta.autoUpdateMinutes
     val needUrl = stringResource(R.string.sub_error_url)
+    val linkTaken = stringResource(R.string.sub_link_taken)
+    val linkCopied = stringResource(R.string.sub_link_copied)
     DisposableEffect(Unit) { onDispose { SecretDrafts.clear(EDIT_URL) } }
 
     Sheet(
@@ -276,11 +287,17 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
     ) {
         Field(stringResource(R.string.sub_name), title, { typedTitle = it })
         Field(
-            stringResource(R.string.sub_link), url, { SecretDrafts[EDIT_URL] = it; urlError = null }, mono = true, error = urlError,
+            stringResource(R.string.sub_link), url,
+            {
+                SecretDrafts[EDIT_URL] = it
+                linkEdited = true
+                urlError = null
+            },
+            mono = true, error = urlError,
             trailing = {
                 IconBtn(Icons.copy, stringResource(R.string.sub_copy_link), {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    clipboard?.setPrimaryClip(ClipData.newPlainText("csqtt", url))
+                    // marked as sensitive for the system's clipboard preview, as the app's other secrets (M-173)
+                    if (context.copySensitive("csqtt", url)) messages.show(linkCopied)
                 }, small = true, tint = colors.muted)
             },
         )
@@ -303,7 +320,8 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
             }
             outcome?.let { ValueRow(stringResource(R.string.sub_outcome), it, danger = meta.lastError.isNotEmpty()) }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // of one height, whichever label takes two lines on a narrow screen
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Btn(
                 stringResource(if (refreshing) R.string.sub_refreshing else R.string.sub_refresh_now),
                 {
@@ -315,7 +333,7 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
                         if (outcome.refused != null) nav.open(Routes.subCert(subscription.url)) else messages.show(outcome.message)
                     }
                 },
-                modifier = Modifier.weight(1f), icon = Icons.refresh, enabled = !refreshing,
+                modifier = Modifier.weight(1f).fillMaxHeight(), icon = Icons.refresh, enabled = !refreshing,
             )
             Btn(
                 stringResource(R.string.action_delete),
@@ -323,7 +341,7 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
                     if (tunnelOn(subscription)) messages.show(context.getString(R.string.sub_delete_running))
                     else nav.open(Routes.subDelete(subscription.url))
                 },
-                modifier = Modifier.weight(1f), kind = BtnKind.Danger, icon = Icons.trash,
+                modifier = Modifier.weight(1f).fillMaxHeight(), kind = BtnKind.Danger, icon = Icons.trash,
             )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
@@ -331,9 +349,13 @@ internal fun SubEditSheet(key: String, close: () -> Unit) {
             Btn(
                 stringResource(R.string.action_save),
                 {
-                    val nextUrl = url.trim()
+                    // a link typed without its scheme is the same link the import sheet takes
+                    val nextUrl = normalizeSubscriptionUrl(url, meta.allowHttp)
                     if (nextUrl.isEmpty() || runCatching { URI(nextUrl).host }.getOrNull().isNullOrBlank()) {
                         urlError = needUrl
+                    } else if (nextUrl in subscription.others) {
+                        // two subscriptions under one link would become one, with the other's trusted certificate lost
+                        urlError = linkTaken
                     } else {
                         // on the app's scope, and the link last: the name and the interval are kept under the link as it was
                         TunnelManager.scope.launch {
@@ -355,18 +377,18 @@ private fun subscriptionUpdatedValue(meta: SubscriptionMeta): String =
     if (meta.lastUpdatedAt > 0L) remember(meta.lastUpdatedAt) { noticeTime(meta.lastUpdatedAt) }
     else stringResource(R.string.sub_never_updated_value)
 
-/** «Автообновление»: one of the intervals, as a menu under its current value. */
+/** «Автообновление»: one of the intervals, as a menu under its current value. As a choice it starts with a capital. */
 @Composable
 private fun IntervalSelect(minutes: Int, onPick: (Int) -> Unit) {
     val colors = Csq.colors
     var open by rememberSaveable { mutableStateOf(false) }
     Box {
-        Btn(subscriptionIntervalLabel(minutes), { open = true }, small = true, icon = Icons.chevronDown)
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        Btn(subscriptionIntervalLabel(minutes).replaceFirstChar { it.titlecase() }, { open = true }, small = true, icon = Icons.chevronDown)
+        Menu(open, { open = false }) {
             for (choice in SubscriptionIntervals) {
                 DropdownMenuItem(
                     modifier = Modifier.semantics { selected = choice == minutes },
-                    text = { Text(subscriptionIntervalLabel(choice), style = Type.body) },
+                    text = { Text(subscriptionIntervalLabel(choice).replaceFirstChar { it.titlecase() }, style = Type.body) },
                     trailingIcon = {
                         if (choice == minutes) Icon(Icons.check, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.muted)
                     },
