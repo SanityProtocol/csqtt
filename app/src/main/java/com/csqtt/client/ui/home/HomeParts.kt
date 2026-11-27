@@ -10,7 +10,6 @@ import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -99,9 +98,9 @@ internal object HomeMotion {
 /**
  * A line of Home that is not always there: [value] is what it says, null when it says nothing. What it says changes in
  * place; a line of another [kind] fades into its place; its room opens and closes as [HomeMotion] says. [moves] false:
- * the change is drawn whole in the frame it comes in, the line that went not drawn under it ([HomeView.moves]). The
- * line gives itself its distance from what is above it, inside [content], so a line that says nothing takes no room at
- * all.
+ * the line is drawn as it is, with no transition behind it, so a change is whole in the frame it comes in — a
+ * transition told to snap still shows its change a frame after the word it goes with ([HomeView.moves]). The line gives
+ * itself its distance from what is above it, inside [content], so a line that says nothing takes no room at all.
  *
  * Its cost (the operator, 2026-11-27: smooth and fast on the worst phones): nothing while nothing changes; a change is
  * laid out and drawn for a quarter of a second, with nothing composed again for a frame of it.
@@ -114,25 +113,22 @@ internal fun <T : Any> HomeLine(
     moves: Boolean = true,
     content: @Composable (T) -> Unit,
 ) {
+    if (!moves) {
+        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) { value?.let { content(it) } }
+        return
+    }
     // read as states by the lines on screen: one that is fading out or in is not composed again by its caller
     val now by rememberUpdatedState(value)
     val kindOf by rememberUpdatedState(kind)
     val draw by rememberUpdatedState(content)
-    val movesNow by rememberUpdatedState(moves)
     AnimatedContent(
         targetState = value?.let(kind),
         modifier = modifier.fillMaxWidth(),
         transitionSpec = {
-            if (!movesNow) {
-                // a fade that snaps, not «no transition»: with none the line that went is still drawn, at full strength,
-                // under the one that came, for the frame the change takes
-                (fadeIn(snap()) togetherWith fadeOut(snap())).using(SizeTransform(clip = false) { _, _ -> snap() })
-            } else {
-                val opens = initialState == null
-                (fadeIn(tween(HomeMotion.FADE_IN_MS, delayMillis = if (opens) 0 else HomeMotion.FADE_OUT_MS)) togetherWith
-                    fadeOut(tween(HomeMotion.FADE_OUT_MS)))
-                    .using(SizeTransform(clip = true) { _, _ -> tween(HomeMotion.MOVE_MS, easing = FastOutSlowInEasing) })
-            }
+            val opens = initialState == null
+            (fadeIn(tween(HomeMotion.FADE_IN_MS, delayMillis = if (opens) 0 else HomeMotion.FADE_OUT_MS)) togetherWith
+                fadeOut(tween(HomeMotion.FADE_OUT_MS)))
+                .using(SizeTransform(clip = true) { _, _ -> HomeMotion.spec() })
         },
         contentAlignment = Alignment.TopCenter,
         label = "home-line",

@@ -3,7 +3,6 @@ package com.csqtt.client.ui.home
 import androidx.annotation.StringRes
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.snap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -338,27 +337,30 @@ private fun CDisc(disc: Disc, description: String, enabled: Boolean, moves: Bool
             Disc.Dim -> Letter.Faint
             Disc.Off, Disc.Busy, Disc.Warn -> Letter.Logo
         }
-        // where Home does not move the letter is the state's own at once, with no frame of the last one under it
-        Crossfade(letter, animationSpec = if (moves) HomeMotion.spec() else snap(), label = "disc-letter") { shown ->
-            when (shown) {
-                Letter.White -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Color.White)
-                Letter.Faint -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = colors.faint)
-                Letter.Logo -> Icon(
-                    Icons.c, contentDescription = null, tint = Color.White,
-                    modifier = Modifier.size(118.dp).graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithCache {
-                        val brush = Brush.linearGradient(
-                            listOf(Color(0xFF4FA3FF), Color(0xFF0474FB)),
-                            start = Offset(size.width * 28f / 108f, size.height * 36f / 108f),
-                            end = Offset(size.width * 78f / 108f, size.height * 72f / 108f),
-                        )
-                        onDrawWithContent {
-                            drawContent()
-                            drawRect(brush, blendMode = BlendMode.SrcIn)
-                        }
-                    },
+        // where Home does not move the letter is the state's own in the frame it comes in, as the ground and the ring are
+        if (moves) Crossfade(letter, animationSpec = HomeMotion.spec(), label = "disc-letter") { DiscLetter(it) } else DiscLetter(letter)
+    }
+}
+
+@Composable
+private fun DiscLetter(letter: Letter) {
+    when (letter) {
+        Letter.White -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Color.White)
+        Letter.Faint -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Csq.colors.faint)
+        Letter.Logo -> Icon(
+            Icons.c, contentDescription = null, tint = Color.White,
+            modifier = Modifier.size(118.dp).graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithCache {
+                val brush = Brush.linearGradient(
+                    listOf(Color(0xFF4FA3FF), Color(0xFF0474FB)),
+                    start = Offset(size.width * 28f / 108f, size.height * 36f / 108f),
+                    end = Offset(size.width * 78f / 108f, size.height * 72f / 108f),
                 )
-            }
-        }
+                onDrawWithContent {
+                    drawContent()
+                    drawRect(brush, blendMode = BlendMode.SrcIn)
+                }
+            },
+        )
     }
 }
 
