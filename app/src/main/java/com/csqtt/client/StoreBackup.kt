@@ -166,6 +166,9 @@ internal object StoreBackup {
             }
             putTyped(prefs, key, kind, settings.get(name))
         }
+        // a backup taken before the store's step 9 can hold one subscription twice: the numbered steps do not run again
+        // on a restore, so the merge does
+        SettingsStore.mergeSubscriptionTwins(prefs)
         SettingsStore.bumpProfileEpoch(prefs)
         val activeKey = intPreferencesKey("active_profile")
         prefs[activeKey]?.let { if (it !in indices) prefs[activeKey] = CsqttConstants.Profiles.MIN_INDEX }

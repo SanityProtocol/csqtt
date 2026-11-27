@@ -314,6 +314,10 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val LINK_HASHES_REMOVED = profileString("link_hashes_removed")
         // S8: the owner's hashes the server last sent for a link profile; they replace the link's at the next connect
         private val RECEIVED_HASHES = profileString("received_hashes")
+        // S8's switch (P3 B3): false, and the server's sets are not taken — the profile keeps to its link's own hashes
+        private val ACCEPT_SERVER_HASHES = profileBoolean("accept_server_hashes")
+        // when the server last sent this profile its set (wall clock, ms): the line under the switch says it
+        private val RECEIVED_HASHES_AT = profileLong("received_hashes_at")
         private val SUBSCRIPTION_URL = profileString("subscription_url")
         private val SUBSCRIPTION_TITLE = profileString("subscription_title")
         private val SUBSCRIPTION_UUID = profileString("subscription_uuid")
@@ -589,7 +593,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val uiCacheStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
         private val STORE_SCHEMA_VERSION = intPreferencesKey("store_schema_version")
-        internal const val STORE_SCHEMA = 8
+        internal const val STORE_SCHEMA = 9
 
         /** Runs before the process's first read or write of the store, so nothing sees half-migrated data. */
         private object StoreMigrations : DataMigration<Preferences> {
@@ -670,7 +674,74 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 prefs.remove(booleanPreferencesKey("battery_optimization_prompt_handled"))
                 prefs.remove(booleanPreferencesKey("permission_intro_shown"))
             }
+            if (from < 9) {
+                // 2.6.0, P3 B3: a subscription kept under two spellings of its link is one (2.5.3's «Скачивать по HTTP»
+                // kept a link as http:// beside its https:// record)
+                step { mergeSubscriptionTwins(prefs) }
+            }
             prefs[STORE_SCHEMA_VERSION] = STORE_SCHEMA
+        }
+
+        /**
+         * One subscription kept twice becomes one (P3 B3; the operator, 2026-11-27). Twins are the keys fetched at one
+         * address ([subscriptionAddress]): the released 2.5.3 kept a link as `https://` and, added again with «Скачивать
+         * по HTTP», as `http://`; builds before the address rule did the same for a link typed without its scheme or with
+         * its host in other letter case. Each twin refreshed by itself and took the nodes from the other, and an unmarked
+         * twin was a way around the marked one's certificate.
+         *
+         * The one that stays: a marked one ([SubscriptionMeta.allowHttp], or an `http://` key) before an unmarked one, so
+         * the mark is never lost; then the one more profiles are on; then the one refreshed last. It keeps its key, its
+         * name, its interval and its last outcome, and takes from the others what it lacks: a name, an interval, the
+         * later times. One remembered certificate among them is kept. Of two different ones it is the twin's whose last
+         * refresh is the OLDER: the newer one may have been taken by a first use with no question, so it is turned away
+         * at the next refresh and the question about it is asked — nothing is decided for the user here. Every profile
+         * of a dropped twin points to the one that stays, and nothing else of a profile changes. A store without twins
+         * is left as it is. A profile may name a key that has no record yet (migrateSubscriptionMeta makes it later):
+         * that key is a twin all the same.
+         */
+        internal fun mergeSubscriptionTwins(prefs: MutablePreferences) {
+            val metas = decodeSubscriptionMeta(prefs[SUBSCRIPTION_META])
+            val onProfiles = profileIndices.mapNotNull { profile ->
+                prefs[getProfileKey(SUBSCRIPTION_URL, profile)]?.trim()?.takeIf { it.isNotEmpty() }?.let { profile to it }
+            }
+            val twins = (metas.keys + onProfiles.map { it.second }).distinct()
+                .groupBy { subscriptionAddress(it) }
+                .filter { (address, keys) -> address != null && keys.size > 1 }
+            if (twins.isEmpty()) return
+            val merged = LinkedHashMap(metas)
+            for (keys in twins.values) {
+                val records = keys.map { key -> metas[key] ?: SubscriptionMeta(url = key) }
+                val stays = records.sortedWith(
+                    compareByDescending<SubscriptionMeta> { it.allowHttp || it.url.startsWith("http://", ignoreCase = true) }
+                        .thenByDescending { record -> onProfiles.count { it.second == record.url } }
+                        .thenByDescending { it.lastUpdatedAt },
+                ).first()
+                val others = records.filter { it.url != stays.url }
+                // the one that stays first, so that it is the one taken where the times cannot tell
+                val withLeaf = (listOf(stays) + others).filter { it.certSha256.isNotBlank() }
+                val leaf = withLeaf.minByOrNull { it.lastUpdatedAt }
+                    ?.takeIf { withLeaf.distinctBy { record -> record.certSha256.lowercase() }.size > 1 }
+                    ?: withLeaf.firstOrNull()
+                var kept = stays.copy(
+                    title = stays.title.ifBlank { others.firstOrNull { it.title.isNotBlank() }?.title.orEmpty() },
+                    autoUpdateMinutes = stays.autoUpdateMinutes.takeIf { it > 0 }
+                        ?: others.map { it.autoUpdateMinutes }.filter { it > 0 }.minOrNull() ?: 0,
+                    lastUpdatedAt = records.maxOf { it.lastUpdatedAt },
+                    lastAttemptAt = records.maxOf { it.lastAttemptAt },
+                    certSha256 = leaf?.certSha256.orEmpty(), certNotAfter = leaf?.certNotAfter ?: 0L,
+                    certKind = leaf?.certKind.orEmpty(), certNames = leaf?.certNames.orEmpty(),
+                )
+                // a certificate that is the trusted one is not also the one turned away
+                if (kept.refusedSha256.isNotBlank() && kept.refusedSha256.equals(kept.certSha256, ignoreCase = true)) {
+                    kept = kept.copy(refusedSha256 = "", refusedNotAfter = 0L, refusedKind = "", refusedNames = "")
+                }
+                others.forEach { merged.remove(it.url) }
+                merged[stays.url] = kept
+                for ((profile, key) in onProfiles) {
+                    if (key != stays.url && key in keys) prefs[getProfileKey(SUBSCRIPTION_URL, profile)] = stays.url
+                }
+            }
+            prefs[SUBSCRIPTION_META] = encodeSubscriptionMeta(merged)
         }
 
         /**
@@ -1086,8 +1157,16 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
          * S8: [hashes] become [profile]'s received set when it is a link profile; a set equal to the link's own is
          * dropped (nothing to replace). True when the stored value changed.
          */
-        internal fun receivedHashesKeys(prefs: MutablePreferences, profile: Int, hashes: List<String>, sourceLink: String): Boolean {
+        internal fun receivedHashesKeys(
+            prefs: MutablePreferences,
+            profile: Int,
+            hashes: List<String>,
+            sourceLink: String,
+            now: Long = System.currentTimeMillis(),
+        ): Boolean {
             if (profile !in profileIndices || prefs[getProfileKey(CSQTT_LINK_MODE, profile)] != true) return false
+            // «Принимать хеши с сервера» is off (P3 B3): the profile keeps to its link's own
+            if (prefs[getProfileKey(ACCEPT_SERVER_HASHES, profile)] == false) return false
             // only while the profile still holds the link the run started with (review F2): a new link takes no old set
             val stored = prefs[getProfileKey(CSQTT_LINK, profile)].orEmpty()
             if (stored != sourceLink) return false
@@ -1095,7 +1174,65 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             val key = getProfileKey(RECEIVED_HASHES, profile)
             val before = prefs[key]
             if (hashes.isEmpty() || hashes == link.hashes) prefs.remove(key) else prefs[key] = hashes.joinToString(",")
-            return prefs[key] != before
+            // the server's word on this link's hashes is as of now, also when it changes nothing. The same word again
+            // within ten minutes is not written: every reconnect brings it, and a write wakes every reader of the store
+            val stamp = getProfileKey(RECEIVED_HASHES_AT, profile)
+            val changed = prefs[key] != before
+            val stamped = prefs[stamp]
+            if (hashes.isNotEmpty() && (changed || stamped == null || now - stamped >= RECEIVED_HASHES_STAMP_EVERY_MS)) prefs[stamp] = now
+            return changed
+        }
+
+        /**
+         * «Аккаунты VK» (M-79, P3 B3): the archived account [userId] becomes [profile]'s, with no new sign-in. False when
+         * the account is not in the archive or its token cannot be read; nothing is written then.
+         */
+        internal fun selectVkAccountKeys(
+            prefs: MutablePreferences,
+            profile: Int,
+            userId: String,
+            encrypt: (String) -> String,
+            decrypt: (String?) -> String?,
+        ): Boolean {
+            val token = VkAccounts.encryptedToken(prefs[VK_ACCOUNTS].orEmpty(), userId)
+                ?.let { runCatching { decrypt(it) }.getOrNull() }?.takeIf { it.isNotBlank() } ?: return false
+            prefs.putSecretValue(
+                getProfileKey(VK_ACCESS_TOKEN_ENCRYPTED, profile), getProfileKey(VK_ACCESS_TOKEN, profile), token, encrypt, decrypt,
+            )
+            prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] = userId
+            return true
+        }
+
+        /**
+         * The account [userId] leaves the archive, and [profile] loses its token when it is that account's. Another
+         * profile signed in with the same account keeps the token it holds.
+         */
+        internal fun removeVkAccountKeys(prefs: MutablePreferences, profile: Int, userId: String) {
+            if (userId.isBlank()) return
+            prefs[VK_ACCOUNTS]?.let { prefs[VK_ACCOUNTS] = VkAccounts.remove(it, userId) }
+            if (prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] == userId) {
+                listOf(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_USER_ID).forEach { prefs.remove(getProfileKey(it, profile)) }
+            }
+        }
+
+        /**
+         * «Принимать хеши с сервера» (S8's switch, P3 B3). Off, the set the server sent goes at once and none is taken
+         * until it is on again: the profile connects with its link's own hashes.
+         */
+        internal fun acceptServerHashesKeys(prefs: MutablePreferences, profile: Int, accept: Boolean) {
+            if (accept) {
+                prefs.remove(getProfileKey(ACCEPT_SERVER_HASHES, profile))
+            } else {
+                prefs[getProfileKey(ACCEPT_SERVER_HASHES, profile)] = false
+                dropReceivedHashes(prefs, profile)
+            }
+        }
+
+        private const val RECEIVED_HASHES_STAMP_EVERY_MS = 10 * 60_000L
+
+        private fun dropReceivedHashes(prefs: MutablePreferences, profile: Int) {
+            prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
+            prefs.remove(getProfileKey(RECEIVED_HASHES_AT, profile))
         }
 
         /**
@@ -1103,7 +1240,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
          * verify V1 — the subscription refresh, the imports and the settings JSON all write through here).
          */
         internal fun writeLinkKeys(prefs: MutablePreferences, profile: Int, link: String) {
-            if (prefs[getProfileKey(CSQTT_LINK, profile)] != link) prefs.remove(getProfileKey(RECEIVED_HASHES, profile))
+            if (prefs[getProfileKey(CSQTT_LINK, profile)] != link) dropReceivedHashes(prefs, profile)
             prefs[getProfileKey(CSQTT_LINK, profile)] = link
         }
 
@@ -1323,7 +1460,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             if (!profileInUse(prefs, profile)) stampAdded(prefs, profile, now)
             useParticipantLink(prefs, profile, link)
             prefs.remove(getProfileKey(LINK_HASHES_REMOVED, profile))
-            prefs.remove(getProfileKey(RECEIVED_HASHES, profile))   // a new link brings its own set
+            dropReceivedHashes(prefs, profile)   // a new link brings its own set
             listOf(SUBSCRIPTION_URL, SUBSCRIPTION_TITLE, SUBSCRIPTION_UUID, SUBSCRIPTION_NODE).forEach {
                 prefs.remove(getProfileKey(it, profile))
             }
@@ -2318,6 +2455,41 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     internal val subscriptionNotice: Flow<SubscriptionMeta?> =
         dataStore.data.map { prefs -> subscriptionNoticeOf(prefs, selectedProfile(prefs)) }.distinctUntilChanged()
 
+    /** S8's switch: whether the selected profile takes the hashes its server sends (yes, unless switched off). */
+    val acceptServerHashes: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[getProfileKey(ACCEPT_SERVER_HASHES, selectedProfile(prefs))] != false
+    }
+
+    /** When the server last sent the selected profile its hashes (wall clock, ms); 0 when it never did. */
+    val receivedHashesAt: Flow<Long> = dataStore.data.map { prefs ->
+        prefs[getProfileKey(RECEIVED_HASHES_AT, selectedProfile(prefs))] ?: 0L
+    }
+
+    suspend fun saveAcceptServerHashes(accept: Boolean) {
+        dataStore.edit { prefs -> acceptServerHashesKeys(prefs, selectedProfile(prefs), accept) }
+    }
+
+    /** M-79: the VK accounts signed in on this phone, by user id; their tokens stay encrypted in the store. */
+    val vkAccounts: Flow<List<String>> = dataStore.data.map { prefs -> VkAccounts.ids(prefs[VK_ACCOUNTS].orEmpty()) }
+
+    /** The selected profile takes the archived account [userId] (selectVkAccountKeys); false when it could not. */
+    suspend fun selectVkAccount(userId: String): Boolean {
+        var selected = false
+        dataStore.edit { prefs ->
+            selected = selectVkAccountKeys(prefs, selectedProfile(prefs), userId, secureStore::encrypt, secureStore::decrypt)
+        }
+        return selected
+    }
+
+    suspend fun removeVkAccount(userId: String) {
+        dataStore.edit { prefs -> removeVkAccountKeys(prefs, selectedProfile(prefs), userId) }
+    }
+
+    /** The server's address of the selected profile, as the Tunnel tab's field writes it: this key and no other. */
+    suspend fun savePeer(peer: String) {
+        dataStore.edit { prefs -> prefs[getProfileKey(PEER, selectedProfile(prefs))] = peer }
+    }
+
     /** S8: true when [profile]'s stored set changed (written only for a link profile). */
     internal suspend fun saveReceivedHashes(profile: Int, hashes: List<String>, sourceLink: String): Boolean {
         var changed = false
@@ -2672,7 +2844,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     }
 
     suspend fun saveCsqttParticipantLink(link: String) {
-        dataStore.edit { prefs -> importLinkKeys(prefs, link, target = prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX) }
+        dataStore.edit { prefs -> importLinkKeys(prefs, link, target = selectedProfile(prefs)) }
     }
 
     internal suspend fun linkImportState(linkEndpoint: String, runProfile: Int?): LinkImportState =
@@ -2688,12 +2860,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     }
 
     /**
-     * The Туннель tab's text actions: the active profile waits for a server ([linkMode] false) or a link, only while it
-     * is still empty (checked in the same edit). False when nothing changed.
+     * The Туннель tab's text actions: the selected profile waits for a server ([linkMode] false) or a link, only while
+     * it is still empty (checked in the same edit). False when nothing changed.
      */
     suspend fun switchEmptyProfileMode(linkMode: Boolean): Boolean {
         var switched = false
-        dataStore.edit { prefs -> switched = switchEmptyProfileModeKeys(prefs, prefs[ACTIVE_PROFILE] ?: 0, linkMode) }
+        dataStore.edit { prefs -> switched = switchEmptyProfileModeKeys(prefs, selectedProfile(prefs), linkMode) }
         return switched
     }
 

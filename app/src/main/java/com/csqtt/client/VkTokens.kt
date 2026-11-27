@@ -67,5 +67,9 @@ internal object VkAccounts {
 
     fun ids(json: String): List<String> = parse(json).keys().asSequence().toList().sorted()
 
+    /** The archived account's token as stored, encrypted; null when the account is not there. */
+    fun encryptedToken(json: String, userId: String): String? =
+        parse(json).optJSONObject(userId)?.optString("t")?.takeIf { it.isNotEmpty() }
+
     private fun parse(json: String): JSONObject = runCatching { JSONObject(json) }.getOrElse { JSONObject() }
 }

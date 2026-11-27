@@ -1,5 +1,7 @@
 package com.csqtt.client
 
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.csqtt.client.Store253Snapshots.linkHashA
 import com.csqtt.client.Store253Snapshots.linkHashB
@@ -51,6 +53,49 @@ class ReceivedHashesStoreTest {
         assertFalse(SettingsStore.receivedHashesKeys(prefs, 3, fresh, runLink.replace("198.51.100.9", "198.51.100.10")))
         // an owner profile never stores any
         assertFalse(SettingsStore.receivedHashesKeys(load(Store253Snapshots.owner), 0, fresh, runLink))
+    }
+
+    @Test fun theSwitchOffDropsTheSetAndTakesNoneUntilItIsOnAgain() {
+        // P3 B3, «Принимать хеши с сервера»
+        val runLink = Store253Snapshots.participantLink
+        val prefs = load(Store253Snapshots.participant)
+        assertTrue(SettingsStore.receivedHashesKeys(prefs, 3, fresh, runLink, now = 5_000L))
+        assertEquals(5_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+
+        SettingsStore.acceptServerHashesKeys(prefs, 3, accept = false)
+        assertNull("the profile is back on its link's own hashes", prefs[stringPreferencesKey("received_hashes_3")])
+        assertNull(prefs[longPreferencesKey("received_hashes_at_3")])
+        assertFalse(SettingsStore.receivedHashesKeys(prefs, 3, fresh, runLink, now = 6_000L))
+        assertNull(prefs[stringPreferencesKey("received_hashes_3")])
+
+        SettingsStore.acceptServerHashesKeys(prefs, 3, accept = true)
+        assertNull("on is the absence of the key", prefs[booleanPreferencesKey("accept_server_hashes_3")])
+        assertTrue(SettingsStore.receivedHashesKeys(prefs, 3, fresh, runLink, now = 7_000L))
+        assertEquals(7_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+    }
+
+    @Test fun aSetThatChangesNothingIsStillTheServersWordAsOfNow() {
+        val prefs = load(Store253Snapshots.participant)
+        // the link's own set: nothing to store, and the time it was confirmed is kept
+        assertFalse(SettingsStore.receivedHashesKeys(prefs, 3, listOf(linkHashA, linkHashB), Store253Snapshots.participantLink, now = 9_000L))
+        assertNull(prefs[stringPreferencesKey("received_hashes_3")])
+        assertEquals(9_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+        // the same word a moment later (a reconnect) is not written again; ten minutes on it is
+        assertFalse(SettingsStore.receivedHashesKeys(prefs, 3, listOf(linkHashA, linkHashB), Store253Snapshots.participantLink, now = 9_500L))
+        assertEquals(9_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+        assertFalse(SettingsStore.receivedHashesKeys(prefs, 3, listOf(linkHashA, linkHashB), Store253Snapshots.participantLink, now = 9_000L + 600_000L))
+        assertEquals(609_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+        // a set that changes is dated at once
+        assertTrue(SettingsStore.receivedHashesKeys(prefs, 3, fresh, Store253Snapshots.participantLink, now = 610_000L))
+        assertEquals(610_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+        SettingsStore.receivedHashesKeys(prefs, 3, listOf(linkHashA, linkHashB), Store253Snapshots.participantLink, now = 9_000L)
+        prefs[longPreferencesKey("received_hashes_at_3")] = 9_000L
+        // another link's set says nothing of this one
+        assertFalse(SettingsStore.receivedHashesKeys(prefs, 3, fresh, Store253Snapshots.participantLink.replace("46000", "46010"), now = 10_000L))
+        assertEquals(9_000L, prefs[longPreferencesKey("received_hashes_at_3")])
+        // a new link starts with no word from its server
+        SettingsStore.writeLinkKeys(prefs, 3, Store253Snapshots.participantLink.replace("46000", "46010"))
+        assertNull(prefs[longPreferencesKey("received_hashes_at_3")])
     }
 
     @Test fun theOwnerSetPrefersTheReceivedOneAndANewLinkClearsIt() {

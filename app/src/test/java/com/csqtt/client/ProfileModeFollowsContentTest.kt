@@ -6,8 +6,6 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.csqtt.client.Store253Snapshots.asMap
 import com.csqtt.client.Store253Snapshots.load
-import com.csqtt.client.ui.legacy.ProfileModeAction
-import com.csqtt.client.ui.legacy.profileModeAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull

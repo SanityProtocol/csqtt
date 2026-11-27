@@ -19,6 +19,16 @@ internal enum class HomeLayout(val stored: String) {
     }
 }
 
+/**
+ * The corner control of «Одно подключение» (the operator, 2026-11-27): that layout has no list, so its card is the way
+ * to another connection. [Switch] opens «Профили»; with a single connection there is nothing to switch to and the
+ * control is [Add], which opens «Добавить профиль».
+ */
+internal enum class HomePick { Switch, Add }
+
+/** Which of the two the control is. A hidden profile counts: it is found, and shown again, in the sheet. */
+internal fun homePick(entries: List<ProfileEntry>): HomePick = if (entries.size >= 2) HomePick.Switch else HomePick.Add
+
 /** How the lists of profiles are ordered (the canvas, F-HomeSort): the user's own order unless they pick another. */
 internal enum class ProfileSort(val stored: String) {
     Custom("custom"),
