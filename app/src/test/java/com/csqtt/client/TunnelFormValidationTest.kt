@@ -92,7 +92,7 @@ class TunnelFormValidationTest {
     }
 
     @Test
-    fun `an empty profile offers the other kind only while it is empty and the tunnel idle`() {
+    fun `an empty profile offers the other kind only while it is empty`() {
         assertEquals(ProfileModeAction.ENTER_SERVER, profileModeAction(emptyProfileLinkMode = true, field = ""))
         assertEquals(ProfileModeAction.USE_LINK, profileModeAction(emptyProfileLinkMode = false, field = ""))
         assertNull(profileModeAction(emptyProfileLinkMode = null, field = ""))

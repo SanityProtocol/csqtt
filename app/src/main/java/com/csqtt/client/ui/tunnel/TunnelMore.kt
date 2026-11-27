@@ -80,8 +80,9 @@ private val Inset = RoundedCornerShape(14.dp)
 /**
  * «Дополнительно» (the canvas, F-TunnelMore, F-TunnelMoreTcp): how the tunnel is made — where the access to VK's
  * servers comes from, the transport, the streams, the MTU. Folded until asked for; open, it stays open on every
- * profile. Nothing is held while the tunnel runs (the operator, 2026-11-27): what a running tunnel cannot take — and
- * every row here is a parameter the run takes at its start — is stored for its next connection, and says so.
+ * profile. Nothing is held while the tunnel runs (the operator, 2026-11-27). All but one of the rows are read when a run
+ * starts, so a change is for the next connection: the card says it once, under its title ([RunNote]). The MTU is the
+ * VPN interface's, which is made again while the tunnel runs: it is changed at once, and says so.
  */
 @Composable
 internal fun MoreCard(view: TunnelView, open: Boolean, onOpen: (Boolean) -> Unit) {
@@ -100,6 +101,7 @@ internal fun MoreCard(view: TunnelView, open: Boolean, onOpen: (Boolean) -> Unit
             Icon(if (open) Icons.chevronUp else Icons.chevronDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.muted)
         }
         if (open) {
+            if (view.runsHere) RunNote()
             More(view)
         } else {
             Text(
@@ -183,7 +185,6 @@ private fun More(view: TunnelView) {
             })
             // what the picked level does, and what it costs: the levels' names alone say neither
             Text(stringResource(dpi.says()), style = Type.sub, color = colors.muted)
-            Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = colors.muted)
         }
     }
 
@@ -260,7 +261,6 @@ private fun Captcha(view: TunnelView) {
                     }
                 }
             },
-            sub = if (view.running) stringResource(R.string.tunnel_next_connection) else null,
         )
         if (!auto) {
             Text(stringResource(R.string.tunnel_captcha_method), style = Type.label, color = colors.muted)
@@ -390,10 +390,7 @@ private fun Streams(view: TunnelView) {
             style = Type.sub, color = colors.muted,
         )
     }
-    when {
-        limit != null -> Text(stringResource(R.string.tunnel_streams_limit, limit), style = Type.sub, color = colors.muted)
-        view.running -> Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = colors.muted)
-    }
+    if (limit != null) Text(stringResource(R.string.tunnel_streams_limit, limit), style = Type.sub, color = colors.muted)
 }
 
 /** The track itself. A gesture outlives the composition it began in: what it reads, it reads through state. */
@@ -503,6 +500,19 @@ private fun Mtu(view: TunnelView) {
     }
     val shown = stored ?: CsqttConstants.Vpn.DEFAULT_MTU
     val custom = customPicked || shown !in VpnMtu.PRESETS
+
+    /**
+     * The MTU is the VPN interface's, not the core's: with the tunnel on for this profile the interface is made again
+     * with it, as it is for a change of «Маршруты» (the run reads its own profile). Stored first, since the service
+     * reads the store.
+     */
+    fun save(mtu: Int) {
+        scope.launch {
+            store.saveVpnMtu(mtu)
+            if (view.profile == TunnelManager.runTargetProfile()) TunnelManager.reloadVpn()
+        }
+    }
+
     SettingRow(stringResource(R.string.tunnel_mtu)) {
         Select(
             selected = if (custom) MTU_CUSTOM else shown.toString(),
@@ -510,7 +520,7 @@ private fun Mtu(view: TunnelView) {
             onSelect = { key ->
                 val preset = key.toIntOrNull()
                 customPicked = preset == null
-                if (preset != null && preset != stored) scope.launch { store.saveVpnMtu(preset) }
+                if (preset != null && preset != stored) save(preset)
             },
             description = stringResource(R.string.tunnel_mtu),
         )
@@ -521,7 +531,7 @@ private fun Mtu(view: TunnelView) {
             { next ->
                 typed = next.filter(Char::isDigit).take(4)
                 // every valid MTU of four digits has an invalid prefix of three, so typing stores no value on the way
-                VpnMtu.parse(typed)?.takeIf { it != stored }?.let { mtu -> scope.launch { store.saveVpnMtu(mtu) } }
+                VpnMtu.parse(typed)?.takeIf { it != stored }?.let(::save)
             },
             error = if (VpnMtu.parse(typed) == null) stringResource(R.string.tunnel_port_wrong_range, VpnMtu.RANGE.first, VpnMtu.RANGE.last) else null,
             keyboard = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -529,9 +539,9 @@ private fun Mtu(view: TunnelView) {
     }
     Text(
         stringResource(R.string.tunnel_mtu_hint, VpnMtu.RANGE.first, VpnMtu.RANGE.last),
-        style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = if (view.running) 0.dp else 4.dp),
+        style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = if (view.runsHere) 0.dp else 4.dp),
     )
-    if (view.running) {
-        Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = 4.dp))
+    if (view.runsHere) {
+        Text(stringResource(R.string.tunnel_mtu_now), style = Type.sub, color = colors.muted, modifier = Modifier.padding(bottom = 4.dp))
     }
 }

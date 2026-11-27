@@ -13,17 +13,16 @@ internal enum class Tap { Start, Stop, Captcha, Nothing }
 
 /**
  * How Home says and shows a connection state (APP-PLAN §4.3, P3-PLAN §1.3): the word, the C of both layouts, the hint
- * under the status and what a tap does. One mapping, [connectionVisuals], for both layouts; the word is the state's own
- * [ConnectionState.label], which the notification, the tile and the widget show too.
+ * under the time and what a tap does. One mapping, [connectionVisuals], for both layouts; the word is the state's own
+ * [ConnectionState.label], which the notification, the tile and the widget show too — but for the short wait after a
+ * stop, which Home alone knows of and says as the stop it ends.
  */
 internal data class ConnectionVisuals(
-    /** The state's own word; [homeLabel], when set, is a word only Home says in its place. */
     val label: String,
     val disc: Disc,
     val status: StatusTone,
     @StringRes val hint: Int?,
     val tap: Tap,
-    @StringRes val homeLabel: Int? = null,
 )
 
 /**
@@ -41,7 +40,7 @@ internal fun connectionVisuals(
         ConnectionState.Idle -> if (cooldown) {
             // the short wait after a stop, before the next start is taken: it reads as the stop it ends («Остановка…»),
             // so a disconnect shows one state on its way to «Отключено», not two in half a second
-            ConnectionVisuals(state.label, Disc.Dim, StatusTone.Warn, null, start, homeLabel = R.string.home_state_wait)
+            ConnectionVisuals(ConnectionState.Stopping.label, Disc.Dim, StatusTone.Warn, null, start)
         } else {
             // the hint only where a tap connects: with settings missing, the card under the button says what to do
             ConnectionVisuals(state.label, Disc.Off, StatusTone.Muted, R.string.home_hint_start.takeIf { configurationValid }, start)

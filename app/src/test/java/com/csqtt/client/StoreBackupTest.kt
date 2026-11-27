@@ -154,6 +154,8 @@ class StoreBackupTest {
         root.getJSONObject("settings").put("update_check_interval_hours", true)
         // P3 B0s: a backup an earlier build made still names «Экономия батареи»: it is not a setting any more
         root.getJSONObject("settings").put("battery_saver_mode", "below").put("battery_saver_percent", 30)
+        // card p3-b3-notes: and one made before the TCP question was removed still names its answer
+        root.getJSONObject("settings").put("tcp_transport_risk_acknowledged", true)
         val target = otherPhone()
         StoreBackup.restore(target, root.toString(), encrypt, decrypt)
         assertNull(target[intPreferencesKey("server_peer_port")])
@@ -163,6 +165,7 @@ class StoreBackupTest {
         assertNull(target[intPreferencesKey("update_check_interval_hours")])
         assertNull(target[stringPreferencesKey("battery_saver_mode")])
         assertNull(target[intPreferencesKey("battery_saver_percent")])
+        assertNull(target[booleanPreferencesKey("tcp_transport_risk_acknowledged")])
         assertEquals("203.0.113.5", target[stringPreferencesKey("peer")])
         assertEquals(1761000000000L, target[longPreferencesKey("deploy_last_inspection_at")])
         assertEquals(true, target[booleanPreferencesKey("manual_ports_enabled")])

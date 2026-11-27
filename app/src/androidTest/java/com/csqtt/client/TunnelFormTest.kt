@@ -444,27 +444,53 @@ class TunnelFormTest {
     }
 
     /**
-     * The operator's note of 2026-11-27: nothing is held while the tunnel runs. A setting the run took at its start
-     * is changed all the same — it is stored for the next connection, and says so.
+     * The operator's note of 2026-11-27: nothing is held while the tunnel runs. With the tunnel on, or being started, for
+     * the open profile the tab says once, and «Дополнительно» once more, that changes are for the next connection — and
+     * each setting is changed all the same; the MTU, which a running tunnel takes at once, says that instead. A tunnel
+     * on for another profile says nothing here.
      */
     @Test
-    fun aSettingIsChangedWhileTheTunnelRunsAndSaysItIsForTheNextConnection() {
+    fun withTheTunnelOnNothingIsHeldAndTheTabSaysWhatAChangeIsFor() {
         runBlocking {
             slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first())
             slot.saveVkHashesOnly("H".repeat(20))
+            // «Капча»: its block of choices is on screen, which was held too
+            slot.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CAPTCHA)
+            slot.saveCaptchaMode("wv")
         }
-        val next = "Применится при следующем подключении."
+        val note = "Туннель включён: изменения применятся при следующем подключении."
+        val atOnce = "Меняется сразу, без переподключения."
+        fun notes() = compose.onAllNodes(hasText(note)).fetchSemanticsNodes().size
         val track = hasContentDescription("Потоки")
+        val runBefore = TunnelManager.runIdentity()
         ActivityScenario.launch(MainActivity::class.java).use {
             openTunnel()
             compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
             compose.waitUntil(5_000) { shown("MTU") }
-            assertFalse("said with no tunnel running", shown(next))
+            assertEquals("said with no tunnel on", 0, notes())
+            assertFalse(shown(atOnce))
             // the tunnel as the manager would say it, with no tunnel: the screen reads nothing else
-            TunnelManager.running.value = true
             try {
-                compose.waitUntil(5_000) { shown(next) }
+                // on for another profile: this one's changes are its own next start, with nothing to say
+                TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(SLOT + 1, null, emptyList()))
+                TunnelManager.running.value = true
+                compose.waitForIdle()
+                assertEquals("said of another profile's tunnel", 0, notes())
+                TunnelManager.running.value = false
+                compose.waitForIdle()
+                // a start being prepared for this profile has read its settings already
+                TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(SLOT, null, emptyList()))
+                TunnelManager.starting.value = true
+                compose.waitUntil(5_000) { notes() == 2 }
+                TunnelManager.running.value = true
+                TunnelManager.starting.value = false
+                compose.waitForIdle()
+                assertEquals("once at the head of the tab, once in «Дополнительно»", 2, notes())
+                assertTrue(shown(atOnce))
                 assertFalse(shown("Пока туннель включён", substring = true))
+                // «Авто капча», of the block that was held
+                compose.onNodeWithText("Авто капча").performScrollTo().performClick()
+                compose.waitUntil(5_000) { runBlocking { slot.captchaMode.first() } == "auto" }
                 // the count of streams, by a finger on the line at 30
                 compose.onNode(track).performScrollTo().performTouchInput {
                     val inset = 10.dp.toPx()
@@ -478,6 +504,8 @@ class TunnelFormTest {
                 compose.waitUntil(5_000) { runBlocking { slot.vpnMtu.first() } == 1280 }
             } finally {
                 TunnelManager.running.value = false
+                TunnelManager.starting.value = false
+                TunnelManager.applyRunIdentity(runBefore)
             }
         }
     }

@@ -15,12 +15,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.node.Ref
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.core.app.NotificationManagerCompat
@@ -61,6 +63,7 @@ import com.csqtt.client.ui.shell.Routes
 import com.csqtt.client.ui.shell.Tab
 import com.csqtt.client.ui.tunnel.openVkSignIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Set by HomeLayoutSurvivesTest only: told the layout of every composition of Home, the first one included. */
@@ -74,6 +77,13 @@ internal class HomeView(
     val stage: StartStage?,
     val notices: List<HomeNotice>,
     val actions: HomeActions,
+    /**
+     * Home shows a change as motion (HomeMotion); false, it is drawn at once. True once Home was drawn from what the
+     * store holds — its first frames are drawn from values not read yet, no hint and no cards, and what those turn into
+     * is no event, so nothing glides in each time Home is opened (the review's F4) — and never on a phone that is low on
+     * memory ([HomeMotion.wanted]).
+     */
+    val moves: Boolean,
 )
 
 internal class HomeActions(
@@ -105,7 +115,7 @@ internal fun HomeTab(
     val context = LocalContext.current
     val messages = LocalOwners.current.messages
     val state by TunnelManager.connectionState.collectAsStateWithLifecycle()
-    val cooldown by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
+    val cooldown = rememberWaitAfterStop(state)
     val progress by TunnelManager.startProgress.collectAsStateWithLifecycle()
     val tunconf by TunnelManager.tunconfHere.collectAsStateWithLifecycle()
     val wifi by TunnelManager.wifiStatus.collectAsStateWithLifecycle()
@@ -114,6 +124,10 @@ internal fun HomeTab(
     val start = rememberHomeStart(auth, onInvalidConfiguration)
     val notifications = rememberNotificationsEnabled()
     SideEffect { homeLayoutProbe?.invoke(layout) }
+    // true from the frame after the one that was drawn from the stored values
+    var settled by remember { mutableStateOf(false) }
+    if (start.loaded && !settled) SideEffect { settled = true }
+    val motion = remember(context) { HomeMotion.wanted(context) }
 
     val view = HomeView(
         state = state,
@@ -148,6 +162,7 @@ internal fun HomeTab(
             wifiLater = { name -> TunnelManager.scope.launch { store.dismissWifiNetwork(name) } },
             wifiRemember = { name, rule -> TunnelManager.scope.launch { store.rememberWifiNetwork(name, rule) } },
         ),
+        moves = settled && motion,
     )
     when (layout) {
         HomeLayout.One -> HomeOne(view)
@@ -159,11 +174,48 @@ private fun openCaptcha(context: Context) {
     runCatching { context.startActivity(ManlCaptchaWebViewManager.promptIntent(context)) }
 }
 
+/** How long a run that was seen to end counts as waiting when no wait is seen to follow it ([rememberWaitAfterStop]). */
+private const val WAIT_BRIDGE_MS = 150L
+
+/**
+ * The short wait after a stop, as Home shows it ([TunnelManager.cooldownActive], which the shell starts from an effect).
+ * That effect runs a frame after the run was seen to end, and the frame between read «Отключено», with its own disc and
+ * hint, between two «Остановка…»: a flicker on every disconnect. A run seen to end counts as waiting from that very
+ * frame, until the wait is seen or [WAIT_BRIDGE_MS] have passed — a run that ends with no wait after it (given up before
+ * its process started) reads «Остановка…» that much longer.
+ */
+@Composable
+private fun rememberWaitAfterStop(state: ConnectionState): Boolean {
+    val waiting by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
+    // plain holders, not states: they are read and written in this one composition, which a change of [state] or of
+    // [waiting] brings about anyway
+    val before = remember { Ref<ConnectionState>() }
+    val bridge = remember { booleanArrayOf(false) }
+    var bridgeOver by remember { mutableIntStateOf(0) }
+    val was = before.value
+    before.value = state
+    val idle = state is ConnectionState.Idle
+    if (idle && was != null && (was.powerIsOn || was is ConnectionState.Stopping) && was !is ConnectionState.PausedOnWifi) bridge[0] = true
+    if (waiting || !idle) bridge[0] = false
+    val bridging = bridge[0]
+    LaunchedEffect(bridging) {
+        if (bridging) {
+            delay(WAIT_BRIDGE_MS)
+            bridge[0] = false
+            bridgeOver++
+        }
+    }
+    // read, so that the bridge ends by a composition of its own when nothing else changes
+    bridgeOver
+    return waiting || bridging
+}
+
 /** Notifications off: the status and the captcha prompt cannot show (L-29). Asked again on each return to the screen. */
 @Composable
 private fun rememberNotificationsEnabled(): Boolean {
     val context = LocalContext.current
-    var enabled by remember { mutableStateOf(true) }
+    // asked for the first frame too: started as «on», the card of a user who has them off came in on every opening
+    var enabled by remember { mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled()) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -192,7 +244,13 @@ internal fun HomeLayoutSwitch(layout: HomeLayout) {
  * What a tap on the C needs, and what Home says of it: whether the profile can start ([blocker] null), and whether what
  * it lacks is its link ([linkMissing]; a start would name the hashes first, which a missing link leaves it without).
  */
-internal class HomeStart(val blocker: ConnectionStartBlocker?, val linkMissing: Boolean, val tap: () -> Unit)
+internal class HomeStart(
+    val blocker: ConnectionStartBlocker?,
+    val linkMissing: Boolean,
+    /** The profile's settings were read from the store: [blocker] speaks of them, not of values not given yet. */
+    val loaded: Boolean,
+    val tap: () -> Unit,
+)
 
 /**
  * The C's tap: stop, the captcha, or a start — the profile's settings checked, Android's notifications and VPN questions
@@ -317,5 +375,5 @@ private fun rememberHomeStart(auth: TunnelAuthSnapshot, onInvalidConfiguration: 
             }
         }
     }
-    return HomeStart(blocker, linkMissing = auth.isLoaded && auth.csqttLinkMode && link == null, tap = tap)
+    return HomeStart(blocker, linkMissing = auth.isLoaded && auth.csqttLinkMode && link == null, loaded = loaded, tap = tap)
 }

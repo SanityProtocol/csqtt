@@ -175,6 +175,13 @@ internal class TunnelView(
     val startHashes: Int,
     val results: Map<String, VkHashValidationStatus>,
     val running: Boolean,
+    /**
+     * The tunnel is on, or being started, for this profile: what is changed here is read when a run starts, so it is for
+     * the next connection — one line says so at the head of the tab and of «Дополнительно» ([RunNote]), and nothing is
+     * held (the operator, 2026-11-27). A change made for another profile is that profile's own next start, with nothing
+     * to say.
+     */
+    val runsHere: Boolean,
     val issues: TunnelIssues,
     val riskAcknowledged: Boolean,
     /** The calls in the owner's pool; null when this profile's run uses none. */
@@ -220,6 +227,8 @@ internal fun TunnelTab(
     val riskAcknowledged by store.autoJsRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
     val pool by store.vkPoolState.collectAsStateWithLifecycle(initialValue = null)
     val running by TunnelManager.running.collectAsStateWithLifecycle()
+    // a start being prepared has read its settings too: a change made then is not taken by it
+    val starting by TunnelManager.starting.collectAsStateWithLifecycle()
 
     val peer = storedPeer
     val port = storedPort
@@ -295,7 +304,8 @@ internal fun TunnelTab(
         storedAuthMode = savedAuthMode, vkTokenActive = vkTokenActive, vkUserId = vkUserId, ownerHashes = ownerHashes,
         removedOwner = removedOwner, linkTokenActive = linkTokenActive, ownCount = ownCount,
         startHashes = hashesAStartUses(ownerHashes.filterNot { it in removedOwner } + own, results).size, results = results,
-        running = running, issues = issues, riskAcknowledged = riskAcknowledged,
+        running = running, runsHere = (running || starting) && profile == TunnelManager.runTargetProfile(),
+        issues = issues, riskAcknowledged = riskAcknowledged,
         poolSize = pool?.pool?.size,
     )
 
@@ -348,6 +358,7 @@ internal fun TunnelTab(
                 modifier = Modifier.padding(start = 4.dp, top = 2.dp).semantics { heading() },
             )
             if (entry != null) ProfileContext(entry)
+            if (view.runsHere) RunNote(Modifier.padding(horizontal = 4.dp))
             if (required && issues.any) InvalidBanner()
             if (linkMode) {
                 if (shownLink != null) LinkNoteCard(view)
@@ -811,12 +822,21 @@ internal fun NavRow(title: String, sub: String?, danger: Boolean = false, onClic
 }
 
 /**
- * Opens the VK sign-in for [profile]. Not while the tunnel runs, starts or stops (M-79); the last session's cookies go
- * first, so that the sign-in can be to another account.
+ * Said while the tunnel is on for the open profile ([TunnelView.runsHere]), once for all that is under it: nothing on
+ * this tab is taken by a running tunnel but the MTU, which says so itself.
+ */
+@Composable
+internal fun RunNote(modifier: Modifier = Modifier) {
+    Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = Csq.colors.muted, modifier = modifier)
+}
+
+/**
+ * Opens the VK sign-in for [profile]. Not while the tunnel runs, starts or stops ([vkSessionInUse]): the last session's
+ * cookies go first, so that the sign-in can be to another account, and a run in «Авто ВК» lives on that session.
  */
 internal fun openVkSignIn(context: Context, nav: NavModel, messages: com.csqtt.client.Messages, profile: Int) {
-    if (vkChangeBlocked()) {
-        messages.show(context.getString(R.string.vk_change_running))
+    if (vkSessionInUse()) {
+        messages.show(context.getString(R.string.vk_sign_in_running))
     } else {
         com.csqtt.client.VkAuthWebViewManager.clearVkSessionCookies { nav.open(Routes.vkSignIn(profile)) }
     }

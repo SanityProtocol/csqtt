@@ -128,8 +128,16 @@ class RiskDialogSurvivesTest {
             // and its DPI split says what the picked level does
             compose.waitUntil(5_000) { shown("Обход DPI (Gooby)") }
             assertTrue(shown("Выключено: начало соединения отправляется как есть."))
-            compose.onNodeWithText("Тяжёлая").performScrollTo().performClick()
-            compose.waitUntil(5_000) { shown("По одному байту", substring = true) }
+            // each level in its own words, and what it costs
+            for ((level, does, costs) in listOf(
+                Triple("Лёгкая", "на несколько частей", "почти не замедляется"),
+                Triple("Средняя", "теряется по пути", "чуть дольше"),
+                Triple("Тяжёлая", "По одному байту", "заметно дольше"),
+            )) {
+                compose.onNodeWithText(level).performScrollTo().performClick()
+                compose.waitUntil(5_000) { shown(does, substring = true) }
+                assertTrue(level, shown(costs, substring = true))
+            }
             assertFalse(shown("Выключено", substring = true))
         }
     }

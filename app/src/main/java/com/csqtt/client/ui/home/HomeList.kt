@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
@@ -37,15 +38,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.node.Ref
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -122,12 +124,18 @@ internal fun HomeList(view: HomeView) {
     }
 }
 
-/** The cards of one place, with their distance from what is beside them; their room opens and closes as Home moves. */
+/**
+ * The cards of one place, with their distance from what is beside them. Their room opens and closes as Home moves
+ * ([HomeView.moves]); only its height is an event — on a turn of the phone the cards take their new
+ * width at once, so the room is made anew for each width.
+ */
 @Composable
 private fun Notices(notices: List<HomeNotice>, view: HomeView, above: Boolean = false) {
-    Column(Modifier.fillMaxWidth().animateContentSize(HomeMotion.move())) {
-        for (notice in notices) {
-            Box(Modifier.padding(top = if (above) 0.dp else BesideCards, bottom = if (above) BesideCards else 0.dp)) { ListNotice(notice, view) }
+    key(LocalConfiguration.current.screenWidthDp) {
+        Column(Modifier.fillMaxWidth().then(if (view.moves) Modifier.animateContentSize(HomeMotion.spec(true)) else Modifier)) {
+            for (notice in notices) {
+                Box(Modifier.padding(top = if (above) 0.dp else BesideCards, bottom = if (above) BesideCards else 0.dp)) { ListNotice(notice, view) }
+            }
         }
     }
 }
@@ -148,6 +156,15 @@ private sealed interface Moment {
     data class Hint(@StringRes val text: Int) : Moment {
         override val kind: Any get() = text
     }
+
+    /**
+     * Through a stop — «Остановка…» and the short wait after it — the line's place is kept, empty, for the hint that
+     * follows: the list is not moved up and down again for the length of a stop, whatever that is. It is the state that
+     * keeps it, not a timer, so every other close is at once.
+     */
+    data object Held : Moment {
+        override val kind: Any get() = Held
+    }
 }
 
 @Composable
@@ -157,18 +174,22 @@ private fun StateBlock(view: HomeView, top: Dp) {
     val streams = rememberStreams(state)
     val pausedOn = view.notices.firstNotNullOfOrNull { it as? HomeNotice.PausedOn }
     val captcha = state is ConnectionState.CaptchaNeeded
-    Column(Modifier.fillMaxWidth().padding(top = top), horizontalAlignment = Alignment.CenterHorizontally) {
-        CDisc(view.visuals.disc, tapDescription(view), enabled = view.visuals.tap != Tap.Nothing, onClick = view.actions.tap)
+    // the room above the C: most of it is the notifications card's when that is there, and goes with that card's motion
+    val above by animateDpAsState(top, HomeMotion.spec(view.moves), label = "above-disc")
+    val line = with(LocalDensity.current) { HomeText.Line.lineHeight.toDp() }
+    Column(Modifier.fillMaxWidth().padding(top = above), horizontalAlignment = Alignment.CenterHorizontally) {
+        CDisc(view.visuals.disc, tapDescription(view), enabled = view.visuals.tap != Tap.Nothing, moves = view.moves, onClick = view.actions.tap)
         Text(
             stateLabel(view), style = HomeText.Status, color = colors.text, textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = UnderDisc).semantics { liveRegion = LiveRegionMode.Polite },
         )
         // The time, right under the state wherever there is one, so it never changes rows; the Wi-Fi a pause is on takes
         // its place, and a captcha's question has neither.
-        HomeLine(if (captcha) null else pausedOn ?: Unit, kind = { it::class }) { now ->
+        HomeLine(if (captcha) null else pausedOn ?: Unit, kind = { it::class }, moves = view.moves) { now ->
             if (now is HomeNotice.PausedOn) {
+                // a line of Home, the size it is in «Одно подключение»
                 Text(
-                    stringResource(R.string.home_wifi_network, now.network), style = HomeText.Timer, color = colors.muted,
+                    stringResource(R.string.home_wifi_network, now.network), style = HomeText.Line, color = colors.muted,
                     modifier = Modifier.padding(top = LineGap),
                 )
             } else {
@@ -176,17 +197,20 @@ private fun StateBlock(view: HomeView, top: Dp) {
             }
         }
         // The line of the moment, one place for the three: the speeds while connected, else what a start is doing, else
-        // what a tap does. One takes the other's place, so nothing under it moves for that; and through a stop the place
-        // waits for the hint that follows.
+        // what a tap does. One takes the other's place, so nothing under it moves for that; and through a stop — when a
+        // tap does nothing — the place is kept for the hint that follows.
         val stage = view.stage
         val traffic = rememberShowsTraffic(state)
+        val stopping = view.visuals.tap == Tap.Nothing && (state is ConnectionState.Stopping || state is ConnectionState.Idle)
         val moment: Moment? = when {
             traffic -> Moment.Speeds
             stage != null -> Moment.Stage(stage)
+            stopping -> Moment.Held
             else -> view.visuals.hint?.let { Moment.Hint(it) }
         }
-        HomeLine(moment, kind = { it.kind }, lingers = true) { now ->
+        HomeLine(moment, kind = { it.kind }, moves = view.moves) { now ->
             when (now) {
+                Moment.Held -> Spacer(Modifier.padding(top = LineGap).height(line))
                 Moment.Speeds -> Figures(Modifier.padding(top = LineGap))
                 is Moment.Stage -> Text(
                     stringResource(now.stage.text), style = HomeText.Line, color = colors.muted, textAlign = TextAlign.Center,
@@ -200,10 +224,10 @@ private fun StateBlock(view: HomeView, top: Dp) {
         }
         // The streams on a line of their own (the operator, 2026-11-27: «Move "Потоки" to next line, use capital "П"»),
         // while their count is news: the room is theirs for that time only.
-        HomeLine(streams) { (up, running) ->
+        HomeLine(streams, moves = view.moves) { (up, running) ->
             Text(streamsLine(up, running), style = HomeText.Line, color = colors.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(top = LineGap))
         }
-        HomeLine(Unit.takeIf { captcha }) {
+        HomeLine(Unit.takeIf { captcha }, moves = view.moves) {
             Btn(
                 stringResource(R.string.home_captcha_solve), view.actions.openCaptcha, kind = BtnKind.Primary, icon = Icons.shield,
                 modifier = Modifier.padding(top = 16.dp).widthIn(min = 190.dp),
@@ -264,37 +288,48 @@ private enum class Letter { White, Faint, Logo }
 /**
  * The C of the list, 168 dp: its ground and its ring say the state with its colour, the status under it in a word. The
  * colours of a state turn into the next one's (HomeMotion): the disc is the largest thing that changes on this screen.
+ * They are read where they are drawn, so a frame of a turn repaints the disc and composes nothing again (the operator,
+ * 2026-11-27: smooth and fast on the worst phones).
  */
 @Composable
-private fun CDisc(disc: Disc, description: String, enabled: Boolean, onClick: () -> Unit) {
+private fun CDisc(disc: Disc, description: String, enabled: Boolean, moves: Boolean, onClick: () -> Unit) {
     val colors = Csq.colors
-    val ground by animateColorAsState(
+    val ground = animateColorAsState(
         when (disc) {
             Disc.On -> colors.accent
             Disc.Busy -> colors.accentSoft
             Disc.Warn -> colors.warnSoft
             Disc.Off, Disc.Dim -> colors.raised
         },
-        HomeMotion.move(), label = "disc-ground",
+        HomeMotion.spec(moves), label = "disc-ground",
     )
     // «on» has no ring: the accent's own is not seen on the accent ground
-    val ring by animateColorAsState(
+    val ring = animateColorAsState(
         when (disc) {
             Disc.On, Disc.Busy -> colors.accent
             Disc.Warn -> colors.warn
             Disc.Off, Disc.Dim -> colors.line
         },
-        HomeMotion.move(), label = "disc-ring",
+        HomeMotion.spec(moves), label = "disc-ring",
     )
-    val ringWidth by animateDpAsState(if (disc == Disc.Off || disc == Disc.Dim) 1.dp else 2.dp, HomeMotion.move(), label = "disc-ring-width")
-    val glow by animateDpAsState(if (disc == Disc.On) 14.dp else 0.dp, HomeMotion.move(), label = "disc-glow")
+    val ringWidth = animateDpAsState(if (disc == Disc.Off || disc == Disc.Dim) 1.dp else 2.dp, HomeMotion.spec(moves), label = "disc-ring-width")
+    val glow = animateDpAsState(if (disc == Disc.On) 14.dp else 0.dp, HomeMotion.spec(moves), label = "disc-glow")
     Box(
         Modifier
             .size(168.dp)
-            .shadow(glow, CircleShape, ambientColor = colors.accent, spotColor = colors.accent)
-            .clip(CircleShape)
-            .background(ground)
-            .border(ringWidth, ring, CircleShape)
+            // the glow of «on» and the round edge, in one layer
+            .graphicsLayer {
+                shadowElevation = glow.value.toPx()
+                shape = CircleShape
+                clip = true
+                ambientShadowColor = colors.accent
+                spotShadowColor = colors.accent
+            }
+            .drawBehind {
+                drawRect(ground.value)
+                val width = ringWidth.value.toPx()
+                drawCircle(ring.value, radius = (size.minDimension - width) / 2, style = Stroke(width))
+            }
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
@@ -304,7 +339,7 @@ private fun CDisc(disc: Disc, description: String, enabled: Boolean, onClick: ()
             Disc.Dim -> Letter.Faint
             Disc.Off, Disc.Busy, Disc.Warn -> Letter.Logo
         }
-        Crossfade(letter, animationSpec = HomeMotion.move(), label = "disc-letter") { shown ->
+        Crossfade(letter, animationSpec = HomeMotion.spec(moves), label = "disc-letter") { shown ->
             when (shown) {
                 Letter.White -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = Color.White)
                 Letter.Faint -> Icon(Icons.c, contentDescription = null, modifier = Modifier.size(118.dp), tint = colors.faint)

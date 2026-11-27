@@ -28,7 +28,7 @@ class ProfileModeFollowsContentTest {
     )
 
     @Test
-    fun `each text action shows only for an empty profile, an empty field and an idle tunnel`() {
+    fun `each text action shows only for an empty profile and an empty field, with the tunnel on or off`() {
         assertEquals(ProfileModeAction.ENTER_SERVER, profileModeAction(emptyProfileLinkMode = true, field = ""))
         assertEquals(ProfileModeAction.USE_LINK, profileModeAction(emptyProfileLinkMode = false, field = " "))
         assertNull(profileModeAction(emptyProfileLinkMode = null, field = ""))

@@ -1,10 +1,15 @@
 package com.csqtt.client.ui.home
 
+import android.app.ActivityManager
+import android.content.Context
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.TweenSpec
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -68,49 +73,59 @@ internal object HomeText {
  * How Home moves (the operator, 2026-11-27: «I don't mind moving, just make it smoother, not "flickering" and
  * "jumping"», and «We must not solve "not moving" by adding fixed useless space»). No room is kept for what is not
  * said: a line's room opens and closes over [MOVE_MS], so what is under it glides; a line that takes another's place
- * fades into it; and the colours of the state turn instead of switching.
+ * fades into it; and the colours of the state turn instead of switching. Nothing of it runs while nothing changes, or
+ * while Home is not on screen.
  */
 internal object HomeMotion {
-    const val MOVE_MS = 240
-    const val FADE_OUT_MS = 90
-    const val FADE_IN_MS = 180
+    const val MOVE_MS = 200
+    const val FADE_OUT_MS = 80
+    const val FADE_IN_MS = 160
+
+    /** How a size or a colour gets to its next value: over [MOVE_MS], or at once where Home does not move ([HomeView.moves]). */
+    fun <T> spec(moves: Boolean): FiniteAnimationSpec<T> = if (moves) tween(MOVE_MS, easing = FastOutSlowInEasing) else snap()
 
     /**
-     * How long the room of a line that went stays before it closes, where another line follows shortly: a stop is
-     * «Остановка…» for half a second before the hint is back, and the list is not moved up and down for that.
+     * A phone Android marks as low on memory is the kind that drops frames: there Home changes at once, as it did
+     * before it moved, and motion costs nothing (the operator, 2026-11-27: smooth and fast on the worst phones). Measured
+     * on the bench, a connect and a disconnect draw about 85 frames more with motion than without.
      */
-    const val LINGER_MS = 700
-
-    fun <T> move(delayMs: Int = 0): TweenSpec<T> = tween(MOVE_MS, delayMs, FastOutSlowInEasing)
+    fun wanted(context: Context): Boolean = context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != true
 }
 
 /**
  * A line of Home that is not always there: [value] is what it says, null when it says nothing. What it says changes in
- * place; a line of another [kind] fades into its place; its room opens and closes as [HomeMotion] says, at once on the
- * first frame. [lingers]: see [HomeMotion.LINGER_MS]. The line gives itself its distance from what is above it, inside
+ * place; a line of another [kind] fades into its place; its room opens and closes as [HomeMotion] says. [moves] false:
+ * the change is drawn at once ([HomeView.moves]). The line gives itself its distance from what is above it, inside
  * [content], so a line that says nothing takes no room at all.
+ *
+ * Its cost (the operator, 2026-11-27: smooth and fast on the worst phones): nothing while nothing changes; a change is
+ * laid out and drawn for a quarter of a second, with nothing composed again for a frame of it.
  */
 @Composable
 internal fun <T : Any> HomeLine(
     value: T?,
     modifier: Modifier = Modifier,
     kind: (T) -> Any = { Unit },
-    lingers: Boolean = false,
+    moves: Boolean = true,
     content: @Composable (T) -> Unit,
 ) {
     // read as states by the lines on screen: one that is fading out or in is not composed again by its caller
     val now by rememberUpdatedState(value)
     val kindOf by rememberUpdatedState(kind)
     val draw by rememberUpdatedState(content)
+    val movesNow by rememberUpdatedState(moves)
     AnimatedContent(
         targetState = value?.let(kind),
         modifier = modifier.fillMaxWidth(),
         transitionSpec = {
-            val opens = initialState == null
-            val closes = targetState == null
-            (fadeIn(tween(HomeMotion.FADE_IN_MS, delayMillis = if (opens) 0 else HomeMotion.FADE_OUT_MS)) togetherWith
-                fadeOut(tween(HomeMotion.FADE_OUT_MS)))
-                .using(SizeTransform(clip = true) { _, _ -> HomeMotion.move(if (closes && lingers) HomeMotion.LINGER_MS else 0) })
+            if (!movesNow) {
+                (EnterTransition.None togetherWith ExitTransition.None).using(SizeTransform(clip = false) { _, _ -> snap() })
+            } else {
+                val opens = initialState == null
+                (fadeIn(tween(HomeMotion.FADE_IN_MS, delayMillis = if (opens) 0 else HomeMotion.FADE_OUT_MS)) togetherWith
+                    fadeOut(tween(HomeMotion.FADE_OUT_MS)))
+                    .using(SizeTransform(clip = true) { _, _ -> tween(HomeMotion.MOVE_MS, easing = FastOutSlowInEasing) })
+            }
         },
         contentAlignment = Alignment.TopCenter,
         label = "home-line",
@@ -139,8 +154,7 @@ internal fun rememberShowsTraffic(state: ConnectionState): Boolean {
 }
 
 /** The state's word as Home says it. */
-@Composable
-internal fun stateLabel(view: HomeView): String = view.visuals.homeLabel?.let { stringResource(it) } ?: view.visuals.label
+internal fun stateLabel(view: HomeView): String = view.visuals.label
 
 /** What TalkBack says of the C: what a tap will do, or the state when a tap does nothing now. */
 @Composable

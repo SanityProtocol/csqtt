@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,11 +24,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -35,6 +36,7 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.node.Ref
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -89,6 +91,13 @@ private val LineGap = 10.dp
 private val Rest = 292.dp
 
 /**
+ * And its height with all a connection says: the speeds, the streams while they are news, the ping. On a screen too low
+ * to hold that under the centred place, the card at rest sits that much higher, so that a connection still does not
+ * move the button.
+ */
+private val Full = 386.dp
+
+/**
  * «Одно подключение», Home's default layout (the operator, 2026-11-26): the screen the app had, as it was — the logo
  * button in its card, centred between the header and the bar, the status in its state's colour, the timer, the traffic,
  * the streams while they are news, the ping through the tunnel. What it tells or asks is said in the card, as lines.
@@ -106,36 +115,18 @@ internal fun HomeOne(view: HomeView) {
     val canTap = view.visuals.tap != Tap.Nothing
     val description = tapDescription(view)
     val streams = rememberStreams(state)
-    val lit by animateFloatAsState(if (on) 1f else 0f, HomeMotion.move(), label = "logo-lit")
-    val logoAlpha by animateFloatAsState(
-        when {
-            on -> 1f
-            canTap -> 0.66f
-            else -> 0.34f
-        },
-        HomeMotion.move(), label = "logo-alpha",
-    )
-    val statusColor by animateColorAsState(
-        when (view.visuals.status) {
-            StatusTone.Accent -> colors.accentText
-            StatusTone.Warn -> colors.warn
-            StatusTone.Danger -> colors.danger
-            StatusTone.Muted -> colors.muted
-        },
-        HomeMotion.move(), label = "status",
-    )
-    val timerColor by animateColorAsState(if (on) colors.accentText else colors.faint, HomeMotion.move(), label = "timer")
 
     Box(Modifier.fillMaxSize().padding(horizontal = 20.dp), contentAlignment = Alignment.TopCenter) {
       Box(
           Modifier
               .widthIn(max = 720.dp)
-              // where the card at rest is centred; a card too high for that place goes up as far as it must, and scrolls
+              // where the card at rest is centred — higher on a screen too low for a connected card under that place; a
+              // card with still more to say goes up as far as it must, and then scrolls
               .layout { measurable, constraints ->
                   val card = measurable.measure(constraints.copy(minHeight = 0))
                   if (!constraints.hasBoundedHeight) return@layout layout(card.width, card.height) { card.place(0, 0) }
                   val room = constraints.maxHeight
-                  val top = ((room - Rest.roundToPx()) / 2).coerceAtMost(room - card.height).coerceAtLeast(0)
+                  val top = ((room - Rest.roundToPx()) / 2).coerceAtMost(room - maxOf(card.height, Full.roundToPx())).coerceAtLeast(0)
                   layout(card.width, room) { card.place(0, top) }
               }
               .verticalScroll(rememberScrollState())
@@ -151,24 +142,10 @@ internal fun HomeOne(view: HomeView) {
                 .fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Image(
-                painter = painterResource(R.drawable.ic_c_logo),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(172.dp)
-                    .clip(CircleShape)
-                    .clickable(enabled = canTap, role = Role.Button, onClick = view.actions.tap)
-                    .semantics { contentDescription = description }
-                    .scale(lerp(0.96f, 1.06f, lit)),
-                colorFilter = if (lit == 1f) null else ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(lit) }),
-                alpha = logoAlpha,
-            )
-            Text(
-                stateLabel(view), style = Status, textAlign = TextAlign.Center, color = statusColor,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-            )
+            Logo(on, canTap, description, view.moves, view.actions.tap)
+            StatusWord(stateLabel(view), view.visuals.status, view.moves)
             // every kind is drawn here: the list does the same in its own way, and neither can leave one out
-            Column(Modifier.fillMaxWidth().animateContentSize(HomeMotion.move()), horizontalAlignment = Alignment.CenterHorizontally) {
+            Notes(view.moves) {
                 for (notice in view.notices) {
                     // these two close the card, after the figures: here they take no room
                     if (notice !is HomeNotice.NotificationsOff && notice !is HomeNotice.Outcome) {
@@ -213,11 +190,11 @@ internal fun HomeOne(view: HomeView) {
                 }
             }
 
-            Uptime(Timer, timerColor, Modifier.padding(top = LineGap))
+            Clock(on, view.moves)
             // Under the time, one place for what a start is doing and for the speeds that follow it, then the streams
             // while their count is news, then the ping while connected: the state and the time above them never move.
             val traffic = rememberShowsTraffic(state)
-            HomeLine(if (traffic) Unit else view.stage, kind = { it::class }) { now ->
+            HomeLine(if (traffic) Unit else view.stage, kind = { it::class }, moves = view.moves) { now ->
                 if (now is StartStage) {
                     Text(
                         stringResource(now.text), style = Line, color = colors.muted, textAlign = TextAlign.Center,
@@ -227,12 +204,12 @@ internal fun HomeOne(view: HomeView) {
                     Traffic(Modifier.padding(top = LineGap))
                 }
             }
-            HomeLine(streams) { (up, running) ->
+            HomeLine(streams, moves = view.moves) { (up, running) ->
                 NoteLine(stringResource(R.string.home_streams, up, running), colors.muted, Modifier.padding(top = LineGap))
             }
-            HomeLine(Unit.takeIf { state is ConnectionState.Connected }) { ProbeLine(Modifier.padding(top = LineGap)) }
+            HomeLine(Unit.takeIf { state is ConnectionState.Connected }, moves = view.moves) { ProbeLine(Modifier.padding(top = LineGap)) }
 
-            Column(Modifier.fillMaxWidth().animateContentSize(HomeMotion.move()), horizontalAlignment = Alignment.CenterHorizontally) {
+            Notes(view.moves) {
                 for (notice in view.notices) {
                     when (notice) {
                         HomeNotice.NotificationsOff -> Text(
@@ -265,6 +242,79 @@ internal fun HomeOne(view: HomeView) {
         // in the card's corner and beside the clipped card, not inside it; 8 dp from its edges, as on the canvas
         CornerPick(Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 6.dp))
       }
+    }
+}
+
+/**
+ * The logo button. Its colour, its size and its strength turn with the state here, in a piece of their own: a frame of
+ * that composes this picture again and nothing of the card around it (the operator, 2026-11-27: smooth and fast on the
+ * worst phones). The size and the strength are read where they are drawn.
+ */
+@Composable
+private fun Logo(on: Boolean, canTap: Boolean, description: String, moves: Boolean, onClick: () -> Unit) {
+    val lit = animateFloatAsState(if (on) 1f else 0f, HomeMotion.spec(moves), label = "logo-lit")
+    val strength = animateFloatAsState(
+        when {
+            on -> 1f
+            canTap -> 0.66f
+            else -> 0.34f
+        },
+        HomeMotion.spec(moves), label = "logo-alpha",
+    )
+    val colour = lit.value
+    Image(
+        painter = painterResource(R.drawable.ic_c_logo),
+        contentDescription = null,
+        modifier = Modifier
+            .size(172.dp)
+            .clip(CircleShape)
+            .clickable(enabled = canTap, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = description }
+            .graphicsLayer {
+                val size = lerp(0.96f, 1.06f, lit.value)
+                scaleX = size
+                scaleY = size
+                alpha = strength.value
+            },
+        colorFilter = if (colour == 1f) null else ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(colour) }),
+    )
+}
+
+/** The status in its state's colour, which turns into the next one's in this piece alone. */
+@Composable
+private fun StatusWord(word: String, tone: StatusTone, moves: Boolean) {
+    val colors = Csq.colors
+    val color by animateColorAsState(
+        when (tone) {
+            StatusTone.Accent -> colors.accentText
+            StatusTone.Warn -> colors.warn
+            StatusTone.Danger -> colors.danger
+            StatusTone.Muted -> colors.muted
+        },
+        HomeMotion.spec(moves), label = "status",
+    )
+    Text(word, style = Status, textAlign = TextAlign.Center, color = color, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+}
+
+/** The run's time, in the accent while the power is on; its colour turns in this piece alone. */
+@Composable
+private fun Clock(on: Boolean, moves: Boolean) {
+    val colors = Csq.colors
+    val color by animateColorAsState(if (on) colors.accentText else colors.faint, HomeMotion.spec(moves), label = "timer")
+    Uptime(Timer, color, Modifier.padding(top = LineGap))
+}
+
+/**
+ * The card's notice lines of one place. Their room opens and closes as Home moves ([HomeView.moves]); only its
+ * height is an event — on a turn of the phone the lines take their new width at once.
+ */
+@Composable
+private fun Notes(moves: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    key(LocalConfiguration.current.screenWidthDp) {
+        Column(
+            Modifier.fillMaxWidth().then(if (moves) Modifier.animateContentSize(HomeMotion.spec(true)) else Modifier),
+            horizontalAlignment = Alignment.CenterHorizontally, content = content,
+        )
     }
 }
 

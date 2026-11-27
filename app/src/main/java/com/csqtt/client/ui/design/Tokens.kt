@@ -74,7 +74,6 @@ internal object Type {
     )
 
     val title = style(26.0, 32, 600, -0.2)
-    val status = style(20.0, 26, 600)
     val dialogTitle = style(19.0, 26, 600)
     val cardTitle = style(16.0, 22, 600)
     val body = style(15.0, 20)
