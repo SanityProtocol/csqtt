@@ -40,7 +40,7 @@ class ProfileHiddenTest {
         // it is still a profile: its link is there, and the sheet lists it among the hidden ones
         assertEquals(link, prefs[stringPreferencesKey("csqtt_link_1")])
         assertEquals(listOf(1), SettingsStore.profileEntries(prefs).filter { it.hidden }.map { it.index })
-        // classic's picker, the only list of «Одно подключение», leaves it out too
+        // classic's picker leaves it out too
         assertEquals(listOf(0, 5, 6), SettingsStore.profileList(prefs).map { it.first })
         assertTrue(SettingsStore.setProfileHiddenKeys(prefs, 1, hidden = false))
         assertEquals(listOf(0, 1, 5, 6), shown(prefs))

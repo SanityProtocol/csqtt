@@ -17,12 +17,13 @@ internal object WorkerCountPolicy {
     }
 
     /**
-     * What a count ran as before the core was given exact counts (2.5.3 and the builds before P3 B3): whole groups of
-     * ten, at least one — 18 and 5 ran as 10 (M-84). The store's first step keeps to it.
+     * What a count ran as before the core was given exact counts: 2.5.3 ran fewer than ten as five and the rest in
+     * whole tens, so 18, its stored default, ran as 10. The store's first step and everything that takes in a count
+     * stored then (step 9, an older backup, an older settings file) keep to it: a profile runs what it ran.
      */
     fun wholeGroups(requested: Int): Int {
         val group = CsqttConstants.Tunnel.WORKERS_PER_GROUP
-        return (requested.coerceIn(group, CsqttConstants.Tunnel.MAX_WORKERS) / group) * group
+        return if (requested < group) STEP else (requested.coerceAtMost(CsqttConstants.Tunnel.MAX_WORKERS) / group) * group
     }
 
     fun maximumForHashes(hashCount: Int): Int {

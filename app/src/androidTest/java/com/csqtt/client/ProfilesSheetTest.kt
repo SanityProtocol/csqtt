@@ -242,7 +242,9 @@ class ProfilesSheetTest {
                 compose.waitUntil(10_000) { compose.onAllNodes(add).fetchSemanticsNodes().isNotEmpty() }
                 assertTrue(compose.onAllNodes(switch).fetchSemanticsNodes().isEmpty())
                 compose.onNode(add).performClick()
-                compose.waitUntil(5_000) { shown("Добавить профиль") }
+                // «Добавить профиль» itself, with its ways — «Профили» has a button of that name too
+                compose.waitUntil(5_000) { shown("Добавить профиль") && shown("Вручную") && shown("По подписке") }
+                assertFalse("«+» opened the list of profiles", shown(SHEET))
             } finally {
                 runBlocking { assertTrue(store.restoreBackupJson(kept)) }
             }

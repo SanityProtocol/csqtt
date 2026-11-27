@@ -325,7 +325,8 @@ private fun Streams(view: TunnelView) {
     val autoVk = view.authMode == CsqttConstants.VkAuth.MODE_AUTO_JS || view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS
     // a link's own hashes are what its streams go over, whatever the mode says
     val autoApi = view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API && view.ownerHashes.isEmpty()
-    val manual = view.ownerInUse + view.ownCount
+    // the hashes a start would connect with: one a check found dead is left out there, and so here
+    val manual = view.startHashes
     val calls = StreamsPlan.calls(autoVk, autoApi, manual)
     val perHashSaid = StreamsPlan.saidPerHash(autoVk, autoApi, manual)
     val zone = StreamsPlan.zone(value, calls)
@@ -343,9 +344,10 @@ private fun Streams(view: TunnelView) {
             Text(name, style = Type.body, color = colors.text)
             IconBtn(Icons.help, stringResource(R.string.setting_about, name), { nav.open(Routes.info(InfoTopic.STREAMS)) }, small = true, tint = colors.faint)
         }
-        // the count in its pill, as the canvas has it, in its zone's colours
+        // the count in its pill, as the canvas has it, in its zone's colours: the total, which the thumb sets, and
+        // after it what one hash carries of it — with one call that is the same number, and is not said twice
         Text(
-            if (perHashSaid) stringResource(R.string.tunnel_streams_per_hash, StreamsPlan.perHash(value, calls), value) else value.toString(),
+            if (perHashSaid && calls > 1) stringResource(R.string.tunnel_streams_per_hash, StreamsPlan.perHash(value, calls), value) else value.toString(),
             style = Type.figure, color = zoneColor, softWrap = false,
             modifier = Modifier.background(zoneGround, Shape.pill).padding(horizontal = 10.dp, vertical = 5.dp),
         )
@@ -362,7 +364,8 @@ private fun Streams(view: TunnelView) {
                 // answer (the thumb goes back meanwhile)
                 into >= StreamZone.Orange && into > StreamsPlan.zone(saved, calls) -> {
                     dragged = null
-                    nav.open(Routes.risk(view.profile, RiskKind.STREAMS, "$picked:${StreamsPlan.perHash(picked, calls)}"))
+                    // with what one hash would carry, and whether more hashes would help («Авто ВК» takes none)
+                    nav.open(Routes.risk(view.profile, RiskKind.STREAMS, "$picked:${StreamsPlan.perHash(picked, calls)}:${if (autoVk) 0 else 1}"))
                 }
                 else -> TunnelManager.scope.launch { store.saveWorkersPerHash(picked) }
             }
@@ -472,6 +475,11 @@ private fun StreamsTrack(
                 if (filled > from) drawLine(color, Offset(inset + width * from, y), Offset(inset + width * filled, y), stroke, StrokeCap.Butt)
                 from = end
             }
+        }
+        // where one zone ends and the next begins: a notch in the line, so that the edge is seen without the colours
+        // too (two pale zones side by side are near one colour)
+        ends.dropLast(1).filter { it > 0f && it < 1f }.forEach { edge ->
+            drawRect(colors.surface, Offset(inset + width * edge - 1.dp.toPx(), y - stroke), Size(2.dp.toPx(), stroke * 2))
         }
         // the server's limit: a tick across the track, taller than the track, so that it is read without its colour too
         if (mark != null) {

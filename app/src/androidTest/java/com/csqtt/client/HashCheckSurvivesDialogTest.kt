@@ -69,7 +69,7 @@ class HashCheckSurvivesDialogTest {
 
     @Test
     fun theCheckOutlivesTheDialogTheTabAndTheScreen() {
-        // the dialog, the tab and the screen go first
+        // the sheet, the tab and the screen go first
         VkHashCheck.validator = { _, hashes, _, _ ->
             release.await()
             hashes.associateWith { VkHashValidationStatus.Valid }

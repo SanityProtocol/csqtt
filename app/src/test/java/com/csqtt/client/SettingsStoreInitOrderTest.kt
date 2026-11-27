@@ -21,7 +21,8 @@ class SettingsStoreInitOrderTest {
 
         val collected = Regex("""launch \{ (\w+)\.collect""").findAll(lines.subList(init, end).joinToString("\n"))
             .map { it.groupValues[1] }.toList()
-        assertTrue("the init block no longer starts the cache collectors", collected.size >= 20)
+        // (five caches nobody read after classic's tunnel screen went left with it, P3 B3)
+        assertTrue("the init block no longer starts the cache collectors", collected.size >= 15)
         for (name in collected) {
             val at = properties[name]
             assertTrue("$name is not a property of SettingsStore", at != null)

@@ -55,7 +55,7 @@ import com.csqtt.client.ui.profiles.copiedText
 import com.csqtt.client.ui.shell.LocalOwners
 import kotlinx.coroutines.launch
 
-private const val FIELDS = 6
+private const val FIELDS = OWN_HASH_FIELDS
 private const val MIN_LENGTH = 16
 
 /** What is stored of the fields: each hash once, links to calls cut down to their hash, what is too short left out. */
@@ -97,7 +97,11 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
         if (fields.isEmpty()) fields.addAll((storedHashes(raw) + List(FIELDS) { "" }).take(FIELDS))
     }
 
-    val results = remember(resultsJson) { VkHashValidationCodec.decode(resultsJson) }
+    // a field that is edited forgets what the last check said of the hash that stood in it: entered again (its call
+    // was started again), the hash is tried, and reads as not checked until it is
+    val forgotten = rememberSaveable(saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() })) { mutableStateListOf<String>() }
+    val checked = remember(resultsJson) { VkHashValidationCodec.decode(resultsJson) }
+    val results = checked - forgotten.toSet()
     val ownerHashes = remember(linkMode, link, received) {
         if (linkMode) ReceivedHashes.ownerSet(parseCsqttLink(link)?.hashes.orEmpty(), received) else emptyList()
     }
@@ -108,7 +112,23 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
     val last = (check as? VkHashCheck.State.Done)?.takeIf { it.profile == profile && it.hashes == toCheck }
     // on the app's scope: the fields are stored also when the sheet goes the same moment
     // (nothing to store before the fields were read: an empty list would wipe the stored hashes)
-    val save = { if (fields.isNotEmpty()) TunnelManager.scope.launch { store.saveVkHashesOnly(hashesToStore(fields.toList())) } }
+    val save = {
+        if (fields.isNotEmpty()) {
+            val gone = forgotten.toSet()
+            TunnelManager.scope.launch {
+                store.saveVkHashesOnly(hashesToStore(fields.toList()))
+                store.forgetVkHashCheckResults(gone)
+            }
+        }
+    }
+    val edit = { index: Int, raw: String ->
+        val next = stripVkUrlStatic(raw.filterNot(Char::isWhitespace))
+        val previous = fields[index].trim()
+        if (next != previous) {
+            if (previous in checked && previous !in forgotten) forgotten.add(previous)
+            fields[index] = next
+        }
+    }
 
     Sheet(
         onDismiss = {
@@ -150,13 +170,13 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
                     else -> null
                 },
                 // a link to a call is cut down to its hash as it is typed or pasted
-                onChange = { raw -> fields[index] = stripVkUrlStatic(raw.filterNot(Char::isWhitespace)) },
-                paste = { copiedText(context).takeIf { it.isNotBlank() }?.let { fields[index] = stripVkUrlStatic(it.filterNot(Char::isWhitespace)) } },
+                onChange = { raw -> edit(index, raw) },
+                paste = { copiedText(context).takeIf { it.isNotBlank() }?.let { edit(index, it) } },
             )
         }
         Text(
             if (ownerHashes.isEmpty()) stringResource(R.string.hashes_more)
-            else stringResource(R.string.hashes_limit, CsqttConstants.Tunnel.MAX_VK_HASHES),
+            else stringResource(R.string.hashes_limit, CsqttConstants.Tunnel.CORE_VK_HASHES),
             style = Type.sub, color = colors.muted,
         )
         if (last != null && last.unchecked > 0) {

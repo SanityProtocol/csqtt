@@ -118,10 +118,51 @@ class TunnelFormValidationTest {
 
     @Test
     fun `the participant's own fields are the filled ones and room up to what the tunnel takes`() {
+        // the core takes six hashes in all: with three of the owner's in use, three of the participant's own can serve
         val none = List(6) { "" }
         assertEquals(6, ownHashRows(ownerInUse = 0, own = none))
-        assertEquals(4, ownHashRows(ownerInUse = 3, own = none))
-        assertEquals("one at least, to paste into", 1, ownHashRows(ownerInUse = 7, own = none))
+        assertEquals(3, ownHashRows(ownerInUse = 3, own = none))
+        assertEquals("one at least, to paste into", 1, ownHashRows(ownerInUse = 6, own = none))
+        assertEquals(1, ownHashRows(ownerInUse = 7, own = none))
         assertEquals("a filled one is never out of sight", 5, ownHashRows(ownerInUse = 6, own = listOf("", "", "", "", "x".repeat(16), "")))
+    }
+
+    // the review of P3 B3 (F1, F5): a draft is typed over a stored value, and stands only while the store holds it
+
+    @Test
+    fun `a draft stands while the store still holds what it was typed over`() {
+        assertTrue(draftStands(draft = "46100", base = "46000", stored = "46000"))
+        assertTrue("an invalid one too: it is the user's text", draftStands(draft = "4", base = "46000", stored = "46000"))
+        assertTrue("typed over nothing", draftStands(draft = "h.example", base = "", stored = ""))
+        assertFalse("no draft", draftStands(draft = null, base = "46000", stored = "46000"))
+    }
+
+    @Test
+    fun `a draft the store already holds is gone - it was written when the field was left`() {
+        assertFalse(draftStands(draft = "46100", base = "46000", stored = "46100"))
+        // the same link pasted or typed again: nothing to write, and no import that would undo what was set for it
+        assertFalse(draftStands(draft = "csqtt://x", base = "csqtt://x", stored = "csqtt://x"))
+    }
+
+    @Test
+    fun `a draft is gone once another screen stored a new value under it`() {
+        // typed 46100 over 46000, left by a tab tap (stored), then a deploy's end wrote 46200: the old text must not
+        // be shown over it, nor written back when the field is next left
+        assertFalse(draftStands(draft = "46100", base = "46000", stored = "46200"))
+        assertFalse("half a link typed, then a link taken by QR", draftStands(draft = "csqtt://conn", base = "", stored = "csqtt://connect?v=2"))
+        assertTrue("the base not noted yet: the first keystroke", draftStands(draft = "a", base = null, stored = "b"))
+    }
+
+    // the review of P3 B3 (F3): the zones count the hashes a start connects with
+
+    @Test
+    fun `a start uses the hashes no check found dead, and all of them when all are dead`() {
+        val a = "A".repeat(20); val b = "B".repeat(20); val c = "C".repeat(20)
+        val dead = VkHashValidationStatus.Invalid
+        assertEquals(listOf(a, b, c), hashesAStartUses(listOf(a, b, c), emptyMap()))
+        assertEquals("two of the owner's three were found dead", listOf(c), hashesAStartUses(listOf(a, b, c), mapOf(a to dead, b to dead)))
+        assertEquals("every one dead: a start tries them all", listOf(a, b), hashesAStartUses(listOf(a, b), mapOf(a to dead, b to dead)))
+        assertEquals("a short one is none, one given twice is one", listOf(a), hashesAStartUses(listOf(" $a ", "short", a), emptyMap()))
+        assertEquals(emptyList<String>(), hashesAStartUses(emptyList(), emptyMap()))
     }
 }

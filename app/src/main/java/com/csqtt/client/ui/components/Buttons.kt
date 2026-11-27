@@ -90,6 +90,8 @@ internal fun Btn(
 internal fun TextBtn(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, danger: Boolean = false) {
     Text(
         text, style = Type.button, color = if (danger) Csq.colors.danger else Csq.colors.accentText, maxLines = 1,
+        // a label too long for its place ends in «…»: it is not cut mid-word with nothing to say so
+        overflow = TextOverflow.Ellipsis,
         modifier = modifier
             .clip(Shape.pill)
             .clickable(role = Role.Button, onClick = onClick)

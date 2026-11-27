@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,7 +37,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
@@ -70,6 +70,8 @@ import com.csqtt.client.TunnelIssues
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidationStatus
+import com.csqtt.client.draftStands
+import com.csqtt.client.hashesAStartUses
 import com.csqtt.client.linkNote
 import com.csqtt.client.noticeTime
 import com.csqtt.client.profileModeAction
@@ -121,7 +123,14 @@ internal fun passwordDraftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoc
 
 internal fun linkDraftKey(profile: Int, epoch: Int) = "tunnel:$profile:$epoch:link"
 
-private const val OWN_HASH_FIELDS = 6
+/** Where the stored value a secret's draft was typed over is kept, beside the draft (see [draftStands]). */
+internal fun draftBaseKey(key: String) = "$key:base"
+
+/** How many hashes of its own a profile holds: the fields of «Хеши звонков VK», and the «N из 6» of its button. */
+internal const val OWN_HASH_FIELDS = 6
+
+/** What a port field's text is read as when it is no number: no port the store can hold, so the draft stands. */
+private const val NO_PORT = -1
 
 /** The profile's own hashes as stored: one string, split by commas or spaces. */
 internal fun storedHashes(raw: String): List<String> = raw.split(Regex("[,\\s\\n]+")).map(String::trim).filter(String::isNotEmpty)
@@ -148,10 +157,10 @@ internal class TunnelView(
     val linkTokenActive: Boolean,
     /** The profile's own hashes that count: long enough, not known dead. */
     val ownCount: Int,
+    /** How many hashes a start would connect with ([hashesAStartUses]): what the «Потоки» zones are counted over. */
+    val startHashes: Int,
     val results: Map<String, VkHashValidationStatus>,
     val running: Boolean,
-    /** Running, starting, stopping or paused on Wi-Fi: what a change would land in at a restart. */
-    val busy: Boolean,
     val issues: TunnelIssues,
     val riskAcknowledged: Boolean,
     val tcpAcknowledged: Boolean,
@@ -205,12 +214,18 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
         return
     }
 
-    // the drafts: a field shows the store's value until it is edited. The two that hold a secret are never in the
-    // saved state
+    // the drafts: a field shows the store's value until it is edited, and each draft is kept with the stored value it
+    // was typed over (its base). The two that hold a secret are never in the saved state, their bases neither
     var addressDraft by rememberSaveable { mutableStateOf<String?>(null) }
+    var addressBase by rememberSaveable { mutableStateOf<String?>(null) }
     var portDraft by rememberSaveable { mutableStateOf<String?>(null) }
-    val passwordDraft = SecretDrafts.typed(passwordDraftKey(profile, epoch))
-    val linkDraft = SecretDrafts.typed(linkDraftKey(profile, epoch))
+    var portBase by rememberSaveable { mutableStateOf<Int?>(null) }
+    val passwordKey = passwordDraftKey(profile, epoch)
+    val linkKey = linkDraftKey(profile, epoch)
+    val passwordDraft = SecretDrafts.typed(passwordKey)
+    val passwordBase = SecretDrafts.typed(draftBaseKey(passwordKey))
+    val linkDraft = SecretDrafts.typed(linkKey)
+    val linkBase = SecretDrafts.typed(draftBaseKey(linkKey))
     var required by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(validationRequest) { if (validationRequest > 0) required = true }
 
@@ -249,6 +264,7 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
         storedTokenPresent = vkTokenActive,
         manualHashCount = ownCount,
     )
+    // running, starting, stopping or paused on Wi-Fi: what a change of the profile's kind would land in at a restart
     val busy = running || starting || stopping || paused
     val issues = tunnelIssues(
         linkMode = linkMode, address = address, port = portText, password = password, link = linkText,
@@ -257,8 +273,9 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
     val view = TunnelView(
         profile = profile, epoch = epoch, store = store, linkMode = linkMode, hashMode = hashMode, authMode = authMode,
         storedAuthMode = savedAuthMode, vkTokenActive = vkTokenActive, vkUserId = vkUserId, ownerHashes = ownerHashes,
-        removedOwner = removedOwner, linkTokenActive = linkTokenActive, ownCount = ownCount, results = results,
-        running = running, busy = busy, issues = issues, riskAcknowledged = riskAcknowledged, tcpAcknowledged = tcpAcknowledged,
+        removedOwner = removedOwner, linkTokenActive = linkTokenActive, ownCount = ownCount,
+        startHashes = hashesAStartUses(ownerHashes.filterNot { it in removedOwner } + own, results).size, results = results,
+        running = running, issues = issues, riskAcknowledged = riskAcknowledged, tcpAcknowledged = tcpAcknowledged,
         poolSize = pool?.pool?.size,
     )
 
@@ -270,14 +287,30 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
             linkTokenActive && savedHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL -> store.saveVkHashMode(CsqttConstants.VkAutoHash.MODE_AUTO_API)
         }
     }
-    // a draft goes once the store holds what it says: from then on the field follows the store again (a deploy's end
-    // writes the server it installed into the open profile)
-    LaunchedEffect(addressDraft, peer) { if (addressDraft == peer) addressDraft = null }
-    LaunchedEffect(portDraft, port) { if (portDraft?.toIntOrNull() == port) portDraft = null }
-    LaunchedEffect(passwordDraft, auth.connectionPassword) {
-        if (passwordDraft == auth.connectionPassword) SecretDrafts.clear(passwordDraftKey(profile, epoch))
+    // the password is typed inside the kit's field: the value it was typed over is noted once it has a draft
+    if (passwordDraft != null && passwordBase == null) SideEffect { SecretDrafts.type(draftBaseKey(passwordKey), auth.connectionPassword) }
+    // a draft goes once it no longer stands ([draftStands]): the store holds what it says — it was written when the
+    // field was left — or holds what another screen put there since (a deploy's end writes the server it installed, a
+    // link is taken by QR). From then on the field follows the store again
+    LaunchedEffect(addressDraft, addressBase, peer) {
+        if (addressDraft != null && !draftStands(addressDraft, addressBase, peer)) {
+            addressDraft = null
+            addressBase = null
+        }
     }
-    LaunchedEffect(linkDraft, auth.csqttLink) { if (linkDraft == auth.csqttLink) SecretDrafts.clear(linkDraftKey(profile, epoch)) }
+    LaunchedEffect(portDraft, portBase, port) {
+        val typed = portDraft
+        if (typed != null && !draftStands(typed.toIntOrNull() ?: NO_PORT, portBase, port)) {
+            portDraft = null
+            portBase = null
+        }
+    }
+    LaunchedEffect(passwordDraft, passwordBase, auth.connectionPassword) {
+        if (passwordDraft != null && !draftStands(passwordDraft, passwordBase, auth.connectionPassword)) SecretDrafts.clear(passwordKey)
+    }
+    LaunchedEffect(linkDraft, linkBase, auth.csqttLink) {
+        if (linkDraft != null && !draftStands(linkDraft, linkBase, auth.csqttLink)) SecretDrafts.clear(linkKey)
+    }
 
     val modeAction = profileModeAction(emptyMode, field = if (linkMode) linkText else address, tunnelBusy = busy)
     val entry = entries.firstOrNull { it.index == profile }
@@ -296,33 +329,56 @@ internal fun TunnelTab(auth: TunnelAuthSnapshot, epoch: Int, validationRequest: 
             if (linkMode) {
                 if (shownLink != null) LinkNoteCard(view)
                 LinkCard(
-                    view = view, linkText = linkText, shown = shownLink, modeAction = modeAction,
-                    onLinkChange = { SecretDrafts.type(linkDraftKey(profile, epoch), it.filterNot(Char::isWhitespace)) },
+                    view = view, linkText = linkText, storedLink = auth.csqttLink, shown = shownLink, modeAction = modeAction,
+                    onLinkChange = {
+                        if (SecretDrafts.typed(linkKey) == null) SecretDrafts.type(draftBaseKey(linkKey), auth.csqttLink)
+                        SecretDrafts.type(linkKey, it.filterNot(Char::isWhitespace))
+                    },
                 )
             } else {
                 OwnCard(
                     view = view, address = address, port = portText, storedPassword = auth.connectionPassword, modeAction = modeAction,
-                    onAddress = { addressDraft = it.filterNot(Char::isWhitespace) },
-                    onPort = { portDraft = it.filter(Char::isDigit).take(5) },
+                    onAddress = {
+                        if (addressDraft == null) addressBase = peer
+                        addressDraft = it.filterNot(Char::isWhitespace)
+                    },
+                    onPort = {
+                        if (portDraft == null) portBase = port
+                        portDraft = it.filter(Char::isDigit).take(5)
+                    },
+                    // a commit writes only a draft that still stands: one the store already holds, or one typed over
+                    // a value the store no longer holds, is dropped and nothing is written
                     commitAddress = {
-                        addressDraft?.let { text ->
-                            // «203.0.113.5:46000» is the two it holds, each in its own field
-                            val apart = splitHostPort(text)
-                            if (apart != null) {
-                                addressDraft = apart.first
-                                portDraft = null
+                        val text = addressDraft
+                        when {
+                            text == null -> Unit
+                            !draftStands(text, addressBase, peer) -> {
+                                addressDraft = null
+                                addressBase = null
                             }
-                            TunnelManager.scope.launch { store.saveFormAddress(apart?.first ?: text, apart?.second, epoch) }
+                            else -> {
+                                // «203.0.113.5:46000» is the two it holds, each in its own field
+                                val apart = splitHostPort(text)
+                                if (apart != null) {
+                                    addressDraft = apart.first
+                                    portDraft = null
+                                    portBase = null
+                                }
+                                TunnelManager.scope.launch { store.saveFormAddress(apart?.first ?: text, apart?.second, epoch) }
+                            }
                         }
                     },
                     commitPort = {
-                        portDraft?.let { text ->
-                            val typed = text.toIntOrNull()
-                            when {
-                                // an emptied field left as it is means "as it was"
-                                text.isEmpty() -> portDraft = null
-                                typed != null && typed in 1..65535 -> TunnelManager.scope.launch { store.saveFormPort(typed, epoch) }
+                        val text = portDraft
+                        val typed = text?.toIntOrNull()
+                        when {
+                            text == null -> Unit
+                            // an emptied field left as it is means "as it was"
+                            text.isEmpty() || !draftStands(typed ?: NO_PORT, portBase, port) -> {
+                                portDraft = null
+                                portBase = null
                             }
+                            typed != null && typed in 1..65535 -> TunnelManager.scope.launch { store.saveFormPort(typed, epoch) }
                         }
                     },
                 )
@@ -445,11 +501,13 @@ private fun OwnCard(
         SecretField(
             stringResource(R.string.tunnel_password), key, stored = storedPassword,
             modifier = Modifier.commitWhenLeft {
-                when (val typed = SecretDrafts.typed(key)) {
-                    null -> Unit
-                    // an emptied field left as it is means "as it was": a stored password is never erased by a field
-                    "" -> SecretDrafts.clear(key)
-                    else -> if (isValidTunnelPassword(typed)) TunnelManager.scope.launch { store.saveFormPassword(typed, epoch) }
+                val typed = SecretDrafts.typed(key)
+                when {
+                    typed == null -> Unit
+                    // an emptied field left as it is means "as it was": a stored password is never erased by a field.
+                    // And a draft that no longer stands is dropped, not written (see the address)
+                    typed.isEmpty() || !draftStands(typed, SecretDrafts.typed(draftBaseKey(key)), storedPassword) -> SecretDrafts.clear(key)
+                    isValidTunnelPassword(typed) -> TunnelManager.scope.launch { store.saveFormPassword(typed, epoch) }
                 }
             },
             placeholder = stringResource(R.string.tunnel_password_hint),
@@ -459,6 +517,8 @@ private fun OwnCard(
                 null -> null
             },
             onDone = { focus.clearFocus() },
+            // the password holds no space: a pasted one's stray space or line end is dropped, as the address's is
+            accept = { it.filterNot(Char::isWhitespace) },
         )
         Hairline()
         HashControls(view)
@@ -468,7 +528,14 @@ private fun OwnCard(
 
 /** A participant's profile: the link it connects by, what the link says, and the hashes it brings. */
 @Composable
-private fun LinkCard(view: TunnelView, linkText: String, shown: CsqttLink?, modeAction: ProfileModeAction?, onLinkChange: (String) -> Unit) {
+private fun LinkCard(
+    view: TunnelView,
+    linkText: String,
+    storedLink: String,
+    shown: CsqttLink?,
+    modeAction: ProfileModeAction?,
+    onLinkChange: (String) -> Unit,
+) {
     val colors = Csq.colors
     val nav = LocalNav.current
     val focus = LocalFocusManager.current
@@ -482,10 +549,15 @@ private fun LinkCard(view: TunnelView, linkText: String, shown: CsqttLink?, mode
     val storedAccept by store.acceptServerHashes.collectAsStateWithLifecycle(initialValue = null)
     val storedReceivedAt by store.receivedHashesAt.collectAsStateWithLifecycle(initialValue = null)
     val commitLink = {
-        when (val typed = SecretDrafts.typed(key)) {
-            null -> Unit
+        val typed = SecretDrafts.typed(key)
+        when {
+            typed == null -> Unit
+            // a draft that no longer stands — the link the profile already holds, pasted or typed again, among them —
+            // is dropped and nothing is written: an import would put back the owner's hashes that were taken out and
+            // drop the set the server sent
+            !draftStands(typed, SecretDrafts.typed(draftBaseKey(key)), storedLink) -> SecretDrafts.clear(key)
             // M-72: a link is written whole or not at all; an emptied field clears it
-            else -> if (typed.isEmpty() || parseCsqttLink(typed) != null) TunnelManager.scope.launch { store.saveFormLink(typed, epoch) }
+            typed.isEmpty() || parseCsqttLink(typed) != null -> TunnelManager.scope.launch { store.saveFormLink(typed, epoch) }
         }
         Unit
     }
@@ -509,6 +581,7 @@ private fun LinkCard(view: TunnelView, linkText: String, shown: CsqttLink?, mode
                         if (parseCsqttLink(copied) == null) {
                             messages.show(context.getString(R.string.add_clipboard_empty))
                         } else {
+                            if (SecretDrafts.typed(key) == null) SecretDrafts.type(draftBaseKey(key), storedLink)
                             SecretDrafts.type(key, copied)
                             commitLink()
                         }
@@ -675,14 +748,13 @@ internal fun Hairline() {
 
 /** A row that leads on: what it opens, a line about it, a chevron. [danger] marks what a refused start asked for. */
 @Composable
-internal fun NavRow(title: String, sub: String?, danger: Boolean = false, icon: ImageVector? = null, onClick: () -> Unit) {
+internal fun NavRow(title: String, sub: String?, danger: Boolean = false, onClick: () -> Unit) {
     val colors = Csq.colors
     Row(
         Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp).clickable(role = Role.Button, onClick = onClick),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (icon != null) Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = colors.muted)
         Column(Modifier.weight(1f)) {
             Text(title, style = Type.body, color = colors.text)
             if (sub != null) Text(sub, style = Type.sub, color = if (danger) colors.danger else colors.muted)
@@ -696,7 +768,7 @@ internal fun NavRow(title: String, sub: String?, danger: Boolean = false, icon: 
  * first, so that the sign-in can be to another account.
  */
 internal fun openVkSignIn(context: Context, nav: NavModel, messages: com.csqtt.client.Messages, profile: Int) {
-    if (TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value) {
+    if (vkChangeBlocked()) {
         messages.show(context.getString(R.string.vk_change_running))
     } else {
         com.csqtt.client.VkAuthWebViewManager.clearVkSessionCookies { nav.open(Routes.vkSignIn(profile)) }

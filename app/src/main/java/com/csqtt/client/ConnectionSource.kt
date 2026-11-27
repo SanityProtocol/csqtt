@@ -41,11 +41,7 @@ internal fun participantHashes(linkHashes: List<String>, removed: Set<String>, o
 
 suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? {
     val invalidHashes = VkHashValidationCodec.decode(store.vkHashCheckResults.first())
-    fun activeHashes(raw: String): String {
-        val rawList = raw.split(Regex("[,\\s\\n]+")).map(String::trim).filter { it.length >= 16 }.distinct()
-        val filtered = VkHashValidationCodec.active(rawList, invalidHashes)
-        return (if (filtered.isNotEmpty()) filtered else rawList).joinToString(",")
-    }
+    fun activeHashes(raw: String): String = hashesAStartUses(raw.split(Regex("[,\\s\\n]+")), invalidHashes).joinToString(",")
 
     // S8: hashes the server sends during this run belong to the profile it started from, whatever is active by then
     TunnelManager.sourceProfile = store.selectedProfileIndex.first()

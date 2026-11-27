@@ -49,6 +49,9 @@ object CsqttConstants {
         const val WORKERS_PER_GROUP = 10
         const val GROUPS_PER_VK_HASH = 1
         const val MAX_VK_HASHES = 7
+        // what the core takes of the hashes it is handed (rust-client MAX_VK_HASHES): what a screen says of the
+        // hashes in use goes by this. The app's own 7 above is upstream's, and its seventh is never used (backlog)
+        const val CORE_VK_HASHES = 6
         // the most «Авто ВК» runs (as V2 had it): its one call is held by the account
         const val AUTO_VK_MAX_WORKERS = 70
         // a new profile's streams (the operator, 2026-11-27): the top of the slider's green zone. Until P3 B3 it was

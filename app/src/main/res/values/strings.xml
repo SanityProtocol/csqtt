@@ -294,7 +294,7 @@
     <string name="tunnel_password_hint">как в панели сервера</string>
     <string name="tunnel_password_missing">Укажите пароль подключения</string>
     <string name="tunnel_password_rule">Без пробелов и «|», не длиннее 128 байт (64 буквы кириллицей)</string>
-    <string name="tunnel_use_link">Подключиться по ссылке csqtt://</string>
+    <string name="tunnel_use_link">Подключиться по ссылке</string>
     <string name="tunnel_enter_server">Ввести сервер вручную</string>
     <string name="tunnel_hash_mode">Режим хешей</string>
     <string name="tunnel_hash_manual">Ручной</string>
@@ -363,7 +363,7 @@
     <string name="tunnel_streams">Потоки</string>
     <string name="tunnel_streams_limit">Лимит сервера — %1$d (отметка). Пока туннель включён, не меняется.</string>
     <string name="tunnel_streams_locked">Пока туннель включён, не меняется.</string>
-    <string name="tunnel_streams_per_hash">%1$d на хеш (всего %2$d)</string>
+    <string name="tunnel_streams_per_hash">%2$d (%1$d на хеш)</string>
     <string name="tunnel_streams_recommended">Рекомендуем не больше %1$d на хеш</string>
     <string name="tunnel_streams_recommended_plain">Рекомендуем не больше %1$d</string>
     <string name="tunnel_streams_over">Больше рекомендуемого: не больше %1$d на хеш</string>
@@ -397,7 +397,7 @@
     <string name="hashes_duplicate">Такой хеш уже есть выше</string>
     <string name="hashes_clear">Очистить хеш %1$d</string>
     <string name="hashes_paste">Вставить в хеш %1$d</string>
-    <string name="hashes_more">Больше хешей — выше лимит потоков.</string>
+    <string name="hashes_more">Больше хешей — меньше потоков на каждом.</string>
     <string name="hashes_unchecked">Не удалось проверить: %1$d. Эти поля остались без статуса.</string>
     <string name="hashes_check">Проверить актив</string>
     <string name="hashes_check_count">Проверить актив (%1$d)</string>
@@ -422,6 +422,7 @@
     <string name="vk_account_id">id %1$s · постоянный токен</string>
     <string name="vk_account_pasted_title">Аккаунт этого профиля</string>
     <string name="vk_account_pasted">токен вставлен вручную</string>
+    <string name="vk_account_unlisted">id %1$s · нет в списке аккаунтов</string>
     <string name="vk_account_selected">выбран</string>
     <string name="vk_account_delete">Удалить: %1$s</string>
     <string name="vk_accounts_none">На этом телефоне ещё не входили в VK.</string>
@@ -458,6 +459,8 @@
     <string name="vk_pool_full">В пуле уже %1$d: больше сервер не берёт</string>
     <string name="vk_pool_no_token">Сначала войдите в аккаунт VK</string>
     <string name="vk_pool_unused">Этот профиль пулом не пользуется</string>
+    <string name="vk_pool_none_made">Звонок не создан: VK не ответил или отказал</string>
+    <string name="vk_pool_token_refused">VK отклонил токен: войдите в аккаунт снова</string>
 
     <string name="turn_title">TURN-подсети</string>
     <string name="turn_sub">Через какие серверы VK идёт туннель</string>
@@ -488,6 +491,8 @@
     <string name="risk_danger_title">Опасно!</string>
     <string name="risk_streams_over">Это больше рекомендуемого: %1$d потоков на один звонок VK при рекомендуемых до %2$d. Каждые десять потоков — ещё одно подключение к звонку с вашего телефона: чем их больше на одном звонке, тем вероятнее капча и отказы VK. Надёжнее добавить хеши звонков: потоки разойдутся по ним.</string>
     <string name="risk_streams_danger">Опасная нагрузка: %1$d потоков на один звонок VK — больше %2$d. VK может отказывать в подключении и часто просить капчу. Добавьте хеши звонков или уменьшите число потоков.</string>
+    <string name="risk_streams_over_plain">Это больше рекомендуемого: %1$d потоков на один звонок VK при рекомендуемых до %2$d. Каждые десять потоков — ещё одно подключение к звонку с вашего телефона: чем их больше на одном звонке, тем вероятнее капча и отказы VK.</string>
+    <string name="risk_streams_danger_plain">Опасная нагрузка: %1$d потоков на один звонок VK — больше %2$d. VK может отказывать в подключении и часто просить капчу. Уменьшите число потоков.</string>
     <string name="risk_dont_remind">Не напоминать</string>
 
     <string name="info_hash_title">Режимы хешей</string>

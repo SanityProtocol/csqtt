@@ -25,6 +25,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -166,9 +170,10 @@ internal fun Field(
 
 /**
  * A password being typed (M-174). Its text lives in [SecretDrafts] under [draftKey], in memory only: it is never in the
- * saved-instance Bundle (§4.2 rule 2). It is masked; the eye shows it until the screen is recreated, and no longer.
- * With [stored] the field shows a secret the store already holds until it is edited: from then on it shows what was
- * typed, an emptied field too, until its form drops the draft.
+ * saved-instance Bundle (§4.2 rule 2). It is masked; the eye shows it until the screen is recreated or the app is
+ * left, and no longer. With [stored] the field shows a secret the store already holds until it is edited: from then
+ * on it shows what was typed, an emptied field too, until its form drops the draft. [accept] is what the field takes
+ * of what is typed or pasted: a secret that can hold no space drops one, since a masked field cannot show it.
  */
 @Composable
 internal fun SecretField(
@@ -180,12 +185,20 @@ internal fun SecretField(
     hint: String? = null,
     stored: String? = null,
     onDone: (() -> Unit)? = null,
+    accept: (String) -> String = { it },
 ) {
     var shown by remember { mutableStateOf(false) }
+    // a secret left shown is hidden again when the app is left: it is not on the screen for whoever picks the phone up
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) shown = false }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     Field(
         label = label,
         value = if (stored != null) SecretDrafts.typed(draftKey) ?: stored else SecretDrafts[draftKey],
-        onValueChange = { if (stored != null) SecretDrafts.type(draftKey, it) else SecretDrafts[draftKey] = it },
+        onValueChange = { typed -> accept(typed).let { if (stored != null) SecretDrafts.type(draftKey, it) else SecretDrafts[draftKey] = it } },
         modifier = modifier,
         placeholder = placeholder,
         error = error,
@@ -293,15 +306,11 @@ internal fun <T> Select(
     }
 }
 
-/**
- * A setting on one line: what it is, a «?» that explains it when it needs explaining, a quieter line under it, and its
- * control at the end.
- */
+/** A setting on one line: what it is, a «?» that explains it when it needs explaining, and its control at the end. */
 @Composable
 internal fun SettingRow(
     label: String,
     modifier: Modifier = Modifier,
-    sub: String? = null,
     onInfo: (() -> Unit)? = null,
     control: @Composable () -> Unit,
 ) {
@@ -311,14 +320,11 @@ internal fun SettingRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(label, style = Type.body, color = colors.text, modifier = Modifier.weight(1f, fill = false))
-                if (onInfo != null) {
-                    IconBtn(Icons.help, stringResource(R.string.setting_about, label), onInfo, small = true, tint = colors.faint)
-                }
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = Type.body, color = colors.text, modifier = Modifier.weight(1f, fill = false))
+            if (onInfo != null) {
+                IconBtn(Icons.help, stringResource(R.string.setting_about, label), onInfo, small = true, tint = colors.faint)
             }
-            if (sub != null) Text(sub, style = Type.sub, color = colors.muted)
         }
         control()
     }

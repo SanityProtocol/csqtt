@@ -59,6 +59,13 @@ object VkAutoCallsManager {
         result?.set?.let(ender)
     }
 
+    /**
+     * How many calls a pool is filled up to: what [workers] streams need, and with [extra] calls asked for beyond the
+     * [alive] ones («Пул звонков VK»: a dead call made again, «Создать звонок»), that many.
+     */
+    internal fun poolTarget(workers: Int, alive: Int, extra: Int): Int =
+        maxOf(callCountForWorkers(workers), if (extra > 0) alive + extra else 0)
+
     fun callCountForWorkers(workers: Int): Int {
         return (1..CsqttConstants.Tunnel.MAX_VK_HASHES).firstOrNull {
             workers <= WorkerCountPolicy.maximumForHashes(it)
@@ -198,7 +205,7 @@ object VkAutoCallsManager {
         tokenStore: SettingsStore,
         extra: Int = 0,
     ): VkHashPool.Fill {
-        val target = maxOf(callCountForWorkers(workers), if (extra > 0) VkHashPool.alive(pool, dead).size + extra else 0)
+        val target = poolTarget(workers, VkHashPool.alive(pool, dead).size, extra)
         val requestPacer = VkRequestPacer(
             requestDelayForCallCount(target),
             SystemClock::elapsedRealtime,

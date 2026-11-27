@@ -1148,7 +1148,9 @@ object TunnelManager {
     }
 
     private fun scheduleWorkerZeroRecovery(identity: ProcessIdentity) {
-        val target = workerRecoveryPolicy.armAtZero() ?: return
+        // the run's own count: what was asked for, or the server's limit below it
+        val runs = minOf(targetWorkers.value, serverAssignedWorkers.value ?: Int.MAX_VALUE)
+        val target = workerRecoveryPolicy.armAtZero(runs) ?: return
         if (workerRecoveryJob?.isActive == true) return
         workerRecoveryJob = activeScope.launch {
             try {

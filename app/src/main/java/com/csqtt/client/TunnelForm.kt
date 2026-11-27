@@ -175,15 +175,15 @@ internal object StreamsPlan {
     fun totalWithin(perHashLimit: Int, hashes: Int, maximum: Int): Int = (hashes.coerceAtLeast(1) * perHashLimit).coerceAtMost(maximum)
 
     /**
-     * Over how many calls a profile's streams go. With the user's own hashes or a link's, the ones in use ([manual]),
-     * no more than the tunnel takes; a profile with no hash yet is judged as with one, the fewest it will have. In
-     * «Авто API» the app makes a call for every ten streams, up to that same count. «Авто ВК» has one call, the
-     * account's own.
+     * Over how many calls a profile's streams go. With the user's own hashes or a link's, the ones a start would use
+     * ([manual], see [hashesAStartUses]), no more than the core takes; a profile with no hash yet is judged as with
+     * one, the fewest it will have. In «Авто API» the app makes a call for every ten streams, and the core takes that
+     * same count of them at most. «Авто ВК» has one call, the account's own.
      */
     fun calls(autoVk: Boolean, autoApi: Boolean, manual: Int): Int = when {
         autoVk -> 1
-        autoApi -> CsqttConstants.Tunnel.MAX_VK_HASHES
-        else -> manual.coerceIn(1, CsqttConstants.Tunnel.MAX_VK_HASHES)
+        autoApi -> CsqttConstants.Tunnel.CORE_VK_HASHES
+        else -> manual.coerceIn(1, CsqttConstants.Tunnel.CORE_VK_HASHES)
     }
 
     /** Whether the count is said per hash: where the profile has hashes to say it of. */
@@ -196,8 +196,27 @@ internal object StreamsPlan {
  */
 internal fun ownHashRows(ownerInUse: Int, own: List<String>): Int {
     val filled = own.indexOfLast { it.isNotBlank() } + 1
-    return maxOf(filled, CsqttConstants.Tunnel.MAX_VK_HASHES - ownerInUse, 1).coerceAtMost(own.size)
+    return maxOf(filled, CsqttConstants.Tunnel.CORE_VK_HASHES - ownerInUse, 1).coerceAtMost(own.size)
 }
+
+/**
+ * The hashes a start connects with, of the owner's in use and the profile's own: the ones no check found dead — and
+ * every one of them when a check found them all dead, as a start then tries them all. What the «Потоки» zones count
+ * and what [resolveConnectionSource] hands the core are this one list.
+ */
+internal fun hashesAStartUses(hashes: List<String>, results: Map<String, VkHashValidationStatus>): List<String> {
+    val all = hashes.map(String::trim).filter { it.length >= 16 }.distinct()
+    return VkHashValidationCodec.active(all, results).ifEmpty { all }
+}
+
+/**
+ * Whether a field's draft still stands: it was typed over the value the store held then ([base]), and the store still
+ * holds that value. Once the store holds anything else the draft is gone — what the draft says (it was written when
+ * the field was left), or what another screen put there since (a deploy's end, a link taken by QR): a draft kept
+ * through that would be shown over the new value and written back over it when the field is next left.
+ */
+internal fun <T> draftStands(draft: T?, base: T?, stored: T): Boolean =
+    draft != null && draft != stored && (base == null || base == stored)
 
 /** What a participant's link is short of, said on a card of its own (the canvas, F-TunnelLinkStates). */
 internal enum class LinkNote { OwnerToken, NeedsHashes, Outdated }

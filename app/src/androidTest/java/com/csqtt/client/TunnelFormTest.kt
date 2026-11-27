@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.csqtt.client.ShellTestKit.recreateFromSavedStateAlone
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -106,11 +107,15 @@ class TunnelFormTest {
             compose.waitUntil(5_000) { peer() == "203.0.113.9" && port() == 46100 }
             compose.waitUntil(5_000) { typed(ADDRESS) == "203.0.113.9" && typed(PORT) == "46100" }
 
-            // a password the server cannot take is said, and the stored one is left as it was
-            field(PASSWORD).performTextReplacement("pw new")
+            // a password is stored when its field is left; a space pasted with it is dropped, as it cannot be seen
+            field(PASSWORD).performTextReplacement("pw-first ")
+            field(PASSWORD).performImeAction()
+            compose.waitUntil(5_000) { password() == "pw-first" }
+            // one the server cannot take is said, and the stored one is left as it was
+            field(PASSWORD).performTextReplacement("pw|bad")
             field(PASSWORD).performImeAction()
             compose.waitUntil(5_000) { shown("Без пробелов и «|», не длиннее 128 байт (64 буквы кириллицей)") }
-            assertEquals("", password())
+            assertEquals("pw-first", password())
             field(PASSWORD).performTextReplacement("pw-new")
             field(PASSWORD).performImeAction()
             compose.waitUntil(5_000) { password() == "pw-new" }
@@ -144,12 +149,14 @@ class TunnelFormTest {
             val inset = 10.dp.toPx()
             click(Offset(inset + (width - 2 * inset) * (stop - 5) / 95f, centerY))
         }
-        ActivityScenario.launch(MainActivity::class.java).use {
+        // the thumb at a count: with one hash the pill says the number alone
+        fun at(count: Int) = shown(count.toString()) &&
+            compose.onAllNodes(track and hasProgressBarRangeInfo(ProgressBarRangeInfo(count.toFloat(), 5f..100f, 18))).fetchSemanticsNodes().isNotEmpty()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             openTunnel()
             compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
             // a new profile starts at twenty, the top of the green zone
-            compose.waitUntil(5_000) { shown("20 на хеш (всего 20)") }
-            compose.onNode(track and hasProgressBarRangeInfo(ProgressBarRangeInfo(20f, 5f..100f, 18))).assertExists()
+            compose.waitUntil(5_000) { at(20) }
             assertTrue("one hash: fifty at most is recommended", shown("Рекомендуем не больше 50 на хеш"))
 
             // the blue zone asks nothing
@@ -164,14 +171,17 @@ class TunnelFormTest {
             compose.onNodeWithText("Отмена").performClick()
             compose.waitUntil(5_000) { !shown("Внимание!") }
             assertEquals(40, streams())
-            assertTrue("the thumb is back where the store has it", shown("40 на хеш (всего 40)"))
+            assertTrue("the thumb is back where the store has it", at(40))
 
-            // the same again, and «Понятно» stores it
+            // the same again; the question outlives the screen being made again, and «Понятно» stores the count
             tap(60)
             compose.waitUntil(5_000) { shown("Внимание!") }
+            scenario.recreateFromSavedStateAlone()
+            compose.waitUntil(10_000) { shown("Внимание!") }
+            assertEquals(40, streams())
             compose.onNodeWithText("Понятно").performClick()
             compose.waitUntil(5_000) { streams() == 60 }
-            compose.waitUntil(5_000) { shown("60 на хеш (всего 60)") && shown("Больше рекомендуемого: не больше 50 на хеш") }
+            compose.waitUntil(5_000) { at(60) && shown("Больше рекомендуемого: не больше 50 на хеш") }
 
             // up into the red zone: the danger question, and then within the zone nothing more is asked
             tap(85)
@@ -190,12 +200,12 @@ class TunnelFormTest {
 
             // a second hash: the zones are counts per hash, so they stretch — the whole line is green and blue now
             runBlocking { slot.saveVkHashesOnly("H".repeat(20) + "," + "J".repeat(20)) }
-            compose.waitUntil(5_000) { shown("30 на хеш (всего 60)") }
+            compose.waitUntil(5_000) { shown("60 (30 на хеш)") }
             assertFalse(shown("Больше рекомендуемого: не больше 50 на хеш"))
             tap(95)
             compose.waitUntil(5_000) { streams() == 95 }
             assertFalse(shown("Внимание!") || shown("Опасно!"))
-            assertTrue(shown("50 на хеш (всего 95)"))
+            assertTrue(shown("95 (50 на хеш)"))
         }
     }
 
@@ -233,6 +243,7 @@ class TunnelFormTest {
             assertTrue(there())
             field(ADDRESS).performTextReplacement("203.0.113.99")
             compose.waitForIdle()
+            assertEquals("typed and not left: not stored yet", "203.0.113.1", peer())
 
             compose.onNode(profileRow).performClick()
             compose.waitUntil(5_000) { compose.onAllNodes(menu).fetchSemanticsNodes().isNotEmpty() }
@@ -247,6 +258,45 @@ class TunnelFormTest {
             Thread.sleep(1_000)
             assertFalse("the deleted profile is back", there())
             assertEquals("", peer())
+        }
+    }
+
+    /**
+     * The review's F1: a field left by a tab tap is stored, and its draft must not outlive that. When another screen
+     * later stores a new value under it (a deploy's end writes the port and the password), the tab shows the new
+     * value, and leaving the tab again writes nothing of the old text back.
+     */
+    @Test
+    fun aFieldLeftByATabTapFollowsWhatAnotherScreenStoresLater() {
+        runBlocking { slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first()) }
+        fun leaveAndSettle() {
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitForIdle()
+            Thread.sleep(1_000)
+        }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            // the port: its draft is in the tab's saved state
+            openTunnel()
+            compose.waitUntil(5_000) { typed(ADDRESS) == "203.0.113.1" }
+            field(PORT).performTextReplacement("46100")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { port() == 46100 }
+            // another screen's write, as a deploy's end makes it
+            runBlocking { slot.saveFormPort(46200, store.profileEpoch.first()) }
+            openTunnel()
+            compose.waitUntil(5_000) { typed(PORT) == "46200" }
+
+            // the password: its draft is in memory for as long as the process lives
+            field(PASSWORD).performTextReplacement("pw-typed")
+            compose.onNodeWithText("Главная").performClick()
+            compose.waitUntil(5_000) { password() == "pw-typed" }
+            runBlocking { store.saveConnectionPassword("pw-deployed", forProfile = SLOT) }
+            openTunnel()
+            compose.waitUntil(5_000) { typed(PORT) == "46200" }
+            // and leaving the tab again writes nothing of the old text back
+            leaveAndSettle()
+            assertEquals("the old text was written back over the new port", 46200, port())
+            assertEquals("the old text was written back over the new password", "pw-deployed", password())
         }
     }
 

@@ -115,7 +115,7 @@ internal data class DeploySettingsSnapshot(
  * The owner's pool of calls as «Пул звонков VK» shows it (D6; P3 B3): the server's record it belongs to, the calls'
  * hashes, the ones its panel last took, and how the last hand-over went.
  */
-internal data class VkPoolState(val vps: Int, val pool: List<String>, val sent: List<String>, val handOver: HandOverResult?)
+internal data class VkPoolState(val pool: List<String>, val sent: List<String>, val handOver: HandOverResult?)
 
 internal data class TunnelAuthSnapshot(
     val profile: Int = -1,
@@ -355,7 +355,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private val PROFILE_SORT = stringPreferencesKey("profile_sort")
         private val PROFILE_ORDER = stringPreferencesKey("profile_order")
         // changes whenever a slot's profile is replaced (delete, add, restore): screens key their saved form state on it,
-        // so a form edited for the old profile never autosaves into the new one
+        // so a form edited for the old profile is never stored into the new one
         private val PROFILE_EPOCH = intPreferencesKey("profile_records_epoch")
         private val SNI = profileString("sni")
         private val NO_DNS = profileBoolean("no_dns")
@@ -525,12 +525,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         internal var cachedObfsMode: String? = null
 
         @Volatile
-        internal var cachedTurnTransport: String? = null
-
-        @Volatile
-        internal var cachedSrtpMode: String? = null
-
-        @Volatile
         internal var cachedCsqttLinkMode: Boolean? = null
 
         // whether the user has a server, as last read in this process: a recreated screen starts from it, so its tab bar
@@ -539,15 +533,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         internal var cachedHasServer: Boolean? = null
         @Volatile
         internal var cachedHomeLayout: HomeLayout? = null
-
-        @Volatile
-        internal var cachedWorkersPerHash: Int? = null
-
-        @Volatile
-        internal var cachedManualPortsEnabled: Boolean? = null
-
-        @Volatile
-        internal var cachedServerPeerPort: Int? = null
 
         @Volatile
         internal var cachedCustomTurnIps: String? = null
@@ -623,14 +608,15 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             // a step that throws would fail every read of the store, so a value it cannot handle only skips that step
             fun step(action: () -> Unit) = runCatching(action)
             if (from < 1) {
-                // 2.6.0. «Экстра потоки» needs no step: 2.5.3 wrote false at every start, so no choice is left to recover
+                // 2.6.0. «Экстра потоки» has no choice to recover here (2.5.3 wrote false at every start); step 9 takes
+                // the switch out and reads it once more, for the count it lifted
                 prefs.remove(stringPreferencesKey("ui_design"))
                 step { decideDefaultRole(prefs) }
                 for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
                     step { normalizeVkModes(prefs, profile) }
                     step { dropLinkHashesFromOwn(prefs, profile) }
                     step {
-                        // what the core ran: 18 and 5 ran as 10
+                        // what the core ran: 18 ran as 10, fewer than ten as 5
                         val key = getProfileKey(WORKERS_PER_HASH, profile)
                         prefs[key]?.let { prefs[key] = WorkerCountPolicy.wholeGroups(it) }
                     }
@@ -1261,12 +1247,16 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         private const val LIMIT_WITHOUT_EXTRA = 70
 
         /**
-         * A count of streams stored while «Экстра потоки» existed, as it ran: with the switch off, or never touched
-         * ([extra] null), a count above 70 ran as 70 — a subscription's node started at its power, which may be 100 —
-         * so 70 is what the profile holds once nothing caps a count any more; with the switch on, the count itself.
+         * A count of streams stored while «Экстра потоки» existed, as it ran. In whole tens, fewer than ten as five
+         * ([WorkerCountPolicy.wholeGroups]): a settings file of 2.5.3 holds its default of 18, which ran as 10, and
+         * taken as it is it would now run as 15. And with the switch off, or never touched ([extra] null), no more
+         * than 70 — a subscription's node started at its power, which may be 100 — so 70 is what the profile holds
+         * once nothing caps a count any more; with the switch on, up to the core's 100.
          */
-        internal fun countAsItRan(count: Int, extra: Boolean?): Int =
-            if (extra == true) count else count.coerceAtMost(LIMIT_WITHOUT_EXTRA)
+        internal fun countAsItRan(count: Int, extra: Boolean?): Int {
+            val ran = WorkerCountPolicy.wholeGroups(count)
+            return if (extra == true) ran else ran.coerceAtMost(LIMIT_WITHOUT_EXTRA)
+        }
 
         /**
          * Whether a write of the «Туннель» form — the server's ([linkForm] false) or the link's, drawn for [profile]
@@ -2475,7 +2465,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             readSecret(prefs, DEPLOY_WEB_PASSWORD_ENCRYPTED, DEPLOY_WEB_PASSWORD, vps)
         } ?: return@map null
         VkPoolState(
-            vps = panel.vps, pool = vkPoolOf(prefs, panel.vps), sent = handOverStateOf(prefs, panel.vps).first,
+            pool = vkPoolOf(prefs, panel.vps), sent = handOverStateOf(prefs, panel.vps).first,
             handOver = HandOverResult.decode(prefs[getProfileKey(DEPLOY_VK_POOL_HANDOVER, panel.vps)]),
         )
     }.onIo()
@@ -2684,12 +2674,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
                 launch { vkHashMode.collect { cachedVkHashMode = it } }
                 launch { vkAccessToken.collect { cachedVkAccessToken = it } }
                 launch { obfsMode.collect { cachedObfsMode = it } }
-                launch { turnTransport.collect { cachedTurnTransport = it } }
-                launch { srtpMode.collect { cachedSrtpMode = it } }
                 launch { csqttLinkMode.collect { cachedCsqttLinkMode = it } }
-                launch { workersPerHash.collect { cachedWorkersPerHash = it } }
-                launch { manualPortsEnabled.collect { cachedManualPortsEnabled = it } }
-                launch { serverPeerPort.collect { cachedServerPeerPort = it } }
                 launch { customTurnIps.collect { cachedCustomTurnIps = it } }
                 launch { excludedApps.collect { cachedExcludedApps = it } }
                 launch { whitelistApps.collect { cachedWhitelistApps = it } }
@@ -2781,6 +2766,19 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs ->
             val key = getProfileKey(VK_HASH_CHECK_RESULTS, selectedProfile(prefs))
             prefs[key] = VkHashValidationCodec.encode(VkHashValidationCodec.decode(prefs[key] ?: "{}") + checked)
+        }
+    }
+
+    /**
+     * «Хеши звонков VK»: the fields [hashes] stood in were edited, so what the last check said of them is forgotten —
+     * a hash once found dead and entered again (its call was started again) is tried, not left out until a new check.
+     */
+    internal suspend fun forgetVkHashCheckResults(hashes: Set<String>) {
+        if (hashes.isEmpty()) return
+        dataStore.edit { prefs ->
+            val key = getProfileKey(VK_HASH_CHECK_RESULTS, selectedProfile(prefs))
+            val results = VkHashValidationCodec.decode(prefs[key] ?: "{}")
+            if (hashes.any(results::containsKey)) prefs[key] = VkHashValidationCodec.encode(results - hashes)
         }
     }
 
@@ -2959,29 +2957,6 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(workersPerHash, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
-        }
-    }
-
-    suspend fun save(
-        peer: String,
-        vkHashes: String,
-        secondaryVkHash: String,
-        workersPerHash: Int,
-        protocol: String,
-        listenPort: Int,
-        sni: String = "",
-        noDns: Boolean = false
-    ) {
-        dataStore.edit { prefs ->
-            val profile = selectedProfile(prefs)
-            prefs[getProfileKey(PEER, profile)] = peer
-            prefs[getProfileKey(VK_HASHES, profile)] = vkHashes
-            prefs[getProfileKey(SECONDARY_VK_HASH, profile)] = secondaryVkHash
-            prefs[getProfileKey(WORKERS_PER_HASH, profile)] = WorkerCountPolicy.normalize(workersPerHash, maximum = CsqttConstants.Tunnel.MAX_WORKERS)
-            prefs[getProfileKey(PROTOCOL, profile)] = protocol
-            prefs[getProfileKey(LISTEN_PORT, profile)] = listenPort
-            prefs[getProfileKey(SNI, profile)] = sni
-            prefs[getProfileKey(NO_DNS, profile)] = noDns
         }
     }
 
@@ -3200,12 +3175,11 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
-    suspend fun saveSelectedTurnSubnet(subnetId: String, ipLimit: String? = null) {
+    suspend fun saveSelectedTurnSubnet(subnetId: String, ipLimit: String) {
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)
-            val limit = ipLimit ?: prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] ?: "ALL"
             val allIps = if (subnetId.isNotBlank()) TurnSubnetRegistry.getIpsForSubnet(subnetId) else emptyList()
-            val limitCount = limit.toIntOrNull()
+            val limitCount = ipLimit.toIntOrNull()
             val ips = if (allIps.isEmpty()) {
                 ""
             } else if (limitCount != null && limitCount > 0) {
@@ -3215,9 +3189,7 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
             }
             prefs[getProfileKey(SELECTED_TURN_SUBNET, profile)] = subnetId
             prefs[getProfileKey(CUSTOM_TURN_IPS, profile)] = ips
-            if (ipLimit != null) {
-                prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] = ipLimit
-            }
+            prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] = ipLimit
         }
     }
 

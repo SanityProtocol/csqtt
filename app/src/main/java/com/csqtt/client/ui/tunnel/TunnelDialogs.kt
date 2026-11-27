@@ -26,7 +26,8 @@ import kotlinx.coroutines.launch
 
 /**
  * What a risk question is about: a mode that signs in to VK's unofficial API, the TCP transport, or a count of streams
- * in the slider's orange or red zone (its value: the count picked and the most one hash would carry, «120:60»).
+ * in the slider's orange or red zone (its value: the count picked, the most one hash would carry and whether the
+ * profile could have more hashes, «60:60:1»).
  */
 internal object RiskKind {
     const val HASH_MODE = "hash"
@@ -56,8 +57,10 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
     val profile = parts.getOrNull(0)?.toIntOrNull()
     val kind = parts.getOrNull(1)
     val value = parts.getOrNull(2).orEmpty()
-    // a count of streams comes with the most one hash would carry of it: which says the zone it is in
-    val streams = value.split(':').mapNotNull(String::toIntOrNull).takeIf { kind == RiskKind.STREAMS && it.size == 2 }
+    // a count of streams comes with the most one hash would carry of it, which says the zone it is in, and with
+    // whether the profile has hashes of which it could have more (1) or one call that is the account's own (0)
+    val streams = value.split(':').mapNotNull(String::toIntOrNull).takeIf { kind == RiskKind.STREAMS && it.size == 3 }
+    val moreHashesHelp = streams?.get(2) == 1
     val streamsZone = streams?.let { StreamsPlan.zone(it[1]) }
     val known = kind in setOf(RiskKind.HASH_MODE, RiskKind.WORK_MODE, RiskKind.TCP) ||
         streamsZone == StreamZone.Orange || streamsZone == StreamZone.Red
@@ -99,8 +102,12 @@ internal fun RiskDialog(arg: String, close: () -> Unit) {
     ) {
         Text(
             when {
-                danger -> stringResource(R.string.risk_streams_danger, streams[1], StreamsPlan.ORANGE_PER_HASH)
-                streams != null -> stringResource(R.string.risk_streams_over, streams[1], StreamsPlan.RECOMMENDED_PER_HASH)
+                danger -> stringResource(
+                    if (moreHashesHelp) R.string.risk_streams_danger else R.string.risk_streams_danger_plain, streams[1], StreamsPlan.ORANGE_PER_HASH,
+                )
+                streams != null -> stringResource(
+                    if (moreHashesHelp) R.string.risk_streams_over else R.string.risk_streams_over_plain, streams[1], StreamsPlan.RECOMMENDED_PER_HASH,
+                )
                 kind == RiskKind.TCP -> stringResource(R.string.risk_tcp)
                 else -> stringResource(R.string.risk_auto_vk)
             },

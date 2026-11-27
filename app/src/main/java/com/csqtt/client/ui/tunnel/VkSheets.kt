@@ -97,7 +97,8 @@ private fun tokenDraftKey(profile: Int) = "vk:$profile:token"
 /** The pool as read from the store: null inside means the profile's run uses none; no [PoolRead] yet, not read yet. */
 private class PoolRead(val pool: VkPoolState?)
 
-private fun vkChangeBlocked(): Boolean =
+/** M-79: an account is not changed while the tunnel runs, starts or stops. */
+internal fun vkChangeBlocked(): Boolean =
     TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value
 
 /** The square at the head of a row of a list of accounts or calls: a mark, or a tick for the chosen one. */
@@ -188,7 +189,11 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                 if (unlisted) {
                     val name = stringResource(R.string.vk_account_pasted_title)
                     Cell(
-                        title = name, sub = stringResource(R.string.vk_account_pasted), selected = true,
+                        // a token pasted by hand names no account; one whose account was since taken off the list
+                        // (from another profile's sheet) still names its id
+                        title = name,
+                        sub = if (userId.isEmpty()) stringResource(R.string.vk_account_pasted) else stringResource(R.string.vk_account_unlisted, userId),
+                        selected = true,
                         leading = { RowMark(on = true) {} },
                         trailing = {
                             Chip(stringResource(R.string.vk_account_selected), kind = ChipKind.Accent, small = true)
@@ -430,8 +435,17 @@ internal fun VkPoolSheet(profileArg: String, close: () -> Unit) {
                 val dead = pool.filterTo(HashSet()) { results[it] == VkHashValidationStatus.Invalid }
                 // on the app's scope: calls being made are kept, and handed over, whatever becomes of the sheet
                 TunnelManager.scope.launch(Dispatchers.Main) {
-                    val result = runCatching { VkPoolHandOver.refresh(context, store, profile, dead, oneMore) }.getOrNull()
-                    result?.let { (_, line) -> messages.show(handOverNoticeText(line)) }
+                    val done = runCatching { VkPoolHandOver.refresh(context, store, profile, dead, oneMore) }.getOrNull()
+                    // what happened is said as it happened: a call that was asked for and not made is not answered
+                    // with «переданы серверу»
+                    val said = when {
+                        done == null -> null
+                        done.tokenRefused -> context.getString(R.string.vk_pool_token_refused)
+                        oneMore && done.made == 0 -> context.getString(R.string.vk_pool_none_made)
+                        done.handOver != null -> handOverNoticeText(done.handOver.second)
+                        else -> context.getString(R.string.vk_pool_none_made)
+                    }
+                    said?.let(messages::show)
                 }
             }
         }

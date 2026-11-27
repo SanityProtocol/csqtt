@@ -72,9 +72,11 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
     // come back, and be stored, into the new one
     val epoch by store.profileEpoch.collectAsStateWithLifecycle(initialValue = 0)
     // a start refused for a profile's settings opens «Туннель» on what that profile lacks: the count of them, and
-    // whose the last one was — another profile's form is not full of errors for it
+    // whose the last one was — the slot and the epoch it was refused under. Another profile's form is not full of
+    // errors for it, the next profile to take the slot neither
     var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
     var tunnelValidationProfile by rememberSaveable { mutableIntStateOf(-1) }
+    var tunnelValidationEpoch by rememberSaveable { mutableIntStateOf(-1) }
     // «Дополнительно» of «Туннель» stays open from one profile to the next: it is how the screen is read, not a profile's
     var tunnelMoreOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -90,6 +92,7 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
                     onInvalidConfiguration = {
                         nav.select(Tab.Tunnel)
                         tunnelValidationProfile = auth.profile
+                        tunnelValidationEpoch = epoch
                         tunnelValidationRequest += 1
                     },
                 )
@@ -97,7 +100,8 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
             // a form's saved state is its profile's: one profile's draft never reaches another
             else -> forms.SaveableStateProvider("tunnel:${auth.profile}:$epoch") {
                 TunnelTab(
-                    auth, epoch, validationRequest = if (tunnelValidationProfile == auth.profile) tunnelValidationRequest else 0,
+                    auth, epoch,
+                    validationRequest = if (tunnelValidationProfile == auth.profile && tunnelValidationEpoch == epoch) tunnelValidationRequest else 0,
                     moreOpen = tunnelMoreOpen, onMoreOpen = { tunnelMoreOpen = it },
                 )
             }

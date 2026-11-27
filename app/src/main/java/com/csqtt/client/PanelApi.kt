@@ -82,6 +82,12 @@ internal object PanelApi {
 }
 
 /** D6 (a1): hands the owner's pool to its server, once per try, no retry loop and no timer (B5e3b). */
+/**
+ * What a refresh of the pool did («Пул звонков VK»): the calls it made, whether VK turned the account's token away
+ * (the token is cleared then), and the hand-over's outcome and line — null when there was nothing to hand over.
+ */
+internal data class PoolRefresh(val made: Int, val tokenRefused: Boolean, val handOver: Pair<Boolean, String>?)
+
 internal object VkPoolHandOver {
     private val lock = Mutex()
     private val refreshing = MutableStateFlow(false)
@@ -144,10 +150,10 @@ internal object VkPoolHandOver {
     /**
      * «Обновить» and «Создать звонок» of «Пул звонков VK» (P3 B3); [store] is [profile]'s own. The pool is filled as a
      * connect fills it — the calls a check found [dead] replaced, and with [oneMore] one call beyond what it holds, up
-     * to what the server takes — and handed to the server's panel. The hand-over's outcome and line; null when the
-     * profile's run uses no pool, or the pool is empty.
+     * to what the server takes — and handed to the server's panel. What it did; null when the profile's run uses no
+     * pool, or a refresh is running already.
      */
-    suspend fun refresh(context: Context, store: SettingsStore, profile: Int, dead: Set<String>, oneMore: Boolean): Pair<Boolean, String>? {
+    suspend fun refresh(context: Context, store: SettingsStore, profile: Int, dead: Set<String>, oneMore: Boolean): PoolRefresh? {
         // one at a time: a second tap while calls are being made makes no more of them
         if (!refreshing.compareAndSet(expect = false, update = true)) return null
         try {
@@ -155,15 +161,16 @@ internal object VkPoolHandOver {
             if (store.vkHashMode.first() != CsqttConstants.VkAutoHash.MODE_AUTO_API) return null
             val workers = WorkerCountPolicy.normalize(store.workersPerHash.first())
             val token = store.vkAccessToken.first()
-            VkHashPool.fillLock.withLock {
+            val (made, tokenRefused) = VkHashPool.fillLock.withLock {
                 val pool = store.vkPool(panel.vps)
                 val live = pool.filterNot { it in dead }
                 // the pool never shrinks: each dead call is made again; a new one only while the server would take it
                 val more = (pool.size - live.size) + if (oneMore && pool.size < PanelApi.MAX_DEFAULT_HASHES) 1 else 0
                 val fill = VkAutoCallsManager.fillPool(context, token, live, null, workers, tokenStore = store, extra = more)
                 if (fill.hashes != pool) store.saveVkPool(panel.vps, fill.hashes)
+                fill.hashes.count { it !in pool } to fill.tokenInvalid
             }
-            return handOver(store, panel, force = true)
+            return PoolRefresh(made, tokenRefused, handOver(store, panel, force = true))
         } finally {
             refreshing.value = false
         }

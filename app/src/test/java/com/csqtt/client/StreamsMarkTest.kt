@@ -57,9 +57,10 @@ class StreamsMarkTest {
         assertEquals(10, StreamsPlan.perHash(total = 10, hashes = 1))
         assertEquals(70, StreamsPlan.perHash(total = 70, hashes = 1))
         assertEquals("three tens over three hashes", 10, StreamsPlan.perHash(total = 30, hashes = 3))
-        assertEquals("two tens use two of seven hashes", 10, StreamsPlan.perHash(total = 20, hashes = 7))
+        assertEquals("two tens use two of six hashes", 10, StreamsPlan.perHash(total = 20, hashes = 6))
         assertEquals("the fourth ten is the first hash's second", 20, StreamsPlan.perHash(total = 40, hashes = 3))
-        assertEquals(20, StreamsPlan.perHash(total = 80, hashes = 7))
+        assertEquals("the seventh and eighth tens are the first two hashes' second", 20, StreamsPlan.perHash(total = 80, hashes = 6))
+        assertEquals("seven tens over six hashes: the first carries two", 20, StreamsPlan.perHash(total = 70, hashes = 6))
         assertEquals(30, StreamsPlan.perHash(total = 100, hashes = 4))
         assertEquals(40, StreamsPlan.perHash(total = 100, hashes = 3))
         // a count in fives: the core runs it as it is, and its last group is a half
@@ -69,7 +70,7 @@ class StreamsMarkTest {
         assertEquals("the half group is the first hash's third", 25, StreamsPlan.perHash(total = 45, hashes = 2))
         assertEquals("the half group is the second hash's second", 20, StreamsPlan.perHash(total = 35, hashes = 2))
         // however they are dealt, every stream is on some hash and none is counted twice
-        for (hashes in 1..7) for (total in StreamsSlider.stops(100)) {
+        for (hashes in 1..6) for (total in StreamsSlider.stops(100)) {
             val most = StreamsPlan.perHash(total, hashes)
             assertTrue("$total over $hashes", most * hashes >= total && most <= total)
         }
@@ -107,7 +108,7 @@ class StreamsMarkTest {
         assertEquals("«Авто ВК»: one call, up to its 70", listOf(20, 50, 70), listOf(20, 50, 70).map { StreamsPlan.totalWithin(it, hashes = 1, maximum = 70) })
         assertEquals("a subscription's node capped at 40", listOf(40, 40, 40), listOf(20, 50, 70).map { StreamsPlan.totalWithin(it, hashes = 3, maximum = 40) })
         // the line's zones are the counts' zones: every stop up to a zone's end is in it or below, the next is above
-        for (hashes in 1..7) {
+        for (hashes in 1..6) {
             for ((limit, zone) in listOf(20 to StreamZone.Green, 50 to StreamZone.Blue, 70 to StreamZone.Orange)) {
                 val end = StreamsPlan.totalWithin(limit, hashes, 100)
                 for (total in StreamsSlider.stops(100)) {
@@ -120,9 +121,11 @@ class StreamsMarkTest {
     @Test
     fun `the calls are the hashes in use, the calls the app makes, or the account's one`() {
         assertEquals(3, StreamsPlan.calls(autoVk = false, autoApi = false, manual = 3))
-        assertEquals("no more than the tunnel takes", 7, StreamsPlan.calls(autoVk = false, autoApi = false, manual = 9))
+        // the core takes six of the hashes it is handed (rust-client MAX_VK_HASHES): a seventh carries nothing
+        assertEquals("no more than the core takes", 6, StreamsPlan.calls(autoVk = false, autoApi = false, manual = 9))
+        assertEquals(CsqttConstants.Tunnel.CORE_VK_HASHES, StreamsPlan.calls(autoVk = false, autoApi = false, manual = 7))
         assertEquals("no hash yet: judged as with one", 1, StreamsPlan.calls(autoVk = false, autoApi = false, manual = 0))
-        assertEquals("a call for every ten, up to seven", 7, StreamsPlan.calls(autoVk = false, autoApi = true, manual = 0))
+        assertEquals("a call for every ten, of which the core takes six", 6, StreamsPlan.calls(autoVk = false, autoApi = true, manual = 0))
         assertEquals("the account's own call", 1, StreamsPlan.calls(autoVk = true, autoApi = false, manual = 2))
         // «N на хеш» is said where there are hashes to say it of
         assertTrue(StreamsPlan.saidPerHash(autoVk = false, autoApi = false, manual = 1))

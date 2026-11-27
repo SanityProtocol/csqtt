@@ -174,8 +174,9 @@ class SubscriptionTwinsMergeTest {
             prefs[intPreferencesKey("store_schema_version")] = 8
             val before = asMap(prefs)
             SettingsStore.migrateStore(prefs)
-            // the same step takes «Экстра потоки» out, where a store holds it, and a count that ran as 70 is 70
-            assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(prefs)) - "extra_workers" - "workers_per_hash_2")
+            // the same step takes «Экстра потоки» out, where a store holds it, and makes of a count what it ran as: 75
+            // was 70, and the owner's 18, here as a settings file would have left it, was 10
+            assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(prefs)) - "extra_workers" - "workers_per_hash_2" - "workers_per_hash")
         }
         val two = store(metaJson(Record(https, minutes = 60), Record("https://other.example.invalid/s/abc")), mapOf(1 to https, 2 to "https://other.example.invalid/s/abc"))
         val before = asMap(two)

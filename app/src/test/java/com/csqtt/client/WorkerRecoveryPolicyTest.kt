@@ -49,4 +49,22 @@ class WorkerRecoveryPolicyTest {
         policy.reset()
         assertNull(policy.armAtZero())
     }
+
+    @Test
+    fun aRunOfFewerThanTenArmsOnceAllOfItWasUp() {
+        // P3 B3: the slider's first stop is five (and a server may allow as few as three): such a run never has a
+        // whole group up, and was never brought back from zero
+        val policy = WorkerRecoveryPolicy()
+        policy.observe(3)
+        assertNull("not all five were up yet", policy.armAtZero(runCount = 5))
+        policy.observe(5)
+        assertEquals(5, policy.armAtZero(runCount = 5))
+        assertTrue(policy.shouldRecover(0, 5))
+        // a run of ten and more still wants its first whole group
+        val full = WorkerRecoveryPolicy()
+        full.observe(9)
+        assertNull(full.armAtZero(runCount = 40))
+        full.observe(10)
+        assertEquals(10, full.armAtZero(runCount = 40))
+    }
 }

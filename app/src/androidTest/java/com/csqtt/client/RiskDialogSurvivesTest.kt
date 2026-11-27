@@ -105,9 +105,13 @@ class RiskDialogSurvivesTest {
             compose.waitUntil(5_000) { !shown(WARNING) }
             assertEquals(CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT, transport())
 
-            // «Не напоминать» with «Понятно»: taken, and not asked again
+            // «Не напоминать» with «Понятно»: taken, and not asked again. This question too is still there after the
+            // screen was made again: it is one route for every kind of it
             pick("UDP", "TCP")
             compose.waitUntil(5_000) { shown(WARNING) }
+            scenario.recreateFromSavedStateAlone()
+            compose.waitUntil(10_000) { shown(WARNING) }
+            assertEquals(CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT, transport())
             compose.onNodeWithText("Не напоминать").performClick()
             compose.onNodeWithText("Понятно").performClick()
             // two writes, the choice and then the tick

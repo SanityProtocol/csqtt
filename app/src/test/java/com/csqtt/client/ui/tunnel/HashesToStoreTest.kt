@@ -1,0 +1,40 @@
+package com.csqtt.client.ui.tunnel
+
+import com.csqtt.client.measureSubnetRtt
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/** P3 B3: what «Хеши звонков VK» stores of its fields, and what «TURN-подсети» measures of a subnet. */
+class HashesToStoreTest {
+    private val a = "A".repeat(20)
+    private val b = "B".repeat(20)
+
+    @Test
+    fun `each hash is stored once, a link to a call as its hash, and what is too short not at all`() {
+        assertEquals("$a,$b", hashesToStore(listOf(a, "", b, "", "", "")))
+        assertEquals("one entered twice is one", a, hashesToStore(listOf(a, a, "", "", "", "")))
+        assertEquals("a call's link is its hash", "$a,$b", hashesToStore(listOf("https://vk.com/call/join/$a", b)))
+        assertEquals("the link and the hash of one call are one", a, hashesToStore(listOf("https://vk.com/call/join/$a", a)))
+        assertEquals("too short to be a hash", b, hashesToStore(listOf("short", b)))
+        assertEquals("every field emptied: nothing is stored", "", hashesToStore(List(6) { "" }))
+    }
+
+    @Test
+    fun `a subnet's ping is the mean of its first and its last three servers, and none when none answers`() {
+        val ips = (1..8).map { "192.0.2.$it" }
+        assertNull(measureSubnetRtt(emptyList()) { 10.0 })
+        assertNull("no server answered", measureSubnetRtt(ips) { null })
+        assertEquals(10.0, measureSubnetRtt(ips) { 10.0 }!!, 0.001)
+        // the first three answer in 10 ms, the last three in 30: both ends count alike
+        val asked = mutableListOf<String>()
+        val rtt = measureSubnetRtt(ips) { ip ->
+            asked += ip
+            if (ip.substringAfterLast('.').toInt() <= 3) 10.0 else 30.0
+        }
+        assertEquals(20.0, rtt!!, 0.001)
+        assertEquals("the first three and the last three, none of the middle", listOf(1, 2, 3, 6, 7, 8), asked.map { it.substringAfterLast('.').toInt() })
+        // one end silent: the other end's mean
+        assertEquals(30.0, measureSubnetRtt(ips) { ip -> if (ip.substringAfterLast('.').toInt() <= 3) null else 30.0 }!!, 0.001)
+    }
+}

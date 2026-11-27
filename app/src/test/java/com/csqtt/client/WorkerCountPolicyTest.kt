@@ -19,14 +19,31 @@ class WorkerCountPolicyTest {
     }
 
     @Test
-    fun belowOneGroupWasOneGroupAsTheCoreRanIt() {
-        // before the core was given exact counts it ran fewer than 10 as 10, and the old stored default 18 as 10
-        // (M-84): the store's first step keeps to that
-        for (requested in listOf(Int.MIN_VALUE, 0, 3, 5, 9, 10, 18, 19)) {
+    fun aCountStoredBeforeFivesIsWhatItRanAs() {
+        // 2.5.3 ran fewer than ten as five and the rest in whole tens, so its stored default of 18 ran as 10: the
+        // store's first step, step 9, an older backup and an older settings file keep to that
+        for (requested in listOf(Int.MIN_VALUE, 0, 3, 5, 9)) {
+            assertEquals("requested $requested", 5, WorkerCountPolicy.wholeGroups(requested))
+        }
+        for (requested in listOf(10, 18, 19)) {
             assertEquals("requested $requested", 10, WorkerCountPolicy.wholeGroups(requested))
         }
         assertEquals(70, WorkerCountPolicy.wholeGroups(75))
         assertEquals(100, WorkerCountPolicy.wholeGroups(250))
+        // and with «Экстра потоки» off, or never touched, no more than 70
+        assertEquals("a settings file of 2.5.3 holds 18", 10, SettingsStore.countAsItRan(18, extra = false))
+        assertEquals(5, SettingsStore.countAsItRan(5, extra = null))
+        assertEquals(70, SettingsStore.countAsItRan(100, extra = null))
+        assertEquals(100, SettingsStore.countAsItRan(100, extra = true))
+        assertEquals(90, SettingsStore.countAsItRan(95, extra = true))
+    }
+
+    @Test
+    fun aPoolIsFilledToWhatTheStreamsNeedOrToOneMoreThanIsAlive() {
+        // «Пул звонков VK»: a dead call made again, «Создать звонок»
+        assertEquals(2, VkAutoCallsManager.poolTarget(workers = 20, alive = 2, extra = 0))
+        assertEquals("one call beyond the three that live", 4, VkAutoCallsManager.poolTarget(workers = 20, alive = 3, extra = 1))
+        assertEquals("never fewer than the streams need", 5, VkAutoCallsManager.poolTarget(workers = 50, alive = 1, extra = 1))
     }
 
     @Test

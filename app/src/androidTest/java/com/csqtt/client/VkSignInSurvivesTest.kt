@@ -69,7 +69,8 @@ class VkSignInSurvivesTest {
             assertTrue("no account yet", shown("Не подключён"))
             compose.onNodeWithText("Аккаунт VK").performClick()
             compose.waitUntil(5_000) { shown(ACCOUNTS) }
-            compose.onNodeWithText("Войти в аккаунт VK").performClick()
+            // the button's words depend on whether this device has signed in before
+            compose.onAllNodes(hasText("Войти в аккаунт VK") or hasText("Войти в другой аккаунт")).onLast().performClick()
             compose.waitUntil(10_000) { shown(SIGN_IN) }
 
             scenario.recreateFromSavedStateAlone()

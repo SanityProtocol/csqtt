@@ -44,7 +44,7 @@ internal object VkTokenParse {
 }
 
 /**
- * M-79: VK accounts archived by numeric user id, each token encrypted on its own, so P3's accounts dialog can list and
+ * M-79: VK accounts archived by numeric user id, each token encrypted on its own, so «Аккаунты VK» can list and
  * select them without a new sign-in. A link's token is never archived. Stored as one JSON object:
  * `{"<user id>": {"t": "<encrypted token>", "e": <expiry ms, 0 = permanent>}}`; never in a backup.
  */

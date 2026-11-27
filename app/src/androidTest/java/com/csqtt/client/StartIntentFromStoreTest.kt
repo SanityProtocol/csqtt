@@ -2,6 +2,7 @@ package com.csqtt.client
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -19,14 +20,10 @@ class StartIntentFromStoreTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val store = SettingsStore(context)
         store.saveCsqttLinkMode(false)
-        store.save(
-            peer = "203.0.113.20",
-            vkHashes = "H".repeat(20),
-            secondaryVkHash = "",
-            workersPerHash = 30,
-            protocol = "udp",
-            listenPort = 0,
-        )
+        // as the «Туннель» form writes them, a field at a time
+        store.saveFormAddress("203.0.113.20", null, store.profileEpoch.first())
+        store.saveVkHashesOnly("H".repeat(20))
+        store.saveWorkersPerHash(30)
         store.saveConnectionPassword("secret-pass")
         store.saveTurnTransport(CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS)
         store.saveDpiSplit(DpiSplitMode.MEDIUM)

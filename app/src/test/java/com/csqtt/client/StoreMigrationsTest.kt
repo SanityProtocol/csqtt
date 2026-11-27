@@ -43,9 +43,10 @@ class StoreMigrationsTest {
     @Test
     fun `a participant's own hashes lose the link's copies, so a taken-out owner hash stays out`() {
         val (before, after) = migrate(Store253Snapshots.participant)
-        assertEquals(setOf("vk_hashes_3", "workers_per_hash_3", "store_schema_version"), changedKeys(before, after))
+        // its count of five stays five: 2.5.3 ran fewer than ten as five, and five is a stop of the slider again
+        assertEquals(setOf("vk_hashes_3", "store_schema_version"), changedKeys(before, after))
         assertEquals(Store253Snapshots.ownHash, after["vk_hashes_3"])
-        assertEquals(10, after["workers_per_hash_3"])
+        assertEquals(5, after["workers_per_hash_3"])
         // what the tunnel then uses: the owner's B (A was taken out), then the participant's C
         val link = com.csqtt.client.ui.legacy.utils.parseCsqttLink(Store253Snapshots.participantLink)!!
         assertEquals(
@@ -75,7 +76,7 @@ class StoreMigrationsTest {
         noHashes[stringPreferencesKey("csqtt_link_3")] = "csqtt://connect?v=2&host=198.51.100.9&peer=46000&password=p"
         val before = asMap(noHashes)
         SettingsStore.migrateStore(noHashes)
-        assertEquals(setOf("workers_per_hash_3", "store_schema_version"), changedKeys(before, asMap(noHashes)))
+        assertEquals(setOf("store_schema_version"), changedKeys(before, asMap(noHashes)))
     }
 
     @Test
@@ -125,8 +126,9 @@ class StoreMigrationsTest {
 
     @Test
     fun `workers become what the core runs`() {
-        // above 70 only «Экстра потоки» ran: with the switch off, or never touched, such a count ran as 70 (P3 B3, step 9)
-        for ((stored, runs) in listOf(0 to 10, 5 to 10, 18 to 10, 20 to 20, 70 to 70, 75 to 70, 100 to 70, 250 to 70)) {
+        // 2.5.3 ran fewer than ten as five and the rest in whole tens: 18, its default, as 10. Above 70 only «Экстра
+        // потоки» ran: with the switch off, or never touched, such a count ran as 70 (P3 B3, step 9)
+        for ((stored, runs) in listOf(0 to 5, 5 to 5, 9 to 5, 10 to 10, 18 to 10, 20 to 20, 70 to 70, 75 to 70, 100 to 70, 250 to 70)) {
             val prefs = load("""{"ints": {"workers_per_hash_9": $stored}, "booleans": {"default_role_decided": true}}""")
             SettingsStore.migrateStore(prefs)
             assertEquals("stored $stored", runs, prefs[intPreferencesKey("workers_per_hash_9")])

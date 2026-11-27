@@ -17,10 +17,14 @@ internal class WorkerRecoveryPolicy(
         return false
     }
 
+    /**
+     * Arms the recovery once the run has had its first whole group of streams up — or all of [runCount], for a run of
+     * fewer than a group (the slider's first stop is 5; a server may allow as few as 3).
+     */
     @Synchronized
-    fun armAtZero(): Int? {
+    fun armAtZero(runCount: Int = minimumPeak): Int? {
         if (armedTarget != 0) return armedTarget
-        if (peak < minimumPeak) return null
+        if (peak < minOf(minimumPeak, runCount.coerceAtLeast(1))) return null
         armedTarget = peak
         return armedTarget
     }

@@ -23,10 +23,11 @@ class RoleSwitchesMigrationTest {
 
     /**
      * What these steps change. A later step (9, P3 B3) gives a profile that never held a count of streams the 10 it
-     * ran: that key is its own test's (StoreMigrationsTest), not theirs.
+     * ran: that one write — a count that was absent and is 10 — is its own test's (StoreMigrationsTest), not theirs.
+     * Any other change of a count is still theirs to notice.
      */
     private fun changed(before: Map<String, Any>, after: Map<String, Any>): Set<String> =
-        changedKeys(before, after).filterNot { it.startsWith("workers_per_hash") }.toSet()
+        changedKeys(before, after).filterNot { it.startsWith("workers_per_hash") && before[it] == null && after[it] == 10 }.toSet()
 
     private fun migrate(prefs: MutablePreferences): Pair<Map<String, Any>, Map<String, Any>> {
         val before = asMap(prefs)

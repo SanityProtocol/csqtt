@@ -84,15 +84,31 @@ internal fun TurnSubnetsSheet(profileArg: String, close: () -> Unit) {
     val pings = remember { mutableStateMapOf<String, Int>() }
     var pinging by remember { mutableStateOf<String?>(null) }
 
+    val count = limitNow?.toIntOrNull()
+    // a stored id may be an older name of a subnet
+    val chosenNow = subnetNow?.let { id -> TurnSubnetRegistry.getSubnet(id)?.takeIf { count == null || it.count >= count } }
+    // «Сохранить» stores the choice, and so does closing the sheet any other way than «Отмена», as «Хеши звонков VK»
+    // does: a choice made is not lost to a swipe. Nothing was picked, nothing is written. On the app's scope: the
+    // choice is stored even as the sheet goes
+    val save = {
+        val limit = limitNow
+        if (limit != null && (pickedSubnet != null || pickedLimit != null)) {
+            val subnet = chosenNow?.id.orEmpty()
+            TunnelManager.scope.launch { store.saveSelectedTurnSubnet(subnet, ipLimit = limit) }
+        }
+    }
+
     Sheet(
-        onDismiss = close, title = stringResource(R.string.turn_title), subtitle = stringResource(R.string.turn_sub),
+        onDismiss = {
+            save()
+            close()
+        },
+        title = stringResource(R.string.turn_title), subtitle = stringResource(R.string.turn_sub),
         messages = LocalOwners.current.messages,
     ) {
-        val subnet = subnetNow ?: return@Sheet
+        if (subnetNow == null) return@Sheet
         val limit = limitNow ?: return@Sheet
-        val count = limit.toIntOrNull()
-        // a stored id may be an older name of a subnet
-        val chosen = TurnSubnetRegistry.getSubnet(subnet)?.takeIf { count == null || it.count >= count }
+        val chosen = chosenNow
         Card(flush = true, modifier = Modifier.selectableGroup()) {
             Cell(
                 title = stringResource(R.string.turn_all), sub = stringResource(R.string.turn_all_sub), selected = chosen == null,
@@ -151,8 +167,7 @@ internal fun TurnSubnetsSheet(profileArg: String, close: () -> Unit) {
             Btn(
                 stringResource(R.string.action_save),
                 {
-                    // on the app's scope: the choice is stored even as the sheet goes
-                    TunnelManager.scope.launch { store.saveSelectedTurnSubnet(chosen?.id.orEmpty(), ipLimit = limit) }
+                    save()
                     close()
                 },
                 kind = BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp),
