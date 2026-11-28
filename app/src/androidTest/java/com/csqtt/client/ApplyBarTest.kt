@@ -236,6 +236,57 @@ class ApplyBarTest {
         }
     }
 
+    /**
+     * Each control of «Туннель» whose value the running tunnel keeps says what the tunnel uses once another is stored
+     * (the review's list of rows no test held): a value is shown, a secret is named, and nothing is said of a row that
+     * was not changed. Put back, every line goes, and the bar with the last of them.
+     */
+    @Test
+    fun everyChangedRowSaysWhatTheTunnelUses() {
+        fun count(text: String): Int = compose.onAllNodes(hasText(text)).fetchSemanticsNodes().size
+        ActivityScenario.launch(MainActivity::class.java).use {
+            openMore()
+            ShellTestKit.tunnelOn(SLOT)
+            compose.waitForIdle()
+            assertFalse(shown("Сейчас", substring = true))
+            val port = runBlocking { slot.serverPeerPort.first() }
+            val epoch = runBlocking { store.profileEpoch.first() }
+            // as each control stores its value
+            runBlocking {
+                slot.saveFormAddress("198.51.100.9", 47012, epoch)
+                slot.saveFormPassword("pw-other", epoch)
+                slot.saveVkHashesOnly("H".repeat(20) + "," + "N".repeat(20))
+                slot.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CAPTCHA)
+                slot.saveSrtpMode(CsqttConstants.SrtpMode.DTLS)
+                slot.saveFingerprint("chrome")
+                slot.saveSelectedTurnSubnet(TurnSubnetRegistry.subnets.first().id, ipLimit = "3")
+            }
+            val lines = listOf(
+                "Сейчас: 203.0.113.1", "Сейчас: $port", "Сейчас: прежний пароль", "Сейчас: прежние хеши", "Сейчас: Firefox",
+                "Сейчас: Все подсети · все IP",
+            )
+            for (line in lines) compose.waitUntil(5_000) { shown(line) }
+            // the creds mode and SRTP were both «Авто»: a line under each
+            compose.waitUntil(5_000) { count("Сейчас: Авто") == 2 }
+            assertEquals(1, bars())
+            // the transport and the streams were not touched: nothing is said of them
+            assertFalse(shown("Сейчас: UDP"))
+            assertFalse(shown("Сейчас: 20"))
+
+            // put back, control by control: the lines go, and the bar with the last
+            runBlocking {
+                slot.saveFormAddress("203.0.113.1", port, epoch)
+                slot.saveFormPassword("pw-run", epoch)
+                slot.saveVkHashesOnly("H".repeat(20))
+                slot.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CALLS)
+                slot.saveSrtpMode(CsqttConstants.SrtpMode.AUTO)
+                slot.saveFingerprint("firefox")
+                slot.saveSelectedTurnSubnet("", ipLimit = "")
+            }
+            compose.waitUntil(5_000) { bars() == 0 && !shown("Сейчас", substring = true) }
+        }
+    }
+
     /** The bar is for a run that is on: while the tunnel stops, or waits on a Wi-Fi it is paused for, nothing is offered. */
     @Test
     fun theBarIsNotOfferedWhileTheTunnelStopsOrIsPaused() {
