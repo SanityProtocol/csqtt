@@ -126,7 +126,7 @@ class RiskDialogSurvivesTest {
             compose.waitUntil(5_000) { transport() == CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS }
             assertFalse(shown(WARNING))
             // and its DPI split says what the picked level does
-            compose.waitUntil(5_000) { shown("Обход DPI (Gooby)") }
+            compose.waitUntil(5_000) { shown("Обход DPI") }
             assertTrue(shown("Выключено: начало соединения отправляется как есть."))
             // each level in its own words, and what it costs
             for ((level, does, costs) in listOf(
