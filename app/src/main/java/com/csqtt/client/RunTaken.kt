@@ -5,10 +5,15 @@ import android.content.Intent
 /*
  * Card p3-apply-bar (the operator, 2026-11-28: «Bar with «Переподключить»», then «That bar - for every change that
  * require a reconnect»). A run takes its settings when it starts and keeps them: the core's command line is made once,
- * and every restart the run makes itself starts from the same values (RunKeeps). So a setting changed while the tunnel
+ * and the restarts the run makes itself start from the same values (RunKeeps). So a setting changed while the tunnel
  * is on is for the next connection — and a control that changes and shows nothing is read as applied. For the screens
  * to say so at the moment of the change, whichever screen made it, a run keeps what its start read of the user's
  * stored values (RunRead), and what is stored now is compared with it (RunPending).
+ *
+ * The one run that does not keep them all: a run on an old link's own VK token. Its call recovery reads the link, the
+ * stored hash mode and the stream count again (RunKeeps.recoveryBasis, TunnelService.recoverUnavailableVkCall), and
+ * the record does not follow it: after such a recovery the bar can still stand for a value the recovery has applied,
+ * until the next reconnect. No link is issued with a token any more.
  *
  * What the app or the server writes into a running profile is no change of the user's and never counts: the hashes the
  * server sends and what a hash check found are not compared at all; a token VK refused is told from a picked one
@@ -56,19 +61,17 @@ internal data class RunRead(
     /**
      * The record after a subscription's refresh rewrote the node the tunnel is on ([before], [now]: the profile as the
      * store held it before the refresh and holds it after). What the refresh wrote is the subscription's doing, not a
-     * change the user made, so the record takes it — the link as served, the streams the node's power allows, and for
-     * a slot of an older build made a link's, the whole connection. Value by value, and only where nothing of the
-     * user's waited: one the user had changed (stored before the refresh, and not what the run took) still waits
-     * after it, whatever the refresh made of it. A value the refresh left alone is the same before and after.
+     * change the user made, so the record takes it: the connection — the link as served, and for a slot of an older
+     * build made a link's, all of it — and the streams the node's power allows; a refresh writes nothing else a run
+     * keeps (SettingsStore.writeSubscriptionNode). Value by value, and only where nothing of the user's waited: one
+     * the user had changed (stored before the refresh, and not what the run took) still waits after it, whatever the
+     * refresh made of it.
      */
     fun following(before: RunRead, now: RunRead): RunRead {
         fun <T> moved(mine: T, was: T, becomes: T): T = if (mine == was) becomes else mine
         val a = source
         val b = before.source
         val c = now.source
-        val s = settings
-        val t = before.settings
-        val u = now.settings
         return copy(
             source = a.copy(
                 linkMode = moved(a.linkMode, b.linkMode, c.linkMode),
@@ -78,27 +81,10 @@ internal data class RunRead(
                 link = moved(a.link, b.link, c.link),
                 ownHashes = moved(a.ownHashes, b.ownHashes, c.ownHashes),
                 removedOwner = moved(a.removedOwner, b.removedOwner, c.removedOwner),
-                acceptServerHashes = moved(a.acceptServerHashes, b.acceptServerHashes, c.acceptServerHashes),
             ),
-            settings = s.copy(
-                secondaryVkHash = moved(s.secondaryVkHash, t.secondaryVkHash, u.secondaryVkHash),
-                workersPerHash = moved(s.workersPerHash, t.workersPerHash, u.workersPerHash),
-                sni = moved(s.sni, t.sni, u.sni),
-                protocol = moved(s.protocol, t.protocol, u.protocol),
-                vkAuthMode = moved(s.vkAuthMode, t.vkAuthMode, u.vkAuthMode),
-                captchaMode = moved(s.captchaMode, t.captchaMode, u.captchaMode),
-                captchaSolveMethod = moved(s.captchaSolveMethod, t.captchaSolveMethod, u.captchaSolveMethod),
-                fingerprint = moved(s.fingerprint, t.fingerprint, u.fingerprint),
-                clientIds = moved(s.clientIds, t.clientIds, u.clientIds),
-                obfsMode = moved(s.obfsMode, t.obfsMode, u.obfsMode),
-                turnTransport = moved(s.turnTransport, t.turnTransport, u.turnTransport),
-                dpiSplit = moved(s.dpiSplit, t.dpiSplit, u.dpiSplit),
-                srtpMode = moved(s.srtpMode, t.srtpMode, u.srtpMode),
-                customTurnIps = moved(s.customTurnIps, t.customTurnIps, u.customTurnIps),
+            settings = settings.copy(
+                workersPerHash = moved(settings.workersPerHash, before.settings.workersPerHash, now.settings.workersPerHash),
             ),
-            hashMode = moved(hashMode, before.hashMode, now.hashMode),
-            turnSubnet = moved(turnSubnet, before.turnSubnet, now.turnSubnet),
-            turnLimit = moved(turnLimit, before.turnLimit, now.turnLimit),
         )
     }
 }

@@ -80,6 +80,7 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
     val colors = Csq.colors
     val context = LocalContext.current.applicationContext
     val store = rememberProfileStore(profile)
+    val drafts = LocalOwners.current.drafts
     val stored by store.vkHashes.collectAsStateWithLifecycle(initialValue = null)
     val linkMode by store.csqttLinkMode.collectAsStateWithLifecycle(initialValue = false)
     val link by store.csqttLink.collectAsStateWithLifecycle(initialValue = "")
@@ -128,12 +129,14 @@ internal fun HashesSheet(profileArg: String, close: () -> Unit) {
         if (fields.isNotEmpty()) {
             // not those a check is running for: it has dropped their old verdicts, and its own are not to follow them
             val gone = forgotten.toSet() - rechecking.toSet()
-            TunnelManager.scope.launch {
+            drafts.write(TunnelManager.scope) {
                 store.saveVkHashesOnly(hashesToStore(fields.toList()))
                 store.forgetVkHashCheckResults(gone)
             }
         }
     }
+    // «Переподключить» on this sheet's foot takes what the fields hold, as «Сохранить» would
+    HoldDraft(save)
     val edit = { index: Int, raw: String ->
         val next = stripVkUrlStatic(raw.filterNot(Char::isWhitespace))
         val previous = fields[index].trim()

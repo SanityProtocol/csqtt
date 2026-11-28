@@ -70,6 +70,7 @@ internal fun TurnSubnetsSheet(profileArg: String, close: () -> Unit) {
     }
     val colors = Csq.colors
     val store = rememberProfileStore(profile)
+    val drafts = LocalOwners.current.drafts
     val scope = rememberCoroutineScope()
     // null until picked: the sheet shows what is stored
     val storedSubnet by store.selectedTurnSubnet.collectAsStateWithLifecycle(initialValue = null)
@@ -95,9 +96,11 @@ internal fun TurnSubnetsSheet(profileArg: String, close: () -> Unit) {
         val limit = limitNow
         if (limit != null && (pickedSubnet != null || pickedLimit != null)) {
             val subnet = chosenNow?.id.orEmpty()
-            TunnelManager.scope.launch { store.saveSelectedTurnSubnet(subnet, ipLimit = limit) }
+            drafts.write(TunnelManager.scope) { store.saveSelectedTurnSubnet(subnet, ipLimit = limit) }
         }
     }
+    // «Переподключить» on this sheet's foot takes the choice made here, as «Сохранить» would
+    HoldDraft(save)
 
     Sheet(
         onDismiss = {

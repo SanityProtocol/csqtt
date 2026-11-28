@@ -1,9 +1,14 @@
 package com.csqtt.client
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 
 /**
  * What outlives the screens (APP-PLAN §4.2 rules 8 and 9), made once with the process: work the user started runs in an
@@ -14,6 +19,44 @@ internal class AppOwners {
     val questions = Questions()
     val messages = Messages()
     val refusals = Refusals()
+    val drafts = Drafts()
+}
+
+/**
+ * What a screen holds and has not stored yet: a field of the tunnel form being typed (stored when it is left), a
+ * sheet's draft (stored when it closes). «Переподключить» reads the store for the user, so it first asks every holder
+ * to store what it has and waits for those writes ([storeAll]): a tap right after typing — the keyboard put away, the
+ * field still focused — reconnected with what the store held, and the typed value came with the field's next leaving,
+ * as one more change to apply (card p3-apply-bar, the review's F1).
+ */
+internal class Drafts {
+    // the main thread's alone: holders come and go with what is composed
+    private val holders = LinkedHashMap<Any, () -> Unit>()
+    private val writes = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Job, Boolean>())
+
+    /** [commit] stores what its holder has, as it does when the holder is left; held until [release] of the same [key]. */
+    fun hold(key: Any, commit: () -> Unit) {
+        holders[key] = commit
+    }
+
+    fun release(key: Any) {
+        holders.remove(key)
+    }
+
+    /** A draft's write, on [scope] (the app's: it outlives the screen): [storeAll] waits for the ones under way. */
+    fun write(scope: CoroutineScope, block: suspend () -> Unit): Job {
+        val job = scope.launch(start = CoroutineStart.LAZY) { block() }
+        writes += job
+        job.invokeOnCompletion { writes -= job }
+        job.start()
+        return job
+    }
+
+    /** Every holder stores what it has, and the store has taken it — and every draft's write begun before — on return. */
+    suspend fun storeAll() {
+        holders.values.toList().forEach { it() }
+        writes.toList().joinAll()
+    }
 }
 
 /** A profile's settings refused something asked of them: «Туннель» marks what [profile]'s form lacks. */

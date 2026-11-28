@@ -174,6 +174,9 @@ class RunPendingTest {
     fun `«Авто ВК» stored makes the account count whatever the hash mode says`() {
         val run = taken(read(settings = settings(authMode = autoJs), hashMode = js))
         assertEquals(setOf(RunKey.ACCOUNT), pending(run, read(settings = settings(authMode = autoJs), hashMode = js), nowAccount = accountB))
+        // the two modes stored apart (an older store, a config file): the creds mode alone says an account is used
+        val apart = taken(read(settings = settings(authMode = autoJs), hashMode = manual))
+        assertEquals(setOf(RunKey.ACCOUNT), pending(apart, read(settings = settings(authMode = autoJs), hashMode = manual), nowAccount = accountB))
     }
 
     // ---- what the app writes itself
@@ -229,7 +232,7 @@ class RunPendingTest {
     fun `a slot of an older build made a link's by its refresh raises no bar`() {
         // the tunnel is on a subscription's node stored as an own server (2.5.3); its next refresh writes the link it
         // came from in the place of the address, the port, the password and the node's hashes
-        val slot = read(own.copy(ownHashes = listOf("node-hash")), settings(streams = 20, dpi = DpiSplitMode.OFF))
+        val slot = read(own.copy(ownHashes = listOf("node-hash"), removedOwner = setOf("left-over")), settings(streams = 20, dpi = DpiSplitMode.OFF))
         val asLink = read(
             SourceRead(linkMode = true, link = "csqtt://connect?v=2&host=203.0.113.5&hashes=node-hash"), settings(streams = 20, dpi = DpiSplitMode.OFF),
         )

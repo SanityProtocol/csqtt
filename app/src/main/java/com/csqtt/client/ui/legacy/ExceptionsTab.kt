@@ -82,6 +82,7 @@ import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.VpnPlan
+import com.csqtt.client.VpnSettings
 import androidx.compose.ui.draw.alpha
 import androidx.compose.runtime.produceState
 import com.csqtt.client.RoutingEntries.parseDomainsFromText
@@ -100,7 +101,6 @@ import com.csqtt.client.ui.legacy.design.CsqttSpacing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1362,17 +1362,26 @@ fun ExceptionsTab(
                 parseIpsFromText(currentIpText)
             }
 
+            // The rules as the dialog opened on them: what the running interface was built from. «Очистить» stores
+            // at once, so at the close the store may already hold what the dialog leaves — the comparison is with these
+            val openedWhite = rememberSaveable(showIpsDialog) { ipIsWhitelist }
+            val openedBlack = rememberSaveable(showIpsDialog) { directIpsBlackStr }
+
             val saveAndCloseIps = {
                 val formattedBlack = parseIpsFromText(ipInputTextBlack).joinToString(",")
                 val formattedWhite = parseIpsFromText(ipInputTextWhite).joinToString(",")
+                // the core takes both lists by the routing observer's push; the VPN interface leaves the black
+                // list's addresses out of the tunnel (Android 13+), so a running one is made again when they changed,
+                // as the apps' dialog does at its close — it kept the old routes until a reconnect (card p3-apply-bar)
+                val routesChanged = VpnPlan.settingsDiffer(
+                    VpnSettings(ipsWhitelist = openedWhite, ips = openedBlack),
+                    VpnSettings(ipsWhitelist = ipIsWhiteMode, ips = formattedBlack),
+                    Build.VERSION.SDK_INT,
+                )
                 appPersistenceScope.launch {
-                    // the core takes both lists by the routing observer's push; the VPN interface leaves the black
-                    // list's addresses out of the tunnel (Android 13+), so a running one is made again when they
-                    // changed, as the apps' dialog does at its close — it kept the old routes until a reconnect
-                    // (card p3-apply-bar). Stored first: the service reads the store
-                    val before = settingsStore.vpnSettings.first()
+                    // stored first: the service reads the store
                     settingsStore.saveIpRules(ipIsWhiteMode, formattedBlack, formattedWhite)
-                    if (VpnPlan.settingsDiffer(before, settingsStore.vpnSettings.first(), Build.VERSION.SDK_INT)) reloadIfRunsHere()
+                    if (routesChanged) reloadIfRunsHere()
                 }
                 showIpsDialog = false
             }

@@ -1,6 +1,7 @@
 package com.csqtt.client.ui.shell
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
@@ -51,6 +52,12 @@ import com.csqtt.client.ui.home.HomeMotion
  */
 internal val LocalRun = compositionLocalOf<RunView?> { null }
 
+/**
+ * Whether the run was read yet: false for the first moments of a screen, before the store has answered. [LocalRun] is
+ * null then and also with no run, and what is drawn of a run must not take the one for the other.
+ */
+internal val LocalRunKnown = compositionLocalOf { false }
+
 /** What a tap on the bar's button does; the shell gives it, a test its own. */
 internal val LocalReconnect = compositionLocalOf<() -> Unit> { {} }
 
@@ -62,18 +69,30 @@ internal val LocalReconnect = compositionLocalOf<() -> Unit> { {} }
  * or the value is put back. After the tap it reads «Переподключение…» until the next connection takes over.
  *
  * Its room opens and closes as Home's lines do ([HomeMotion]): it changes the room Home's card is centred in. Where
- * Home does not move — a phone low on memory — it is there or not, at once.
+ * Home does not move — a phone low on memory — it is there or not, at once. And so it is the first time it is drawn,
+ * as Home's first frames are: a bar that waits when the app is opened, or when a sheet opens over it, is there with no
+ * motion; only a change seen on screen moves.
  */
 @Composable
 internal fun ApplyBar(modifier: Modifier = Modifier, sideInsets: Boolean = false) {
+    // nothing before the run was read once: «no run» and «not read yet» look the same, and the second is not a state to draw
+    if (!LocalRunKnown.current) return
     val run = LocalRun.current
     val shown = run?.offered == true
-    val busy = run?.reconnecting == true
+    // The wording the bar had while it was shown is the one it leaves with: its content is still composed while its
+    // room closes, and a reconnect that has just been made is no offer to make it. Kept beside the composition, not in
+    // a state: it is read where it is written
+    val wording = remember { BooleanArray(1) }
+    if (run != null && shown) wording[0] = run.reconnecting
+    val busy = wording[0]
     val context = LocalContext.current
     val moves = remember(context) { HomeMotion.wanted(context) }
     if (moves) {
+        // made with what is shown now, so the first drawing is whole; a change after it opens or closes the room
+        val visible = remember { MutableTransitionState(shown) }
+        visible.targetState = shown
         AnimatedVisibility(
-            visible = shown, modifier = modifier,
+            visibleState = visible, modifier = modifier,
             enter = expandVertically(HomeMotion.spec(), expandFrom = Alignment.Top),
             exit = shrinkVertically(HomeMotion.spec(), shrinkTowards = Alignment.Top),
         ) { ApplyBarBody(busy = busy, sideInsets = sideInsets) }

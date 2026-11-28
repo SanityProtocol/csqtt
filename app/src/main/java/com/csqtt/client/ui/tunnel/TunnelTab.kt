@@ -224,6 +224,7 @@ internal fun TunnelTab(
 ) {
     val profile = auth.profile
     val store = rememberProfileStore(profile)
+    val drafts = LocalOwners.current.drafts
     val entries by LocalStore.current.profileEntries.collectAsStateWithLifecycle(initialValue = emptyList())
 
     // null until the store has answered: nothing is drawn, and nothing corrected, from a default (§4.2 rule 3)
@@ -325,8 +326,9 @@ internal fun TunnelTab(
     )
 
     // The modes a link pins are stored as they are in force, so the run reads what the screen shows. Not while the
-    // tunnel is on for this profile: a start corrects them itself, and a correction written under a running tunnel
-    // would read as a change of the user's that waits for a reconnect (card p3-apply-bar)
+    // tunnel is on for this profile: a correction written under a running tunnel would read as a change of the user's
+    // that waits for a reconnect (card p3-apply-bar). Nothing is lost by waiting: a run takes the modes in force from
+    // the link whatever is stored, and this runs again once the tunnel is off for the profile
     LaunchedEffect(linkMode, ownerHashes.isNotEmpty(), linkTokenActive, savedAuthMode, savedHashMode, run != null) {
         if (!linkMode || run != null) return@LaunchedEffect
         when {
@@ -427,7 +429,7 @@ internal fun TunnelTab(
                                     portDraft = null
                                     portBase = null
                                 }
-                                TunnelManager.scope.launch { store.saveFormAddress(apart?.first ?: text, apart?.second, epoch) }
+                                drafts.write(TunnelManager.scope) { store.saveFormAddress(apart?.first ?: text, apart?.second, epoch) }
                             }
                         }
                     },
@@ -445,7 +447,7 @@ internal fun TunnelTab(
                             }
                             typed != null && typed in 1..65535 -> {
                                 if (leaving) left[portNote] = text
-                                TunnelManager.scope.launch { store.saveFormPort(typed, epoch) }
+                                drafts.write(TunnelManager.scope) { store.saveFormPort(typed, epoch) }
                             }
                         }
                     },
@@ -462,10 +464,15 @@ internal fun TunnelTab(
  * tunnel's next restart would connect with. On the app's scope, so the last field typed before a tab change is stored.
  * [commit] is told whether it is the screen that goes (the app left, the tab or the screen gone) and not the focus
  * alone: a draft written then is written for good, and is not the field's when the screen is back ([draftLeft]).
+ *
+ * And when the app asks for it ([HoldDraft]): «Переподключить» reads the store, and a field can still be focused then —
+ * the keyboard put away, the bar tapped. The store write itself goes through [Drafts.write], so the asker can wait for
+ * it.
  */
 @Composable
 internal fun Modifier.commitWhenLeft(commit: (leaving: Boolean) -> Unit): Modifier {
     val run by rememberUpdatedState(commit)
+    HoldDraft { run(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) run(true) }
@@ -476,6 +483,22 @@ internal fun Modifier.commitWhenLeft(commit: (leaving: Boolean) -> Unit): Modifi
         }
     }
     return onFocusChanged { if (!it.hasFocus) run(false) }
+}
+
+/**
+ * While this is composed, [commit] is what stores its holder's draft when the app asks every holder to
+ * ([Drafts.storeAll]): a field that commits when left, a sheet that stores when closed. [commit] writes through
+ * [Drafts.write].
+ */
+@Composable
+internal fun HoldDraft(commit: () -> Unit) {
+    val drafts = LocalOwners.current.drafts
+    val now by rememberUpdatedState(commit)
+    DisposableEffect(drafts) {
+        val key = Any()
+        drafts.hold(key) { now() }
+        onDispose { drafts.release(key) }
+    }
 }
 
 /** The profile the tab is on, and the way to another (the canvas's context row): it opens «Профили». */
@@ -545,6 +568,8 @@ private fun OwnCard(
     commitPort: (leaving: Boolean) -> Unit,
 ) {
     val focus = LocalFocusManager.current
+    val drafts = LocalOwners.current.drafts
+    val kindLink = stringResource(R.string.now_kind_link)
     val key = passwordDraftKey(view.profile, view.epoch)
     val store = view.store
     val epoch = view.epoch
@@ -562,7 +587,8 @@ private fun OwnCard(
                     null -> null
                 },
                 keyboard = done.copy(keyboardType = KeyboardType.Uri), onDone = { focus.clearFocus() },
-                now = view.now(RunKey.ADDRESS) { it.address },
+                // a run that is a link's has no address to say (a config import made the profile an own server's)
+                now = view.now(RunKey.ADDRESS) { if (it.linkMode) kindLink else it.address },
             )
             Field(
                 stringResource(R.string.tunnel_port), port, onPort,
@@ -583,7 +609,7 @@ private fun OwnCard(
                     // And a draft that no longer stands is dropped, not written (see the address)
                     typed.isEmpty() || !draftStands(typed, SecretDrafts.typed(draftBaseKey(key)), storedPassword) -> SecretDrafts.clear(key)
                     isValidTunnelPassword(typed) -> {
-                        TunnelManager.scope.launch { store.saveFormPassword(typed, epoch) }
+                        drafts.write(TunnelManager.scope) { store.saveFormPassword(typed, epoch) }
                         // written as its screen goes, the draft goes with it (see draftLeft): kept in memory, it stood
                         // again once the store was put back to the password it was typed over, and was written over it
                         if (leaving) SecretDrafts.clear(key)
@@ -623,6 +649,7 @@ private fun LinkCard(
     val focus = LocalFocusManager.current
     val context = LocalContext.current.applicationContext
     val messages = LocalOwners.current.messages
+    val drafts = LocalOwners.current.drafts
     val store = view.store
     val profile = view.profile
     val epoch = view.epoch
@@ -640,7 +667,7 @@ private fun LinkCard(
             !draftStands(typed, SecretDrafts.typed(draftBaseKey(key)), storedLink) -> SecretDrafts.clear(key)
             // M-72: a link is written whole or not at all; an emptied field clears it
             typed.isEmpty() || parseCsqttLink(typed) != null -> {
-                TunnelManager.scope.launch { store.saveFormLink(typed, epoch) }
+                drafts.write(TunnelManager.scope) { store.saveFormLink(typed, epoch) }
                 // written as its screen goes, the draft goes with it (see the password)
                 if (leaving) SecretDrafts.clear(key)
             }
@@ -659,8 +686,13 @@ private fun LinkCard(
             },
             keyboard = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri),
             onDone = { focus.clearFocus() },
-            // a link holds the password: it is named, not shown
-            now = if (view.waits(RunKey.LINK)) stringResource(R.string.now_link) else null,
+            // a link holds the password: it is named, not shown; an own server's run has no link to name (a config
+            // import made the profile a link's)
+            now = when {
+                !view.waits(RunKey.LINK) -> null
+                view.run?.uses?.linkMode == false -> stringResource(R.string.now_kind_own)
+                else -> stringResource(R.string.now_link)
+            },
             trailing = {
                 Row {
                     IconBtn(Icons.clipboard, stringResource(R.string.action_paste), {

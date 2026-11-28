@@ -297,6 +297,15 @@ class VpnSettingsDifferTest {
         // an older Android has no excluded routes: the interface takes nothing from the list, the core routes by it
         assertFalse(differ(edited, sdk = 32))
         assertEquals(plan(base, sdk = 32), plan(edited, sdk = 32))
+        // Android 13 itself is the first that has them
+        assertTrue(differ(edited, sdk = 33))
+        assertNotEquals(plan(base, sdk = 33), plan(edited, sdk = 33))
+    }
+
+    @Test fun anAddressListedTwiceIsOneRoute() {
+        val twice = base.copy(ips = "203.0.113.7,198.51.100.0/24,203.0.113.7")
+        assertFalse(differ(twice))
+        assertEquals(plan(base), plan(twice))
     }
 
     @Test fun theSameAddressesWrittenAnotherWayBuildTheSameInterface() {

@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -149,13 +150,163 @@ class ApplyBarTest {
             assertFalse(shown(ShellTestKit.RECONNECT))
             assertEquals(0, bars())
 
-            // the connection the service made from the store: its record is the store's, so nothing waits
-            ShellTestKit.tunnelOn(SLOT)
+            // The connection the service made from the store takes over, by the step the manager's switch makes (the
+            // kit's run is that step): its record is the store's, so nothing waits. Frame by frame from here: the bar
+            // leaves as «Переподключение…», and in no frame as the offer made again (the review's F2)
+            compose.mainClock.autoAdvance = false
             TunnelManager.switchTarget = null
-            TunnelManager.reconnecting.value = false
-            compose.waitUntil(5_000) { !shown(ShellTestKit.RECONNECTING) && bars() == 0 }
+            ShellTestKit.tunnelOn(SLOT)
+            var gone = false
+            repeat(60) {
+                compose.mainClock.advanceTimeByFrame()
+                // the store's answer is not on the test's clock
+                Thread.sleep(15)
+                assertEquals("the leaving bar offers the reconnect again", 0, bars())
+                if (!shown(ShellTestKit.RECONNECTING)) gone = true
+            }
+            compose.mainClock.autoAdvance = true
+            assertTrue("the bar is still there after the next connection took over", gone)
+            assertFalse("the take-over ends the waiting", TunnelManager.reconnecting.value)
             assertFalse(shown("Сейчас", substring = true))
             assertEquals(1, sent.size)
+        }
+    }
+
+    /**
+     * The review's F1. «Переподключить» reads the store, and a field of the form is stored only when it is left: with
+     * the keyboard put away and the field still holding what was typed, the tap reconnected with the value before it.
+     * What a field holds is stored first, and the reconnect is asked after the store has it.
+     */
+    @Test
+    fun whatAFieldStillHoldsIsStoredBeforeTheReconnectIsAsked() {
+        var portAtSend = -1
+        reconnectSend = { _, intent ->
+            portAtSend = runBlocking { slot.serverPeerPort.first() }
+            sent += intent
+        }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Туннель") }
+            compose.onNodeWithText("Туннель").performClick()
+            compose.waitUntil(10_000) { shown("Порт") }
+            ShellTestKit.tunnelOn(SLOT)
+            // something waits already: the bar is up
+            runBlocking { slot.saveTurnTransport(CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS) }
+            compose.waitUntil(5_000) { bars() == 1 }
+            val before = runBlocking { slot.serverPeerPort.first() }
+
+            // another port typed, and the field not left
+            compose.onNode(hasSetTextAction() and hasText("Порт")).performScrollTo().performTextReplacement("47011")
+            compose.waitForIdle()
+            assertEquals("a field is stored when it is left, not while it is typed", before, runBlocking { slot.serverPeerPort.first() })
+
+            compose.onNodeWithText(ShellTestKit.RECONNECT).performClick()
+            compose.waitUntil(5_000) { sent.size == 1 }
+            assertEquals("the reconnect was asked before the typed port was in the store", 47011, portAtSend)
+        }
+    }
+
+    /** The same on a sheet: its draft is what «Сохранить» would store, and the bar on its foot takes it. */
+    @Test
+    fun whatASheetHoldsIsStoredBeforeTheReconnectAskedFromItsFoot() {
+        val second = "S".repeat(20)
+        var hashesAtSend = ""
+        reconnectSend = { _, intent ->
+            hashesAtSend = runBlocking { slot.vkHashes.first() }
+            sent += intent
+        }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Туннель") }
+            compose.onNodeWithText("Туннель").performClick()
+            compose.waitUntil(10_000) { shown("Хеши звонков VK", substring = true) }
+            ShellTestKit.tunnelOn(SLOT)
+            runBlocking { slot.saveTurnTransport(CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS) }
+            compose.waitUntil(5_000) { bars() == 1 }
+
+            compose.onNodeWithText("Хеши звонков VK", substring = true).performScrollTo().performClick()
+            compose.waitUntil(5_000) { shown("Хеш 2") }
+            compose.onNode(hasSetTextAction() and hasText("Хеш 2")).performScrollTo().performTextReplacement(second)
+            compose.waitForIdle()
+            assertFalse("the sheet stores on «Сохранить», not while it is typed", second in runBlocking { slot.vkHashes.first() })
+
+            // the bar on the sheet's foot: the tabs' own is under the sheet
+            compose.waitUntil(5_000) { bars() == 2 }
+            compose.onAllNodes(hasText(ShellTestKit.RECONNECT)).onLast().performClick()
+            compose.waitUntil(5_000) { sent.size == 1 }
+            assertTrue("the reconnect was asked before the sheet's hash was in the store: $hashesAtSend", second in hashesAtSend)
+        }
+    }
+
+    /** The bar is for a run that is on: while the tunnel stops, or waits on a Wi-Fi it is paused for, nothing is offered. */
+    @Test
+    fun theBarIsNotOfferedWhileTheTunnelStopsOrIsPaused() {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Главная") }
+            ShellTestKit.tunnelOn(SLOT)
+            runBlocking { slot.saveTurnTransport(CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS) }
+            compose.waitUntil(5_000) { bars() == 1 }
+            TunnelManager.stopping.value = true
+            compose.waitUntil(5_000) { bars() == 0 }
+            TunnelManager.stopping.value = false
+            compose.waitUntil(5_000) { bars() == 1 }
+            TunnelManager.autoPausedForWifi.value = true
+            compose.waitUntil(5_000) { bars() == 0 }
+            TunnelManager.autoPausedForWifi.value = false
+            compose.waitUntil(5_000) { bars() == 1 }
+        }
+    }
+
+    /**
+     * The review's F3. A change that waits when the app is opened — made, and the app left and opened again — finds the
+     * bar there, whole in the first frame it is drawn in: only a change seen on screen opens its room. A room that was
+     * opening would show a sliver of the text in that frame.
+     */
+    @Test
+    fun aBarThatWaitsWhenTheAppOpensIsThereWithNoMotion() {
+        ShellTestKit.tunnelOn(SLOT)
+        runBlocking { slot.saveTurnTransport(CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS) }
+        compose.mainClock.autoAdvance = false
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                var height = -1f
+                for (frame in 1..600) {
+                    compose.mainClock.advanceTimeByFrame()
+                    // the store's answers are not on the test's clock
+                    Thread.sleep(15)
+                    val bar = compose.onAllNodes(hasText(ShellTestKit.BAR)).fetchSemanticsNodes()
+                    if (bar.isNotEmpty()) {
+                        height = bar.first().boundsInRoot.height
+                        break
+                    }
+                }
+                assertTrue("the bar never came", height >= 0f)
+                // one line of its text, at the least: the room is not opening
+                val line = 16 * context.resources.displayMetrics.density
+                assertTrue("the bar was opening when it was first drawn: $height px of its text", height >= line)
+            }
+        } finally {
+            compose.mainClock.autoAdvance = true
+        }
+    }
+
+    /**
+     * The review's F6. A config file can make the running profile the other kind: the tunnel then has no value of the
+     * field's own to say — a link's run has no address, an own server's no link — and says which kind it is on.
+     */
+    @Test
+    fun aProfileMadeTheOtherKindSaysWhichKindTheTunnelIsOn() {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Туннель") }
+            compose.onNodeWithText("Туннель").performClick()
+            compose.waitUntil(10_000) { shown("Адрес сервера") }
+            ShellTestKit.tunnelOn(SLOT)
+            // as a config import writes it: the kind and the link, with the tunnel on its own server
+            runBlocking {
+                slot.saveCsqttLinkMode(true)
+                slot.saveFormLink("csqtt://connect?v=2&host=home.example.net&peer=56000&password=pw&hashes=${"E".repeat(20)}", store.profileEpoch.first())
+            }
+            compose.waitUntil(5_000) { shown("Сейчас: свой сервер") }
+            assertFalse("an own server's run has no link to call the one before", shown("Сейчас: прежняя ссылка"))
+            assertEquals(1, bars())
         }
     }
 
@@ -216,14 +367,25 @@ class ApplyBarTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             compose.waitUntil(10_000) { shown("Главная") }
             ShellTestKit.tunnelOn(SLOT)
-            // the address emptied under the running tunnel: a change that waits, and one no start would take
-            runBlocking { slot.saveFormAddress("", null, store.profileEpoch.first()) }
+            // the address emptied under the running tunnel: a change that waits, and one no start would take. And
+            // another profile is the open one by now
+            runBlocking {
+                slot.saveFormAddress("", null, store.profileEpoch.first())
+                store.saveActiveProfile(0)
+            }
             compose.waitUntil(5_000) { bars() == 1 }
+            val logged = LogBook.app.snapshot().size
 
             compose.onNodeWithText(ShellTestKit.RECONNECT).performClick()
             // «Туннель» opens on what the form lacks, and says it is the reconnect that was not made
             compose.waitUntil(5_000) { shown(REFUSED) }
+            assertEquals("the form is the tunnel's own profile's", SLOT, runBlocking { store.activeProfile.first() })
+            compose.waitUntil(5_000) { shown("Укажите адрес сервера") }
             assertTrue(compose.onAllNodes(hasSetTextAction() and hasText("Адрес сервера")).fetchSemanticsNodes().isNotEmpty())
+            assertTrue(
+                "«Логи» say why",
+                LogBook.app.snapshot().drop(logged).any { "Переподключение не начато" in it.message && "адрес" in it.message },
+            )
             assertTrue("the running tunnel is not touched", sent.isEmpty())
             assertFalse(TunnelManager.reconnecting.value)
             assertTrue("the tunnel is still on, and the change still waits", TunnelManager.running.value && bars() == 1)

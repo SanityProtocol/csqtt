@@ -318,14 +318,23 @@ object TunnelManager {
     internal val reconnecting = MutableStateFlow(false)
 
     /**
-     * For the instrumented tests: a run as the manager would hold it, with no core behind it — what its start read and
-     * the parameters made from it; nulls for no run. The screens read nothing else of a run's settings.
+     * A run's record and parameters take the place of whatever was there — a start, a switch — or go with the run
+     * (nulls). A reconnect that was asked for has its run by then, or has none to wait for: the bar's waiting ends
+     * with the same step, so no screen is told «nothing waits» of the new record a moment before «not reconnecting».
      */
-    @androidx.annotation.VisibleForTesting
-    internal fun fakeRun(read: RunRead?, params: TunnelParams?) {
+    private fun installRun(read: RunRead?, params: TunnelParams?) {
         currentRead = read
         currentParams = params
+        reconnecting.value = false
     }
+
+    /**
+     * For the instrumented tests: a run as the manager would hold it, with no core behind it — what its start read and
+     * the parameters made from it; nulls for no run. The same step a start, a switch and a stop make ([installRun]):
+     * the screens read nothing else of a run's settings.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun fakeRun(read: RunRead?, params: TunnelParams?) = installRun(read, params)
     @Volatile
     private var strongAppContext: Context? = null
     @Volatile
@@ -1477,8 +1486,7 @@ object TunnelManager {
                     wrapAuthTimeoutCount = 0
                     crashRestartStreak = 0
                     processStartedAtMs = 0L
-                    currentRead = read
-                    currentParams = params
+                    installRun(read, params)
                     logRunStart(params)
                     strongAppContext = appContext.applicationContext
                     lastContext = WeakReference(appContext)
@@ -1517,7 +1525,12 @@ object TunnelManager {
         stopping.value = false
         activeScope.launch {
             startStopMutex.withLock {
-                if (lifecycleCommand.get() != command) return@withLock
+                if (lifecycleCommand.get() != command) {
+                    // a newer command took this switch's place (the run's own restart, a stop, another switch): the
+                    // reconnect that asked for it is not made by it, and the bar does not wait for it
+                    reconnecting.value = false
+                    return@withLock
+                }
                 val appContext = context.applicationContext
                 val replacing = lifecycleState.isDesiredRunning()
                 ManlCaptchaWebViewManager.cancelCaptcha()
@@ -1535,9 +1548,7 @@ object TunnelManager {
                 processStartedAtMs = 0L
                 // the new connection's record takes the old one's place with its parameters: until here the screens
                 // compared the store with what the old run took
-                currentRead = read
-                currentParams = params
-                reconnecting.value = false
+                installRun(read, params)
                 logRunStart(params)
                 strongAppContext = appContext
                 lastContext = WeakReference(appContext)
@@ -2458,9 +2469,7 @@ object TunnelManager {
         stopping.value = false
         activeWorkers.value = 0
         nativeProcessPid = null
-        currentRead = null
-        currentParams = null
-        reconnecting.value = false
+        installRun(null, null)
         activeSettingsStore = null
         lastAppliedDns = null
         probeState.value = null
@@ -2703,16 +2712,23 @@ object TunnelManager {
 
     /**
      * M-63: a validated import, written at once from the process-wide scope (leaving the screen never cuts it short),
-     * then one VPN reload if the apps changed; the routing observer pushes the domains and IPs.
+     * then one VPN reload if it changed what the interface is built from; the routing observer pushes the domains and
+     * IPs to the core.
      */
     internal fun importRoutingRules(ctx: Context, plan: RoutingImportPlan) {
         val appContext = ctx.applicationContext
         scope.launch {
             // the screen's import edits the profile open in it (run-profile review F1)
             val store = SettingsStore(appContext)
+            val before = store.vpnSettings.first()
             store.applyRoutingImport(plan)
-            // B5g (review F3): the run reads its own profile, so an import into another one leaves the running VPN alone
-            if (plan.apps != null && store.selectedProfileIndex.first() == runTargetProfile()) reloadVpn()
+            // What the interface takes — the apps, and on Android 13+ the black IP list's routes — decides the reload
+            // (card p3-apply-bar, the operator, 2026-11-28: «Fix it now, same way»): it was made for any file with an
+            // apps section, changed or not, and never for one with IP rules alone, whose routes then waited for a
+            // reconnect. B5g (review F3): the run reads its own profile, so an import into another one leaves the
+            // running VPN alone
+            val differs = VpnPlan.settingsDiffer(before, store.vpnSettings.first(), android.os.Build.VERSION.SDK_INT)
+            if (differs && store.selectedProfileIndex.first() == runTargetProfile()) reloadVpn()
         }
     }
 

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.map
  * Nothing here is a secret: a password, a link and a token are compared, never shown.
  */
 internal data class RunUses(
+    /** The run is a link's: it has no address or port of its own to say, and an own server's run has no link. */
+    val linkMode: Boolean,
     val address: String,
     val port: Int,
     val hashMode: String,
@@ -40,6 +42,7 @@ internal data class RunUses(
             val read = taken.read
             val settings = read.settings
             return RunUses(
+                linkMode = read.source.linkMode,
                 address = read.source.address,
                 port = read.source.port,
                 hashMode = read.hashMode,
@@ -83,27 +86,34 @@ internal data class RunView(
     fun waits(profile: Int, key: RunKey): Boolean = profile == this.profile && key in keys
 }
 
-/** What a run that is on or not, with [keys] waiting, shows: [RunView.offered] in one place for its tests. */
+/**
+ * The run as the screens are to see it, now and after every change of the run or of its profile's store; null with no
+ * run. Whether a reconnect is under way is told with the comparison it belongs to: when the next connection takes
+ * over, the screens go from «Переподключение…» with the old record's changes straight to the new record's comparison —
+ * never through the old changes shown as an offer again.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun runViewFlow(context: Context): Flow<RunView?> {
     val app = context.applicationContext
-    val stored = TunnelManager.taken.flatMapLatest { taken ->
-        if (taken == null) {
-            flowOf(null)
-        } else {
-            val store = SettingsStore(app, ProfileScope.Fixed(taken.read.profile))
-            store.runReadNow().map { (now, account) ->
-                val keys = RunPending.of(taken, now, account)
-                // the account's id is looked up only where a screen will say it
-                Triple(taken, keys, if (RunKey.ACCOUNT in keys) store.vkAccountIdOf(taken.account) else "")
+    class Side(val taken: RunTaken, val keys: Set<RunKey>, val accountId: String, val reconnecting: Boolean)
+    val stored = combine(TunnelManager.taken, TunnelManager.reconnecting) { taken, reconnecting -> taken to reconnecting }
+        .flatMapLatest { (taken, reconnecting) ->
+            if (taken == null) {
+                flowOf(null)
+            } else {
+                val store = SettingsStore(app, ProfileScope.Fixed(taken.read.profile))
+                store.runReadNow().map { (now, account) ->
+                    val keys = RunPending.of(taken, now, account)
+                    // the account's id is looked up only where a screen will say it
+                    Side(taken, keys, if (RunKey.ACCOUNT in keys) store.vkAccountIdOf(taken.account) else "", reconnecting)
+                }
             }
         }
-    }
     val runOn = combine(
         TunnelManager.running, TunnelManager.starting, TunnelManager.stopping, TunnelManager.autoPausedForWifi,
     ) { running, starting, stopping, paused -> ProfileSwitch.runIsOn(running, starting, stopping, paused) }
-    return combine(stored, runOn, TunnelManager.reconnecting) { side, on, reconnecting ->
-        side?.let { (taken, keys, accountId) -> RunView(taken.read.profile, keys, RunUses.of(taken, accountId), on, reconnecting) }
+    return combine(stored, runOn) { side, on ->
+        side?.let { RunView(it.taken.read.profile, it.keys, RunUses.of(it.taken, it.accountId), on, it.reconnecting) }
     }.distinctUntilChanged()
 }
 
@@ -122,15 +132,18 @@ internal sealed class ReconnectTap {
 /**
  * «Переподключить» (the operator, 2026-11-28: «Keep the tunnel, show what is missing»): the tap first asks what a start
  * asks of the profile's settings. With a start that would be refused the running tunnel is not touched — a reconnect
- * onto settings that cannot start ends with the tunnel off. [blocker] reads the run's profile; [reconnect] is
- * [reconnectRun].
+ * onto settings that cannot start ends with the tunnel off. The profile asked about is the one the reconnect goes
+ * onto: the run's own, or — with a pick of another profile still under way ([target]) — that one, as [reconnectRun]
+ * keeps it. [blocker] reads that profile; [reconnect] is [reconnectRun].
  */
 internal suspend fun reconnectTap(
     taken: RunTaken?,
+    target: Int?,
     blocker: suspend (profile: Int) -> ConnectionStartBlocker?,
     reconnect: () -> Boolean,
 ): ReconnectTap {
-    val profile = taken?.read?.profile ?: return ReconnectTap.Nothing
+    taken ?: return ReconnectTap.Nothing
+    val profile = target ?: taken.read.profile
     val refused = blocker(profile)
     if (refused != null) return ReconnectTap.Blocked(profile, refused)
     return if (reconnect()) ReconnectTap.Reconnecting else ReconnectTap.Nothing

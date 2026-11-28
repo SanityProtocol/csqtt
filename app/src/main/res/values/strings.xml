@@ -287,6 +287,8 @@
     <string name="now_value">Сейчас: %1$s</string>
     <string name="now_password">прежний пароль</string>
     <string name="now_link">прежняя ссылка</string>
+    <string name="now_kind_link">по ссылке</string>
+    <string name="now_kind_own">свой сервер</string>
     <string name="now_hashes">прежние хеши</string>
     <string name="now_account_none">без аккаунта</string>
     <string name="now_account_old">прежний аккаунт</string>

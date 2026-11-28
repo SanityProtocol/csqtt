@@ -52,4 +52,48 @@ class StartIntentFromStoreTest {
         // a START that carries none (another build's) is read by the service from the store instead
         assertEquals(null, android.content.Intent().runRead())
     }
+
+    /**
+     * The record's other half, each value another than its default: one a START dropped on its way would come out as
+     * the default and pass a comparison of two defaults. The hash mode among them — the service takes it from here now.
+     */
+    @Test
+    fun theStartCarriesALinksRecordValueByValue() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val shared = SettingsStore(context)
+        val slot = 23
+        val store = SettingsStore(context, ProfileScope.Fixed(slot))
+        val owner = "O".repeat(20)
+        val taken = "T".repeat(20)
+        val link = "csqtt://connect?v=2&host=home.example.net&peer=56000&password=pw&hashes=$owner,$taken"
+        val subnet = TurnSubnetRegistry.subnets.first()
+        try {
+            shared.clearProfile(slot)
+            // as an import writes it: the link and the profile's kind in one (the form's own write is for a profile in use)
+            store.saveCsqttParticipantLink(link)
+            store.saveVkHashesOnly("P".repeat(20))
+            store.saveLinkHashesRemoved(setOf(taken))
+            store.saveAcceptServerHashes(false)
+            store.saveVkHashMode(CsqttConstants.VkAutoHash.MODE_AUTO_API)
+            store.saveSelectedTurnSubnet(subnet.id, ipLimit = "3")
+            store.saveSrtpMode(CsqttConstants.SrtpMode.DTLS)
+
+            val intent = buildTunnelStartIntent(context, store, generationId = 78L, sessionSalt = "salt")!!
+            val read = intent.runRead()!!
+            assertEquals(store.runRead(), read)
+            assertEquals(slot, read.profile)
+            assertEquals(true, read.source.linkMode)
+            assertEquals(link, read.source.link)
+            assertEquals(listOf("P".repeat(20)), read.source.ownHashes)
+            assertEquals(setOf(taken), read.source.removedOwner)
+            assertEquals(false, read.source.acceptServerHashes)
+            assertEquals(CsqttConstants.VkAutoHash.MODE_AUTO_API, read.hashMode)
+            assertEquals(subnet.id, read.turnSubnet)
+            assertEquals("3", read.turnLimit)
+            assertEquals(CsqttConstants.SrtpMode.DTLS, read.settings.srtpMode)
+            assertEquals(subnet.ips.take(3).joinToString(","), read.settings.customTurnIps)
+        } finally {
+            shared.deleteProfile(slot)
+        }
+    }
 }

@@ -51,6 +51,7 @@ import com.csqtt.client.LogBook
 import com.csqtt.client.ProfileScope
 import com.csqtt.client.QuestionPlace
 import com.csqtt.client.R
+import com.csqtt.client.RunView
 import com.csqtt.client.ReconnectTap
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
@@ -72,6 +73,7 @@ import com.csqtt.client.ui.design.pluralText
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -134,8 +136,9 @@ internal fun Shell(
     val screens = nav.stack.filter { it.layer == Layer.Screen }
     val screen = screens.lastOrNull()
     val bars = remember { BarInsets() }
-    // card p3-apply-bar: the run as the screens see it, collected once here for the bar, the sheets and the rows
-    val run by remember(context) { runViewFlow(context) }.collectAsStateWithLifecycle(initialValue = null)
+    // card p3-apply-bar: the run as the screens see it, collected once here for the bar, the sheets and the rows; null
+    // until the store has answered, which is not «no run»
+    val seen by remember(context) { runViewFlow(context).map { RunSeen(it) } }.collectAsStateWithLifecycle(initialValue = null)
     val reconnect = remember(context, nav, owners, store) { { applyBarTap(context, nav, owners, store) } }
 
     // a screen that was closed starts fresh the next time it is opened
@@ -152,7 +155,8 @@ internal fun Shell(
     BackHandler(enabled = nav.canGoBack) { nav.back() }
 
     CompositionLocalProvider(
-        LocalRun provides run,
+        LocalRun provides seen?.run,
+        LocalRunKnown provides (seen != null),
         LocalReconnect provides reconnect,
         // a sheet covers the tab bar: the apply bar is on its foot there
         LocalSheetFoot provides SheetFoot,
@@ -183,16 +187,25 @@ internal fun Shell(
 
 private val SheetFoot: @Composable () -> Unit = { ApplyBar() }
 
+/** The run once it was read ([run] null: no run), as against not read yet. */
+private class RunSeen(val run: RunView?)
+
 /**
  * «Переподключить» (card p3-apply-bar): the run reconnects with what its profile holds — unless a start would be
  * refused for it. Then the tunnel is left as it is (the operator, 2026-11-28: «Keep the tunnel, show what is missing»):
  * the run's profile becomes the open one, the sheets over the form close, and «Туннель» marks what its form lacks, as
  * after a start Home refused. On the app's scope: asked for, it is done whatever becomes of the screen.
+ *
+ * What a screen holds and has not stored yet is part of what the user asks to apply: a field still focused, a sheet's
+ * draft. Each is stored first ([Drafts.storeAll]), so the check and the reconnect read it — and a sheet closed by a
+ * refusal has nothing left to lose.
  */
 internal fun applyBarTap(context: Context, nav: NavModel, owners: AppOwners, store: SettingsStore) {
     TunnelManager.scope.launch(Dispatchers.Main) {
+        owners.drafts.storeAll()
         val tap = reconnectTap(
             TunnelManager.taken.value,
+            target = TunnelManager.switchTarget,
             blocker = { profile -> SettingsStore(context, ProfileScope.Fixed(profile)).startBlocker() },
             reconnect = { reconnectRun(context) },
         )
