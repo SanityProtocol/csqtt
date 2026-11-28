@@ -79,7 +79,11 @@ object VkAutoCallsManager {
             CsqttConstants.VkAutoHash.AUTO_CALL_LARGE_DELAY_MS
         }
 
-    /** [tokenStore]: the store [token] was read from — a refused token is cleared there, not in another profile. */
+    /**
+     * [tokenStore]: the store of the profile [token] is for — a refused token is cleared there, not in another profile,
+     * and only if that profile still holds it: a recovery makes its calls with the run's own account, and the profile
+     * may hold another by now (card p3-vk-run-account).
+     */
     suspend fun startAutoCalls(
         context: Context,
         token: String,
@@ -132,7 +136,7 @@ object VkAutoCallsManager {
                         )
                         if (VkApi.isTokenInvalid(result)) {
                             if (clearStoredTokenOnInvalid) {
-                                runCatching { tokenStore.clearVkAccessToken() }
+                                runCatching { tokenStore.dropRefusedVkToken(token) }
                             }
                             log(
                                 "vk_token_invalidated",
@@ -193,7 +197,8 @@ object VkAutoCallsManager {
 
     /**
      * D6 (a1): fills the owner's pool (B5e3b) to one call per 10 of [workers]. Unlike [startAutoCalls], its calls are not
-     * registered here, so a stop does not end them. An invalid token is cleared as there; the live pool still serves.
+     * registered here, so a stop does not end them. An invalid token is cleared as there — from [tokenStore]'s profile
+     * if it still holds that token — and the live pool still serves.
      * [extra] calls are made beyond what the pool holds («Пул звонков VK», P3 B3).
      */
     internal suspend fun fillPool(
@@ -223,7 +228,7 @@ object VkAutoCallsManager {
         }
         fill.errors.forEach { log("vk_auto_call_error", "[ERR] Звонок VK не создан · $it", 90, true) }
         if (fill.tokenInvalid) {
-            runCatching { tokenStore.clearVkAccessToken() }
+            runCatching { tokenStore.dropRefusedVkToken(token) }
             log("vk_token_invalidated", "[ERR] Токен VK недействителен · войдите снова", 95, true)
         }
         if (fill.hashes.isNotEmpty()) {

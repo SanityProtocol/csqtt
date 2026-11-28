@@ -113,7 +113,6 @@ internal fun HomeTab(
     val store = LocalStore.current
     val nav = LocalNav.current
     val context = LocalContext.current
-    val messages = LocalOwners.current.messages
     val state by TunnelManager.connectionState.collectAsStateWithLifecycle()
     val cooldown = rememberWaitAfterStop(state)
     val progress by TunnelManager.startProgress.collectAsStateWithLifecycle()
@@ -141,7 +140,7 @@ internal fun HomeTab(
             openTunnel = { nav.select(Tab.Tunnel) },
             addProfile = { nav.open(Routes.addProfile()) },
             reviewCertificate = { url -> nav.open(Routes.subCert(url)) },
-            vkSignIn = { openVkSignIn(context.applicationContext, nav, messages, auth.profile) },
+            vkSignIn = { openVkSignIn(nav, auth.profile) },
             appSettings = {
                 runCatching {
                     context.startActivity(

@@ -70,6 +70,7 @@ private data class ResolvedVkHashes(
     val value: String,
     val allowWorkerRedistribution: Boolean,
     val mode: String = CsqttConstants.VkAutoHash.MODE_MANUAL,
+    /** The account these calls were made with, or «Авто ВК»'s core makes them with: the run's from here on (TunnelParams). */
     val accessToken: String = "",
     /** B5e4: calls a recovery made, not yet the run's: it takes them where its restart is scheduled. */
     val minted: VkAutoCallsManager.StartResult? = null,
@@ -298,6 +299,7 @@ class TunnelService : Service() {
                             allowHashRedistribution = resolvedHashes.allowWorkerRedistribution,
                             vkHashMode = resolvedHashes.mode,
                             vkAccessToken = resolvedHashes.accessToken,
+                            vkTokenFromLink = linkAccessToken != null,
                             domainRoutingEnabled = routing.hasDomainRules,
                             domainIsWhitelist = routing.domainIsWhitelist,
                             excludeRuZones = routing.useRuZones,
@@ -554,6 +556,7 @@ class TunnelService : Service() {
                     allowHashRedistribution = restoredHashes?.allowWorkerRedistribution == true,
                     vkHashMode = restoredHashes?.mode ?: CsqttConstants.VkAutoHash.MODE_MANUAL,
                     vkAccessToken = restoredHashes?.accessToken.orEmpty(),
+                    vkTokenFromLink = source.tokenFromLink,
                     domainRoutingEnabled = routing.hasDomainRules,
                     domainIsWhitelist = routing.domainIsWhitelist,
                     excludeRuZones = routing.useRuZones,
@@ -615,6 +618,12 @@ class TunnelService : Service() {
         return true
     }
 
+    /**
+     * [accessTokenOverride]: the account the calls are made with instead of the stored one — a link's token
+     * ([tokenFromLink]), or at a recovery the run's own account (RunKeeps.account). VK refusing the run's own, the run
+     * goes on with the account stored by now when that is another (RunKeeps.next; the operator, 2026-11-28), and that
+     * one is the run's from then on: [ResolvedVkHashes.accessToken].
+     */
     private suspend fun resolveAutoHashes(
         store: SettingsStore,
         fallbackHashes: String,
@@ -629,17 +638,36 @@ class TunnelService : Service() {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
                 val token = accessTokenOverride ?: store.vkAccessToken.first()
+                // read once VK has refused the run's own account, and after that one was cleared from where it was
+                // stored: what the profile holds then is another account, or nothing
+                suspend fun nextAccount(): String? = accessTokenOverride?.takeUnless { tokenFromLink }
+                    ?.let { RunKeeps.next(it, store.vkAccessToken.first()) }
+                    ?.also { TunnelManager.updateLog("vk_account_next", RunKeeps.NEXT_LOG, 50, true) }
+                // the account that made this run's calls, for its next recovery
+                var used = token
                 // D6 (a1): an owner whose server this app can reach runs on its pool, which outlives the tunnel (B5e3b)
                 val panel = if (tokenFromLink) null else store.activePoolPanel()
                 if (panel != null) {
                     val fill = VkHashPool.fillLock.withLock {
                         val pool = store.vkPool(panel.vps)
-                        VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash, tokenStore = store)
-                            .also { if (it.hashes != pool) store.saveVkPool(panel.vps, it.hashes) }
+                        var filled = VkAutoCallsManager.fillPool(applicationContext, token, pool, deadHash, workersPerHash, tokenStore = store)
+                        if (filled.tokenInvalid) {
+                            nextAccount()?.let { next ->
+                                used = next
+                                // from what the refused account left, up to the size the pool had (VkHashPool.owed)
+                                filled = VkAutoCallsManager.fillPool(
+                                    applicationContext, next, filled.hashes, null, workersPerHash, tokenStore = store,
+                                    extra = VkHashPool.owed(pool, filled.hashes),
+                                )
+                            }
+                        }
+                        filled.also { if (it.hashes != pool) store.saveVkPool(panel.vps, it.hashes) }
                     }
+                    // an account VK refused is no account: the next recovery reads the stored one
+                    if (fill.tokenInvalid) used = ""
                     // a pool with live hashes serves on without a token (B5e3b); an empty one needs a sign-in to refill
                     if (fill.hashes.isEmpty()) {
-                        return HashResolution.Failed(fill.tokenInvalid || token.isBlank(), fill.errors.lastOrNull())
+                        return HashResolution.Failed(fill.tokenInvalid || used.isBlank(), fill.errors.lastOrNull())
                     }
                     // the server's default follows the pool: once, in the background; a failure waits for the next run
                     serviceScope.launch {
@@ -652,16 +680,23 @@ class TunnelService : Service() {
                             fill.hashes.joinToString(","),
                             fill.hashes.size < VkAutoCallsManager.callCountForWorkers(workersPerHash),
                             mode,
+                            used,
                         ),
                     )
                 }
-                val attempt = VkAutoCallsManager.startAutoCalls(
+                var attempt = VkAutoCallsManager.startAutoCalls(
                     applicationContext,
                     token,
                     workersPerHash,
                     tokenStore = store,
                     clearStoredTokenOnInvalid = !tokenFromLink,
                 )
+                if (attempt.result == null && attempt.tokenInvalid) {
+                    nextAccount()?.let { next ->
+                        used = next
+                        attempt = VkAutoCallsManager.startAutoCalls(applicationContext, next, workersPerHash, tokenStore = store)
+                    }
+                }
                 val result = attempt.result ?: return HashResolution.Failed(attempt.tokenInvalid, attempt.error)
                 if (takeAtOnce) VkAutoCallsManager.take(result)
                 HashResolution.Ok(
@@ -669,6 +704,7 @@ class TunnelService : Service() {
                         result.hashes,
                         result.needsWorkerRedistribution,
                         mode,
+                        used,
                         minted = result.takeUnless { takeAtOnce },
                     ),
                 )
@@ -717,27 +753,42 @@ class TunnelService : Service() {
                 val store = SettingsStore(applicationContext, ProfileScope.Run)
                 // a switch under way replaces this run: its own mint is the one that counts (switch verify 2)
                 if (TunnelManager.switchTarget != null) return@launch
-                val vkHashMode = store.vkHashMode.first()
-                val resolvedSource = resolveConnectionSource(store)
-                val activeIdentity = TunnelManager.runIdentity()
-                TunnelManager.applyRunIdentity(runIdentity)
-                val source = resolvedSource ?: return@launch
+                // card p3-vk-run-account: a recovery makes the run's calls again and changes nothing else of the run. A
+                // run that did not start on a link's token takes nothing from its profile here: its VK account, hash
+                // mode, address, password and stream count are the run's own, and what was stored since — or emptied —
+                // is for the next connection. A run on a link's token reads the link and the stored mode, as it did
+                val keeps = !previous.vkTokenFromLink
+                var activeIdentity = runIdentity
+                val source = if (keeps) {
+                    ConnectionSource(
+                        peer = previous.peer, password = previous.connectionPassword, hashes = "", hashesFromLink = false,
+                        vkAccessToken = "", tokenFromLink = false,
+                    )
+                } else {
+                    val resolved = resolveConnectionSource(store)
+                    activeIdentity = TunnelManager.runIdentity()
+                    TunnelManager.applyRunIdentity(runIdentity)
+                    resolved ?: return@launch
+                }
+                val vkHashMode = if (keeps) previous.vkHashMode else store.vkHashMode.first()
                 if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL && !source.tokenFromLink) {
                     return@launch
                 }
                 val accountAutoJs = previous.vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS ||
                     (source.tokenFromLink && vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS)
                 val workers = WorkerCountPolicy.normalize(
-                    store.workersPerHash.first(),
+                    if (keeps) previous.workersPerHash else store.workersPerHash.first(),
                     maximum = WorkerCountPolicy.maximum(accountAutoJs),
                 )
+                val account = source.vkAccessToken.takeIf { source.tokenFromLink }
+                    ?: RunKeeps.account(previous.vkAccessToken, previous.vkTokenFromLink)
                 val resolution = when {
                     accountAutoJs -> resolveAutoHashes(
                         store,
                         fallbackHashes = "",
                         workersPerHash = workers,
                         forcedMode = CsqttConstants.VkAutoHash.MODE_AUTO_JS,
-                        accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
+                        accessTokenOverride = account,
                         tokenFromLink = source.tokenFromLink,
                         takeAtOnce = false,
                     )
@@ -745,8 +796,9 @@ class TunnelService : Service() {
                         store,
                         fallbackHashes = source.hashes,
                         workersPerHash = workers,
-                        forcedMode = if (source.tokenFromLink) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
-                        accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
+                        // the run's own mode is not read from the store a second time
+                        forcedMode = if (source.tokenFromLink || keeps) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
+                        accessTokenOverride = account,
                         tokenFromLink = source.tokenFromLink,
                         deadHash = hash,
                         takeAtOnce = false,
@@ -824,6 +876,7 @@ class TunnelService : Service() {
                     allowHashRedistribution = resolved.allowWorkerRedistribution,
                     vkHashMode = resolved.mode,
                     vkAccessToken = resolved.accessToken,
+                    vkTokenFromLink = source.tokenFromLink,
                 )
                 launch(Dispatchers.Main) {
                     // B5e4: the run takes the new calls here, and the set it was on ends; a replaced run never takes them
@@ -832,7 +885,9 @@ class TunnelService : Service() {
                         return@launch
                     }
                     VkAutoCallsManager.take(resolved.minted)
-                    TunnelManager.applyRunIdentity(activeIdentity)
+                    // a run that keeps its own never left its identity: nothing to apply, and nothing the server sent
+                    // meanwhile is put back by an older reading
+                    if (!keeps) TunnelManager.applyRunIdentity(activeIdentity)
                     TunnelManager.start(applicationContext, next, isSwitching = true)
                 }
                 restartScheduled = true

@@ -63,6 +63,17 @@ internal object VkAccounts {
         return root.toString()
     }
 
+    /** The archive without the accounts whose encrypted token [holds] names; [json] itself when it names none. */
+    fun removeHolding(json: String, holds: (encryptedToken: String) -> Boolean): String {
+        val root = parse(json)
+        val gone = root.keys().asSequence().toList().filter { id ->
+            root.optJSONObject(id)?.optString("t")?.let { it.isNotEmpty() && holds(it) } == true
+        }
+        if (gone.isEmpty()) return json
+        gone.forEach { root.remove(it) }
+        return root.toString()
+    }
+
     fun ids(json: String): List<String> = parse(json).keys().asSequence().toList().sorted()
 
     /** The archived account's token as stored, encrypted; null when the account is not there. */

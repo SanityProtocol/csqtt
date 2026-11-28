@@ -1,6 +1,5 @@
 package com.csqtt.client.ui.tunnel
 
-import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -697,8 +696,6 @@ private fun LinkCard(
 private fun LinkNoteCard(view: TunnelView) {
     val colors = Csq.colors
     val nav = LocalNav.current
-    val context = LocalContext.current.applicationContext
-    val messages = LocalOwners.current.messages
     val note = linkNote(
         view.ownerHashes, view.removedOwner, view.results, view.linkTokenActive,
         ownReady = view.ownCount > 0 || (view.autoHash && view.vkTokenActive),
@@ -722,7 +719,7 @@ private fun LinkNoteCard(view: TunnelView) {
                 Btn(stringResource(R.string.tunnel_note_own_hashes), { nav.open(Routes.hashes(view.profile)) }, small = true)
                 if (note == LinkNote.NeedsHashes) {
                     Btn(
-                        stringResource(R.string.tunnel_note_sign_in), { openVkSignIn(context, nav, messages, view.profile) },
+                        stringResource(R.string.tunnel_note_sign_in), { openVkSignIn(nav, view.profile) },
                         kind = BtnKind.Tonal, small = true,
                     )
                 }
@@ -831,13 +828,10 @@ internal fun RunNote(modifier: Modifier = Modifier) {
 }
 
 /**
- * Opens the VK sign-in for [profile]. Not while the tunnel runs, starts or stops (M-79); the last session's cookies go
- * first, so that the sign-in can be to another account.
+ * Opens the VK sign-in for [profile]; the last session's cookies go first, so that the sign-in can be to another
+ * account. With the tunnel on too: a run makes its VK calls with the token it started with, never with these cookies
+ * (card p3-vk-run-account), and the account signed in to is stored for the next connection.
  */
-internal fun openVkSignIn(context: Context, nav: NavModel, messages: com.csqtt.client.Messages, profile: Int) {
-    if (vkChangeBlocked()) {
-        messages.show(context.getString(R.string.vk_change_running))
-    } else {
-        com.csqtt.client.VkAuthWebViewManager.clearVkSessionCookies { nav.open(Routes.vkSignIn(profile)) }
-    }
+internal fun openVkSignIn(nav: NavModel, profile: Int) {
+    com.csqtt.client.VkAuthWebViewManager.clearVkSessionCookies { nav.open(Routes.vkSignIn(profile)) }
 }

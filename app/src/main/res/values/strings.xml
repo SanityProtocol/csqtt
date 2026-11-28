@@ -436,8 +436,8 @@
     <string name="vk_token_expiring">Это временный токен: через сутки он перестанет работать. Нужен постоянный</string>
     <string name="vk_token_use">Подключить</string>
     <string name="vk_token_saved">Аккаунт VK подключён</string>
-    <string name="vk_change_stop">Для смены аккаунта остановите туннель.</string>
-    <string name="vk_change_running">Остановите туннель перед сменой аккаунта</string>
+    <string name="vk_account_next">Аккаунт применится при следующем подключении</string>
+    <string name="vk_delete_running">Чтобы удалить аккаунт, остановите туннель</string>
     <string name="vk_account_removed">Аккаунт VK удалён с этого телефона</string>
     <string name="vk_delete_title">Удалить аккаунт VK?</string>
     <string name="vk_delete_text">Его токен будет удалён с этого телефона. Чтобы подключить аккаунт снова, понадобится войти в VK.</string>

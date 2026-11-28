@@ -86,6 +86,48 @@ class HashPoolMintTest {
         assertEquals(listOf(hash('A')), fill.hashes)
     }
 
+    /**
+     * Card p3-vk-run-account: VK refuses the run's own account in the middle of a recovery's fill and the account
+     * stored by now takes the fill over (TunnelService.resolveAutoHashes): the pool ends at the size an unbroken fill
+     * gives it. [workers] at 20 need two calls.
+     */
+    private suspend fun takenOver(pool: List<String>, dead: String?, refused: FakeVk, next: FakeVk, workers: Int = 20): List<String> {
+        fun target(alive: Int, extra: Int) = VkAutoCallsManager.poolTarget(workers, alive, extra)
+        val first = VkHashPool.fill(pool, dead, target(VkHashPool.alive(pool, dead).size, 0), refused::mint)
+        assertTrue(first.tokenInvalid)
+        return VkHashPool.fill(first.hashes, null, target(first.hashes.size, VkHashPool.owed(pool, first.hashes)), next::mint).hashes
+    }
+
+    @Test fun theAccountThatTakesAFillOverReplacesTheDeadCallOfAPoolAboveItsTarget() = runTest {
+        // three calls where two are needed, one of them dead: the pool never shrinks, also across the two accounts
+        val refused = FakeVk(VkApiResult.ApiError(5, "User authorization failed"))
+        val next = FakeVk(ok(hash('Z')), ok(hash('Y')))
+        val pool = listOf(hash('A'), hash('B'), hash('C'))
+        assertEquals(listOf(hash('A'), hash('C'), hash('Z')), takenOver(pool, dead = hash('B'), refused, next))
+        assertEquals("one call was owed, one is made", 1, next.calls)
+        assertEquals(1, VkHashPool.owed(pool, listOf(hash('A'), hash('C'))))
+    }
+
+    @Test fun theAccountThatTakesAFillOverFillsAShortPoolToWhatTheStreamsNeed() = runTest {
+        // the only call died: the streams need two
+        val refused = FakeVk(VkApiResult.ApiError(5, "User authorization failed"))
+        val next = FakeVk(ok(hash('Z')), ok(hash('Y')), ok(hash('X')))
+        assertEquals(listOf(hash('Z'), hash('Y')), takenOver(listOf(hash('A')), dead = hash('A'), refused, next))
+        assertEquals(2, next.calls)
+    }
+
+    @Test fun whatTheRefusedAccountMadeBeforeVkRefusedItIsKept() = runTest {
+        // a token that died between two of its own calls: its first call stays in the pool, the next account adds one
+        val refused = FakeVk(ok(hash('M')), VkApiResult.ApiError(5, "User authorization failed"))
+        val next = FakeVk(ok(hash('Z')), ok(hash('Y')))
+        assertEquals(listOf(hash('M'), hash('Z')), takenOver(listOf(hash('A')), dead = hash('A'), refused, next))
+        assertEquals(1, next.calls)
+        val pool = listOf(hash('A'), hash('B'))
+        assertEquals("nothing is owed to a pool that lost nothing", 0, VkHashPool.owed(pool, pool + hash('M')))
+        // a pool is counted as a fill counts it: without blanks and repeats
+        assertEquals(0, VkHashPool.owed(listOf(hash('A'), " ", hash('A')), listOf(hash('A'))))
+    }
+
     // An owner on profile 2 whose record 2 has the server's IP, web password and secret path (the panel button's fields).
     private fun ownerWithPanel(extra: String = "") = load(
         """{"strings": {"peer_2": "203.0.113.2", "deploy_ip_2": "203.0.113.2", "deploy_web_password_encrypted_2": "e",

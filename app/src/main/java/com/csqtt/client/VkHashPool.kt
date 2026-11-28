@@ -26,6 +26,13 @@ internal object VkHashPool {
         pool.map(String::trim).filter { it.isNotEmpty() && it != dead?.trim() }.distinct()
 
     /**
+     * Card p3-vk-run-account: VK refused the account in the middle of a fill of [pool], and another account takes the
+     * fill over from [kept] — what the first left: the dead call out, what it had made in. The calls the second fill is
+     * asked for beyond [kept] (fillPool's `extra`), so that the pool ends at the size it had: it never shrinks.
+     */
+    fun owed(pool: List<String>, kept: List<String>): Int = (alive(pool, null).size - kept.size).coerceAtLeast(0)
+
+    /**
      * Mints what [pool] lacks of [target] calls after dropping [dead]. A pool larger than the target is kept whole, and
      * its dead hash is replaced too (it never shrinks: every live call serves participants). [mint] makes one call, its
      * retries and pacing included.

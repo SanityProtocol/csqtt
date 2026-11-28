@@ -1249,6 +1249,27 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
 
         /**
+         * VK refused [token] (card p3-vk-run-account): the account that holds it leaves the archive, and [profile] loses
+         * its token when that is still the refused one. A running tunnel makes its calls with the account it started
+         * with, so [profile] may hold another by now — picked, pasted or signed in to under the tunnel: that one stays,
+         * with its account in the archive. An entry that cannot be read is not the refused one.
+         */
+        internal fun dropRefusedVkTokenKeys(prefs: MutablePreferences, profile: Int, token: String, decrypt: (String?) -> String?) {
+            if (token.isBlank()) return
+            fun reads(encrypted: String?): String? = runCatching { decrypt(encrypted) }.getOrNull()
+            prefs[VK_ACCOUNTS]?.let { archive ->
+                val kept = VkAccounts.removeHolding(archive) { reads(it) == token }
+                if (kept != archive) prefs[VK_ACCOUNTS] = kept
+            }
+            val held = resolveStoredSecret(
+                prefs[getProfileKey(VK_ACCESS_TOKEN_ENCRYPTED, profile)], prefs[getProfileKey(VK_ACCESS_TOKEN, profile)], ::reads,
+            ).value
+            if (held == token) {
+                listOf(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_USER_ID).forEach { prefs.remove(getProfileKey(it, profile)) }
+            }
+        }
+
+        /**
          * «Принимать хеши с сервера» (S8's switch, P3 B3). Off, the set the server sent goes at once and none is taken
          * until it is on again: the profile connects with its link's own hashes.
          */
@@ -3294,7 +3315,12 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
         }
     }
 
-    /** «Удалить токен», or a token VK refused: the active profile's token goes, and its account leaves the archive. */
+    /** A token VK refused goes from this store's profile, if it still holds it, and from the archive ([dropRefusedVkTokenKeys]). */
+    suspend fun dropRefusedVkToken(token: String) {
+        dataStore.edit { prefs -> dropRefusedVkTokenKeys(prefs, selectedProfile(prefs), token, secureStore::decrypt) }
+    }
+
+    /** «Удалить» on a token with no account («Аккаунты VK»): the profile's token goes, and its account leaves the archive. */
     suspend fun clearVkAccessToken() {
         dataStore.edit { prefs ->
             val profile = selectedProfile(prefs)

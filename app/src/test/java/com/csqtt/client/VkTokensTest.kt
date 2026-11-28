@@ -100,3 +100,94 @@ class VkAccountArchiveTest {
         assertEquals(enc("token-a"), prefs[stringPreferencesKey("vk_access_token_encrypted_6")])
     }
 }
+
+/**
+ * Card p3-vk-run-account: a token VK refused is cleared where it is still held, and nowhere else. A running tunnel makes
+ * its calls with the account it started with, so its profile may hold another account by the time VK refuses the run's.
+ */
+class RefusedTokenTest {
+    private val archive = stringPreferencesKey("vk_accounts_v1")
+    private fun enc(value: String) = "enc($value)"
+    private fun dec(value: String?) = value?.removePrefix("enc(")?.removeSuffix(")")
+    private fun held(profile: Int) = stringPreferencesKey("vk_access_token_encrypted_$profile")
+    private fun id(profile: Int) = stringPreferencesKey("vk_access_token_user_id_$profile")
+
+    // two accounts signed in on the phone: 12345 holds token-a, 777 holds token-b
+    private fun archived(): androidx.datastore.preferences.core.MutablePreferences = mutablePreferencesOf().also { prefs ->
+        prefs[archive] = VkAccounts.put(VkAccounts.put("", "12345", enc("token-a"), 0L), "777", enc("token-b"), 0L)
+    }
+
+    @Test fun theProfileThatStillHoldsTheRefusedTokenLosesItAndTheAccountLeavesTheArchive() {
+        val prefs = archived()
+        SettingsStore.selectVkAccountKeys(prefs, 4, "777", ::enc, ::dec)
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-b", ::dec)
+        assertNull(prefs[held(4)])
+        assertNull(prefs[id(4)])
+        assertEquals("the other account is as it was", listOf("12345"), VkAccounts.ids(prefs[archive]!!))
+    }
+
+    @Test fun anAccountPickedUnderTheTunnelStaysWhenVkRefusesTheOneTheTunnelRanOn() {
+        // the run started on 777; with the tunnel on the user picked 12345 for the next connection
+        val prefs = archived()
+        SettingsStore.selectVkAccountKeys(prefs, 4, "12345", ::enc, ::dec)
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-b", ::dec)
+        assertEquals("the profile keeps the account it holds by now", enc("token-a"), prefs[held(4)])
+        assertEquals("12345", prefs[id(4)])
+        assertEquals("the refused account is not offered again, the stored one is", listOf("12345"), VkAccounts.ids(prefs[archive]!!))
+    }
+
+    @Test fun aPastedTokenWithNoAccountGoesFromItsProfileAlone() {
+        val prefs = archived()
+        prefs[held(4)] = enc("token-c")
+        val before = prefs[archive]
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-c", ::dec)
+        assertNull(prefs[held(4)])
+        assertEquals(before, prefs[archive])
+    }
+
+    @Test fun aTokenStoredBeforeEncryptionIsTheRefusedOneToo() {
+        val prefs = archived()
+        prefs[stringPreferencesKey("vk_access_token_4")] = "token-b"
+        prefs[id(4)] = "777"
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-b", ::dec)
+        assertNull(prefs[stringPreferencesKey("vk_access_token_4")])
+        assertNull(prefs[id(4)])
+        assertEquals(listOf("12345"), VkAccounts.ids(prefs[archive]!!))
+    }
+
+    @Test fun anotherProfileOnTheSameAccountKeepsTheTokenItHolds() {
+        val prefs = archived()
+        SettingsStore.selectVkAccountKeys(prefs, 4, "777", ::enc, ::dec)
+        SettingsStore.selectVkAccountKeys(prefs, 5, "777", ::enc, ::dec)
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-b", ::dec)
+        assertEquals(enc("token-b"), prefs[held(5)])
+        assertEquals("777", prefs[id(5)])
+    }
+
+    @Test fun whatIsNotTheRefusedTokenIsNotTouched() {
+        val prefs = archived()
+        SettingsStore.selectVkAccountKeys(prefs, 4, "777", ::enc, ::dec)
+        val before = prefs.asMap()
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-z", ::dec)
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "", ::dec)
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "  ", ::dec)
+        // an entry the keystore cannot read is not the refused one, whether it answers nothing or fails
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-b") { null }
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-b") { error("keystore") }
+        // no token is no refused token: a profile that holds none keeps what it has
+        prefs[id(6)] = "777"
+        val withSix = prefs.asMap()
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 6, "", ::dec)
+        assertEquals(withSix, prefs.asMap())
+        prefs.remove(id(6))
+        assertEquals(before, prefs.asMap())
+    }
+
+    @Test fun theArchiveLosesOnlyTheAccountsThatHoldTheNamedToken() {
+        var json = VkAccounts.put(VkAccounts.put("", "12345", "enc-a", 0L), "777", "enc-b", 0L)
+        json = VkAccounts.put(json, "900", "enc-b", 0L)   // the same token under two ids
+        assertEquals(listOf("12345"), VkAccounts.ids(VkAccounts.removeHolding(json) { it == "enc-b" }))
+        assertEquals("nothing named: the stored text itself comes back", json, VkAccounts.removeHolding(json) { false })
+        assertEquals("not json", VkAccounts.removeHolding("not json") { true })
+    }
+}

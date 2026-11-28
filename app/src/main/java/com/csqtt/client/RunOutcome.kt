@@ -148,6 +148,43 @@ internal fun recoveryOutcome(
 }
 
 /**
+ * Card p3-vk-run-account (the operator, 2026-11-28): a run keeps what it started with. Nothing on «Туннель» is held
+ * while the tunnel runs, and what is changed there says «при следующем подключении»: so a call recovery, which makes
+ * the run's VK calls again in the middle of a run, takes the VK account, the hash mode, the address, the password and
+ * the stream count from the run and not from the store. A run on a link's own token is the exception it always was:
+ * its recovery reads the link and the stored mode.
+ */
+internal object RunKeeps {
+    /** VK's «the account cannot be used» from the core, as its ERROR event names it: `VK_ACCOUNT_5`, `_17`, `_18`. */
+    private const val ACCOUNT_REFUSED = "VK_ACCOUNT_"
+
+    /** The log's line where a run goes on with the stored account ([next]), in either auto mode. */
+    const val NEXT_LOG = "[VK] Аккаунт туннеля отклонён VK · продолжаем с выбранным аккаунтом"
+
+    /**
+     * The account a recovery makes the run's calls with: the run's own ([runToken]). Null for a run on a link's token
+     * ([runTokenFromLink]), which its link names, and for a pool that served with no account: the stored one is all
+     * there is then.
+     */
+    fun account(runToken: String, runTokenFromLink: Boolean): String? = runToken.takeIf { !runTokenFromLink && it.isNotBlank() }
+
+    /**
+     * VK refused the run's own account ([refused]) and [stored] is the one its profile holds by now. The operator:
+     * the run goes on with the stored one. Null when there is none to go on with — nothing stored, or the same account,
+     * which then ends the run as it always did.
+     */
+    fun next(refused: String, stored: String): String? = stored.takeIf { it.isNotBlank() && it != refused }
+
+    /**
+     * «Авто ВК»: the core could not start its calls on the account and says so with a fatal [code]. On the user's own
+     * account that word is held until the core has exited, where [next] decides between another account and the stop;
+     * a link's token ([tokenFromLink]) has no other account, and any other fatal word ends the run at once.
+     */
+    fun holdsAccountRefusal(code: String, hashMode: String, tokenFromLink: Boolean): Boolean =
+        code.startsWith(ACCOUNT_REFUSED) && hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS && !tokenFromLink
+}
+
+/**
  * B5e4: an «Авто ВК» run whose calls are all dead while VK refuses new ones (flood control, for one) — the core reports a
  * dead call once per process, so the recovery retries on this backoff and then stops the run with VK's answer.
  */
@@ -170,7 +207,9 @@ internal data class ExitPlan(val nextStreak: Int, val crashLoop: Boolean, val re
 /**
  * [wantsRestart]: the run is still wanted; [fatal]: a fatal cause ended it; [canRestart]: there are params and a context to
  * restart with; [offline]: paused for no network — an exit then says nothing about the core, so it does not count
- * (review F4). A restart keeps the run's calls (it reuses their hashes); only the run's end ends them.
+ * (review F4); [accountChange]: the core ended because VK refused its account and the run goes on with another
+ * (RunKeeps.next) — nor does that one. A restart keeps the run's calls (it reuses their hashes); only the run's end
+ * ends them.
  */
 internal fun exitPlan(
     wantsRestart: Boolean,
@@ -180,9 +219,10 @@ internal fun exitPlan(
     streak: Int,
     offline: Boolean,
     stableMs: Long,
+    accountChange: Boolean = false,
 ): ExitPlan {
     val shouldRestart = wantsRestart && !fatal
-    val nextStreak = if (offline) streak else nextCrashStreak(uptimeMs, streak, stableMs)
+    val nextStreak = if (offline || accountChange) streak else nextCrashStreak(uptimeMs, streak, stableMs)
     val crashLoop = shouldRestart && nextStreak >= CRASH_LOOP_STOP_STREAK
     val restarts = shouldRestart && !crashLoop && canRestart
     return ExitPlan(nextStreak, crashLoop, restarts, endCalls = wantsRestart && !restarts)
