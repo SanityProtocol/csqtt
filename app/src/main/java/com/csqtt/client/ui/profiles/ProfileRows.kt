@@ -154,6 +154,12 @@ private fun look(action: ProfileAction): ActionLook = when (action) {
 private val ActionWidth = 44.dp
 
 /**
+ * The size of a row's own marks (the pin, the crossed eye) and of the action icons that cover them when the row is
+ * swiped (the operator, 2026-11-28: «slider icons are too big. Make them same size as the pin icon when not slided»).
+ */
+private val MarkSize = 16.dp
+
+/**
  * One profile's row. [menu] adds ⋮ with the same actions (the sheet's rows; Home's have the swipe alone). [more] are
  * further actions TalkBack is given: moving the row, where a list can be reordered. [dimmed] is a hidden profile's look.
  * [swipe] false holds the swipe back.
@@ -207,10 +213,10 @@ internal fun ProfileRow(
             },
             trailing = {
                 if (entry.pinned && !entry.hidden) {
-                    Icon(Icons.pin, contentDescription = pinnedLabel, modifier = Modifier.size(16.dp), tint = colors.accentText)
+                    Icon(Icons.pin, contentDescription = pinnedLabel, modifier = Modifier.size(MarkSize), tint = colors.accentText)
                 }
                 if (entry.hidden) {
-                    Icon(Icons.eyeOff, contentDescription = hiddenLabel, modifier = Modifier.size(16.dp), tint = colors.faint)
+                    Icon(Icons.eyeOff, contentDescription = hiddenLabel, modifier = Modifier.size(MarkSize), tint = colors.faint)
                 }
                 if (menu) {
                     Box {
@@ -251,6 +257,8 @@ internal fun ProfileRow(
                                 drawn.on -> colors.accentText
                                 else -> colors.text
                             },
+                            // the size of the mark each of them covers; the target is as wide as it was
+                            glyph = MarkSize,
                         )
                     }
                 }

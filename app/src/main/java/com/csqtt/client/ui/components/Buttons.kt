@@ -25,6 +25,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.design.Shape
@@ -101,7 +102,8 @@ internal fun TextBtn(text: String, onClick: () -> Unit, modifier: Modifier = Mod
 
 /**
  * An icon alone always says what it does: [description] is read by TalkBack. [outlined] is the icon beside a row of
- * buttons, drawn as one of them (an instance's «ещё»).
+ * buttons, drawn as one of them (an instance's «ещё»). [glyph] draws the icon at another size in the same target: a
+ * row's actions at the size of the row's own marks.
  */
 @Composable
 internal fun IconBtn(
@@ -112,6 +114,7 @@ internal fun IconBtn(
     small: Boolean = false,
     outlined: Boolean = false,
     tint: Color = Csq.colors.text,
+    glyph: Dp = if (small) 18.dp else 22.dp,
 ) {
     val frame = when {
         outlined -> Modifier.size(44.dp, 40.dp).clip(Shape.pill).border(1.dp, Csq.colors.line, Shape.pill)
@@ -124,6 +127,6 @@ internal fun IconBtn(
             .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(if (small) 18.dp else 22.dp), tint = tint)
+        Icon(icon, contentDescription = null, modifier = Modifier.size(glyph), tint = tint)
     }
 }
