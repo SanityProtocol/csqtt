@@ -134,7 +134,8 @@ internal fun profileActs(entries: List<ProfileEntry>, active: Int, afterPick: (P
     )
 }
 
-private class ActionLook(val icon: ImageVector, val label: Int, val sub: Int?, val danger: Boolean = false)
+/** [on]: the action takes back what is on now — a pinned profile's pin — and the swiped row's icon says so by its colour. */
+private class ActionLook(val icon: ImageVector, val label: Int, val sub: Int?, val danger: Boolean = false, val on: Boolean = false)
 
 /**
  * How each action is drawn. The line under a menu item is one short line (26 characters at most: whole at a 1.3× font on
@@ -144,7 +145,7 @@ private fun look(action: ProfileAction): ActionLook = when (action) {
     ProfileAction.Show -> ActionLook(Icons.eye, R.string.profile_show, R.string.profile_show_sub)
     ProfileAction.Rename -> ActionLook(Icons.pencil, R.string.profile_rename, R.string.profile_rename_sub)
     ProfileAction.Pin -> ActionLook(Icons.pin, R.string.profile_pin, R.string.profile_pin_sub)
-    ProfileAction.Unpin -> ActionLook(Icons.pin, R.string.profile_unpin, R.string.profile_unpin_sub)
+    ProfileAction.Unpin -> ActionLook(Icons.pin, R.string.profile_unpin, R.string.profile_unpin_sub, on = true)
     ProfileAction.Hide -> ActionLook(Icons.eyeOff, R.string.profile_hide, R.string.profile_hide_sub)
     ProfileAction.OpenTunnel -> ActionLook(Icons.key, R.string.profile_open_tunnel, R.string.profile_open_tunnel_sub)
     ProfileAction.Delete -> ActionLook(Icons.trash, R.string.action_delete, null, danger = true)
@@ -243,7 +244,13 @@ internal fun ProfileRow(
                         val drawn = look(action)
                         IconBtn(
                             drawn.icon, labels[index], { close(); acts.run(action, entry) },
-                            tint = if (drawn.danger) colors.danger else colors.text,
+                            // a pinned profile's pin is blue here as on the row it covers (the operator, 2026-11-28:
+                            // «users need to know it's pinned or not while slided»)
+                            tint = when {
+                                drawn.danger -> colors.danger
+                                drawn.on -> colors.accentText
+                                else -> colors.text
+                            },
                         )
                     }
                 }
