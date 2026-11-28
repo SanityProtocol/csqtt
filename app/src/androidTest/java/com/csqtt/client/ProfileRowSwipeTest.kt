@@ -33,7 +33,8 @@ import org.junit.runner.RunWith
  * actions and a short flick shuts it, and a lift is a flick from 125 dp a second; a slow drag goes on once it has
  * covered a third of the way from the end it began at; the strip is exactly as wide as its way, 44 dp an action (the
  * canvas, F-HomeSwipe), so on the way back it is at the row's end when it goes, and it goes without frames that have
- * nothing of it to show; and a row whose actions change under an open strip keeps the strip in its place.
+ * nothing of it to show; a row whose actions change under an open strip keeps the strip in its place, and one whose
+ * actions change while its strip shuts is left shut.
  */
 @RunWith(AndroidJUnit4::class)
 class ProfileRowSwipeTest {
@@ -211,6 +212,33 @@ class ProfileRowSwipeTest {
             assertEquals("the strip is not in its place with the new action", way(SLOT), stripShown("Альфа") ?: 0f, 0.5f)
             val delete = actions("Удалить").last()
             assertEquals("the strip's last action is not at the row's end", rowRight("Альфа"), delete.positionInRoot.x + delete.size.width, 0.5f)
+        }
+    }
+
+    @Test
+    fun aRowWhoseActionsChangeWhileItsStripShutsIsLeftShut() {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Бета") }
+            row("Альфа").performTouchInput { swipeLeft() }
+            compose.waitForIdle()
+            // a tap shuts the strip; a frame into its way another profile is picked, and the row gains «Скрыть» under it
+            compose.mainClock.autoAdvance = false
+            row("Альфа").performTouchInput { click(centerLeft + Offset(40.dp.toPx(), 0f)) }
+            compose.mainClock.advanceTimeByFrame()
+            runBlocking { store.saveActiveProfile(beta) }
+            var gainedOnTheWay = false
+            for (frame in 1..60) {
+                // the store answers in real time, the frames come by the test's clock
+                Thread.sleep(25)
+                compose.mainClock.advanceTimeByFrame()
+                if (actions().isEmpty()) break
+                if (actions("Скрыть").isNotEmpty()) gainedOnTheWay = true
+            }
+            compose.mainClock.autoAdvance = true
+            compose.waitForIdle()
+            assertTrue("the row's actions did not change while its strip was shutting: nothing was tried", gainedOnTheWay)
+            // the fit to the new actions waits for the way out to end: fitted at once, the strip would stand open again
+            assertTrue("the strip a tap was shutting is open again", actions().isEmpty())
         }
     }
 

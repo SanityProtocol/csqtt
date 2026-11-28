@@ -56,10 +56,10 @@ class RowSwipeTest {
     }
 
     @Test fun theNearerEndIsToldAtHalfOfTheWay() {
-        // caught at 0.4 of the way and let go: nearer to shut, and 0.4 from it is past a third — it opens
-        assertEquals(open, rest(start = open * 0.4f, value = open * 0.4f, velocity = 0f), 0f)
-        // caught at 0.6: nearer to open, 0.4 from it — it shuts
-        assertEquals(0f, rest(start = open * 0.6f, value = open * 0.6f, velocity = 0f), 0f)
+        // caught just short of half of the way and let go: nearer to shut, and that far from it is past a third — it opens
+        assertEquals(open, rest(start = open * 0.49f, value = open * 0.49f, velocity = 0f), 0f)
+        // caught just past half: nearer to open, 0.49 from it — it shuts
+        assertEquals(0f, rest(start = open * 0.51f, value = open * 0.51f, velocity = 0f), 0f)
     }
 
     @Test fun aRowThatWasNotMovedStaysWhereItWas() {
