@@ -1,6 +1,7 @@
 package com.csqtt.client.ui.profiles
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -17,11 +18,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,6 +53,7 @@ import com.csqtt.client.ProfileKind
 import com.csqtt.client.ProfileMenu
 import com.csqtt.client.ProfileSort
 import com.csqtt.client.R
+import com.csqtt.client.RowSwipe
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.pickProfile
 import com.csqtt.client.ui.components.Cell
@@ -151,7 +155,19 @@ private fun look(action: ProfileAction): ActionLook = when (action) {
     ProfileAction.Delete -> ActionLook(Icons.trash, R.string.action_delete, null, danger = true)
 }
 
+/**
+ * One action's place in a swiped row's strip (the canvas, F-HomeSwipe). The row slides by exactly this for each action
+ * and each is drawn exactly this wide: drawn wider (they were 48 dp, Material's least size for a button), the strip
+ * was wider than its own way, and on the way back it stood with that much of itself still shown until it was taken away
+ * (the operator, 2026-11-28: «it stops not at the end at the right border as it should»).
+ */
 private val ActionWidth = 44.dp
+
+/** A lift faster than this is a flick, and its direction alone says where the strip goes (Material's measure of one). */
+private val Flick = 125.dp
+
+/** The strip's way to rest: over half a pixel from its end, with no tail of frames that move nothing one can see. */
+private val Settle = spring<Float>(visibilityThreshold = 0.5f)
 
 /**
  * The size of a row's own marks (the pin, the crossed eye) and of the action icons that cover them when the row is
@@ -181,9 +197,13 @@ internal fun ProfileRow(
     val scope = rememberCoroutineScope()
     val items = remember(entry, selected) { ProfileMenu.items(entry, selected) }
     val labels = items.map { stringResource(look(it).label) }
-    val open = with(LocalDensity.current) { -(ActionWidth * items.size).toPx() }
+    // in whole pixels an action, as each is laid out: the strip's way is the strip's own width to the pixel
+    val open = with(LocalDensity.current) { -(ActionWidth.roundToPx() * items.size).toFloat() }
+    val flick = with(LocalDensity.current) { Flick.toPx() }
     val slide = remember { Animatable(0f) }
-    val close = { scope.launch { slide.animateTo(0f) } }
+    // where the strip was when the drag found it
+    val dragFrom = remember { mutableFloatStateOf(0f) }
+    val close = { scope.launch { slide.animateTo(0f, Settle) } }
     val pinnedLabel = stringResource(R.string.profile_pinned)
     val hiddenLabel = stringResource(R.string.profile_hidden)
     var menuOpen by rememberSaveable { mutableStateOf(false) }
@@ -197,7 +217,10 @@ internal fun ProfileRow(
             state = rememberDraggableState { delta ->
                 scope.launch(start = CoroutineStart.UNDISPATCHED) { slide.snapTo((slide.value + delta).coerceIn(open, 0f)) }
             },
-            onDragStopped = { slide.animateTo(if (slide.value < open / 2) open else 0f) },
+            onDragStarted = { dragFrom.floatValue = slide.value },
+            onDragStopped = { velocity ->
+                slide.animateTo(RowSwipe.rest(dragFrom.floatValue, slide.value, open, velocity, flick), Settle)
+            },
         ),
     ) {
         Cell(
@@ -250,6 +273,7 @@ internal fun ProfileRow(
                         val drawn = look(action)
                         IconBtn(
                             drawn.icon, labels[index], { close(); acts.run(action, entry) },
+                            modifier = Modifier.width(ActionWidth),
                             // a pinned profile's pin is blue here as on the row it covers (the operator, 2026-11-28:
                             // «users need to know it's pinned or not while slided»)
                             tint = when {
@@ -257,7 +281,7 @@ internal fun ProfileRow(
                                 drawn.on -> colors.accentText
                                 else -> colors.text
                             },
-                            // the size of the mark each of them covers; the target is as wide as it was
+                            // the size of the mark each of them covers
                             glyph = MarkSize,
                         )
                     }

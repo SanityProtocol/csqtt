@@ -2,6 +2,7 @@ package com.csqtt.client
 
 import java.text.Collator
 import java.util.Locale
+import kotlin.math.abs
 
 /**
  * Home's two layouts (P3-PLAN §1.3a; the operator, 2026-11-26): the one connection, which is the default, or the list of
@@ -87,6 +88,28 @@ internal object ProfileMenu {
             add(ProfileAction.OpenTunnel)
         }
         if (entry.kind != ProfileKind.Subscription) add(ProfileAction.Delete)
+    }
+}
+
+/**
+ * Where a swiped row's strip of actions comes to rest when the finger lifts (the operator, 2026-11-28: «it needs to
+ * slide easier»). A place runs from 0, shut, down to `open` — negative, the whole strip shown.
+ */
+internal object RowSwipe {
+    /** The part of the strip's way a slow drag covers before the strip goes on to the other end by itself. */
+    const val GO_ON = 1f / 3
+
+    /**
+     * A flick — a lift at [flick] px a second or faster, [velocity] negative to the left — decides by its direction
+     * alone, however short it was. A slow lift goes by how far the strip was moved from the end the drag found it
+     * nearer to ([start]): [GO_ON] of the way or more and it goes on to the other end, less and it returns.
+     */
+    fun rest(start: Float, value: Float, open: Float, velocity: Float, flick: Float): Float {
+        if (velocity <= -flick) return open
+        if (velocity >= flick) return 0f
+        val from = if (start < open / 2) open else 0f
+        val other = if (from == 0f) open else 0f
+        return if (abs(value - from) >= abs(open) * GO_ON) other else from
     }
 }
 
