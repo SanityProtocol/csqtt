@@ -77,6 +77,11 @@ class StartIntentFromStoreTest {
             store.saveVkHashMode(CsqttConstants.VkAutoHash.MODE_AUTO_API)
             store.saveSelectedTurnSubnet(subnet.id, ipLimit = "3")
             store.saveSrtpMode(CsqttConstants.SrtpMode.DTLS)
+            store.saveCaptchaMode("rjs")
+            store.saveCaptchaSolveMethod("manual")
+            store.saveFingerprint("chrome")
+            // (the obfs mode has one value: whatever is stored reads «unified»)
+            store.saveActiveClientIds("1111111,2222222")
 
             val intent = buildTunnelStartIntent(context, store, generationId = 78L, sessionSalt = "salt")!!
             val read = intent.runRead()!!
@@ -91,7 +96,44 @@ class StartIntentFromStoreTest {
             assertEquals(subnet.id, read.turnSubnet)
             assertEquals("3", read.turnLimit)
             assertEquals(CsqttConstants.SrtpMode.DTLS, read.settings.srtpMode)
+            assertEquals("rjs", read.settings.captchaMode)
+            assertEquals("manual", read.settings.captchaSolveMethod)
+            assertEquals("chrome", read.settings.fingerprint)
+            assertEquals("1111111,2222222", read.settings.clientIds)
+            assertEquals(read.settings, intent.tunnelSettings())
             assertEquals(subnet.ips.take(3).joinToString(","), read.settings.customTurnIps)
+        } finally {
+            shared.deleteProfile(slot)
+        }
+    }
+
+    /**
+     * The creds mode another than its default, which a link's auto hash mode does not allow beside it (the store keeps
+     * the two modes paired): an own server on «Капча», with its port.
+     */
+    @Test
+    fun theStartCarriesAnOwnServersCredsModeAndPort() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val shared = SettingsStore(context)
+        val slot = 24
+        val store = SettingsStore(context, ProfileScope.Fixed(slot))
+        try {
+            shared.clearProfile(slot)
+            shared.saveProfileConnectionSettings(slot, peer = "203.0.113.24", serverPeerPort = 46001, connectionPassword = "pw-twenty-four", workersPerHash = 10)
+            store.saveVkHashesOnly("K".repeat(20))
+            store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CAPTCHA)
+
+            val intent = buildTunnelStartIntent(context, store, generationId = 79L, sessionSalt = "salt")!!
+            val read = intent.runRead()!!
+            assertEquals(store.runRead(), read)
+            assertEquals(CsqttConstants.VkAuth.MODE_CAPTCHA, read.settings.vkAuthMode)
+            assertEquals(CsqttConstants.VkAuth.MODE_CAPTCHA, intent.getStringExtra("vk_auth_mode"))
+            assertEquals(CsqttConstants.VkAutoHash.MODE_MANUAL, read.hashMode)
+            assertEquals(false, read.source.linkMode)
+            assertEquals("203.0.113.24", read.source.address)
+            assertEquals(46001, read.source.port)
+            assertEquals("pw-twenty-four", read.source.password)
+            assertEquals(10, read.settings.workersPerHash)
         } finally {
             shared.deleteProfile(slot)
         }

@@ -71,6 +71,15 @@ class DraftsTest {
     }
 
     @Test
+    fun `a draft's write runs by itself, whether anyone asks after it or not`() = runBlocking {
+        // a field left with nobody tapping «Переподключить»: its write is not one that waits to be joined
+        val drafts = Drafts()
+        val done = CompletableDeferred<Unit>()
+        drafts.write(scope) { done.complete(Unit) }
+        withTimeout(5_000) { done.await() }
+    }
+
+    @Test
     fun `a holder asked again under the same key takes the first one's place`() = runBlocking {
         val drafts = Drafts()
         val asked = mutableListOf<String>()

@@ -164,7 +164,9 @@ class ProfilesSheetTest {
             // and the name it came with is one tap away
             awaitRenamedRow("Дельта")
             menuOf("Дельта").performClick()
-            // the menu is a window of its own: its items are there a frame after the tap, not with it
+            // ⚠ Flaky here, cause not found (card p3-apply-bar: in 2 of 11 whole runs of the suite, never in 15 runs of
+            // this test alone): after the rename the tap on ⋮ sometimes opens no menu at all. This wait only makes
+            // that failure say so — «not satisfied after 5000 ms» — instead of a missing node on the next line
             compose.waitUntil(5_000) { shown("Переименовать") }
             last("Переименовать").performClick()
             compose.waitUntil(5_000) { shown("Вернуть исходное имя") }

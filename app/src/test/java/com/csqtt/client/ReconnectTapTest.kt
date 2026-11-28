@@ -118,6 +118,8 @@ class ReconnectTapTest {
         for (own in listOf("127.0.0.1", "localhost", "0.0.0.0", "::1")) {
             assertEquals(own, ConnectionStartBlocker.Server, startBlocker(check(peer = own)))
         }
+        // the spaces are taken off before the address is judged: typed around this phone's own it is still its own
+        assertEquals(ConnectionStartBlocker.Server, startBlocker(check(peer = " localhost ")))
     }
 
     @Test
@@ -181,13 +183,14 @@ class ReconnectTapTest {
                 vkAuthMode = CsqttConstants.VkAuth.MODE_AUTO_JS, captchaMode = "rjs", captchaSolveMethod = "manual",
                 fingerprint = "chrome", srtpMode = CsqttConstants.SrtpMode.DTLS,
             ),
-            hashMode = CsqttConstants.VkAutoHash.MODE_AUTO_JS,
+            // another word than the stored creds mode's («auto_js» is both a hash mode and a creds mode)
+            hashMode = CsqttConstants.VkAutoHash.MODE_AUTO_API,
         )
         // the creds mode the run is in is the run's, not the stored one
         val run = RunTaken(read, authMode = CsqttConstants.VkAuth.MODE_CAPTCHA, usesAccount = true, account = "", accountOwn = true)
         val uses = RunUses.of(run, accountId = "")
         assertTrue(uses.linkMode)
-        assertEquals(CsqttConstants.VkAutoHash.MODE_AUTO_JS, uses.hashMode)
+        assertEquals(CsqttConstants.VkAutoHash.MODE_AUTO_API, uses.hashMode)
         assertEquals(CsqttConstants.VkAuth.MODE_CAPTCHA, uses.authMode)
         assertEquals("rjs", uses.captchaMode)
         assertEquals("manual", uses.captchaSolve)

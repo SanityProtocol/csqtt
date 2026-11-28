@@ -358,6 +358,43 @@ class ApplyBarTest {
             compose.waitUntil(5_000) { shown("Сейчас: свой сервер") }
             assertFalse("an own server's run has no link to call the one before", shown("Сейчас: прежняя ссылка"))
             assertEquals(1, bars())
+
+            // and the other way: the tunnel on the link, the profile made an own server's again — a link's run has no
+            // address to say
+            ShellTestKit.tunnelOff()
+            ShellTestKit.tunnelOn(SLOT)
+            compose.waitUntil(5_000) { bars() == 0 && !shown("Сейчас", substring = true) }
+            runBlocking { slot.saveCsqttLinkMode(false) }
+            compose.waitUntil(5_000) { shown("Сейчас: по ссылке") }
+            assertFalse("a line with no value", compose.onAllNodes(hasText("Сейчас: ")).fetchSemanticsNodes().isNotEmpty())
+            assertEquals(1, bars())
+        }
+    }
+
+    /**
+     * A refusal asked from a sheet's foot: the sheet is closed for the form under it — with what it held stored, not
+     * dropped as «Отмена» drops it (the refused half of the review's F1).
+     */
+    @Test
+    fun aRefusedTapFromASheetsFootClosesTheSheetWithWhatItHeldStored() {
+        val second = "R".repeat(20)
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Туннель") }
+            compose.onNodeWithText("Туннель").performClick()
+            compose.waitUntil(10_000) { shown("Хеши звонков VK", substring = true) }
+            ShellTestKit.tunnelOn(SLOT)
+            compose.onNodeWithText("Хеши звонков VK", substring = true).performScrollTo().performClick()
+            compose.waitUntil(5_000) { shown("Хеш 2") }
+            compose.onNode(hasSetTextAction() and hasText("Хеш 2")).performScrollTo().performTextReplacement(second)
+            // the address emptied under the sheet: a change that waits, and one no start would take
+            runBlocking { slot.saveFormAddress("", null, store.profileEpoch.first()) }
+            compose.waitUntil(5_000) { bars() == 2 }
+
+            compose.onAllNodes(hasText(ShellTestKit.RECONNECT)).onLast().performClick()
+            compose.waitUntil(5_000) { shown(REFUSED) }
+            compose.waitUntil(5_000) { !shown("Хеш 2") }
+            assertTrue("the sheet's hash went with the sheet", second in runBlocking { slot.vkHashes.first() })
+            assertTrue("the running tunnel is not touched", sent.isEmpty())
         }
     }
 
@@ -425,7 +462,10 @@ class ApplyBarTest {
                 store.saveActiveProfile(0)
             }
             compose.waitUntil(5_000) { bars() == 1 }
-            val logged = LogBook.app.snapshot().size
+            // a line said again is the same record counted once more, so the lines are counted, not the records
+            fun refusalsLogged(): Int =
+                LogBook.app.snapshot().filter { "Переподключение не начато" in it.message && "адрес" in it.message }.sumOf { it.count }
+            val logged = refusalsLogged()
 
             compose.onNodeWithText(ShellTestKit.RECONNECT).performClick()
             // «Туннель» opens on what the form lacks, and says it is the reconnect that was not made
@@ -433,10 +473,7 @@ class ApplyBarTest {
             assertEquals("the form is the tunnel's own profile's", SLOT, runBlocking { store.activeProfile.first() })
             compose.waitUntil(5_000) { shown("Укажите адрес сервера") }
             assertTrue(compose.onAllNodes(hasSetTextAction() and hasText("Адрес сервера")).fetchSemanticsNodes().isNotEmpty())
-            assertTrue(
-                "«Логи» say why",
-                LogBook.app.snapshot().drop(logged).any { "Переподключение не начато" in it.message && "адрес" in it.message },
-            )
+            assertEquals("«Логи» say why, once", logged + 1, refusalsLogged())
             assertTrue("the running tunnel is not touched", sent.isEmpty())
             assertFalse(TunnelManager.reconnecting.value)
             assertTrue("the tunnel is still on, and the change still waits", TunnelManager.running.value && bars() == 1)
