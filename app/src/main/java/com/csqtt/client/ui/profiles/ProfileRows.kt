@@ -21,8 +21,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -44,6 +49,7 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.csqtt.client.DeployManager
@@ -72,6 +78,7 @@ import com.csqtt.client.ui.shell.Tab
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /*
@@ -157,13 +164,13 @@ private fun look(action: ProfileAction): ActionLook = when (action) {
 
 /**
  * One action's place in a swiped row's strip (the canvas, F-HomeSwipe). The row slides by exactly this for each action
- * and each is drawn exactly this wide: drawn wider (they were 48 dp, Material's least size for a button), the strip
- * was wider than its own way, and on the way back it stood with that much of itself still shown until it was taken away
- * (the operator, 2026-11-28: «it stops not at the end at the right border as it should»).
+ * and each is laid out exactly this wide: laid out wider (they were 48 dp, Material's least size for a button), the
+ * strip was wider than its own way, and on the way back it stood with that much of itself still shown until it was
+ * taken away (the operator, 2026-11-28: «it stops not at the end at the right border as it should»).
  */
 private val ActionWidth = 44.dp
 
-/** A lift faster than this is a flick, and its direction alone says where the strip goes (Material's measure of one). */
+/** A lift faster than this is a flick, and its direction alone says where the strip goes. */
 private val Flick = 125.dp
 
 /** The strip's way to rest: over half a pixel from its end, with no tail of frames that move nothing one can see. */
@@ -204,6 +211,15 @@ internal fun ProfileRow(
     // where the strip was when the drag found it
     val dragFrom = remember { mutableFloatStateOf(0f) }
     val close = { scope.launch { slide.animateTo(0f, Settle) } }
+    // whether there is a strip to draw, not where it is: read as the place itself, the whole row was composed again on
+    // every frame of a drag and of a settle
+    val stripShown by remember { derivedStateOf { slide.value < 0f } }
+    // a pick elsewhere takes «Скрыть» in or out of this row's actions: a strip that is open is fitted to the ones it has
+    // now, once it has come to rest — or its last action would stand outside the row
+    LaunchedEffect(open) {
+        snapshotFlow { slide.isRunning }.first { !it }
+        if (slide.value < 0f) slide.snapTo(open)
+    }
     val pinnedLabel = stringResource(R.string.profile_pinned)
     val hiddenLabel = stringResource(R.string.profile_hidden)
     var menuOpen by rememberSaveable { mutableStateOf(false) }
@@ -260,30 +276,35 @@ internal fun ProfileRow(
             },
         )
         // the row keeps its place and its name; the actions come in from the right, over the end of it
-        if (slide.value < 0f) {
+        if (stripShown) {
             Box(
-                Modifier.matchParentSize().offset { IntOffset((slide.value - open).roundToInt(), 0) },
+                // never left of its place: with fewer actions than it was opened with, a strip on its way out is at the row's end
+                Modifier.matchParentSize().offset { IntOffset((slide.value - open).roundToInt().coerceAtLeast(0), 0) },
                 contentAlignment = Alignment.CenterEnd,
             ) {
-                Row(
-                    Modifier.fillMaxHeight().shadow(4.dp).background(colors.raised),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    items.forEachIndexed { index, action ->
-                        val drawn = look(action)
-                        IconBtn(
-                            drawn.icon, labels[index], { close(); acts.run(action, entry) },
-                            modifier = Modifier.width(ActionWidth),
-                            // a pinned profile's pin is blue here as on the row it covers (the operator, 2026-11-28:
-                            // «users need to know it's pinned or not while slided»)
-                            tint = when {
-                                drawn.danger -> colors.danger
-                                drawn.on -> colors.accentText
-                                else -> colors.text
-                            },
-                            // the size of the mark each of them covers
-                            glyph = MarkSize,
-                        )
+                // each action is its cell and nothing more: Material's 48 dp around a button, squeezed into the cell, put the
+                // button a pixel off it on screens where the two differ by an odd number of pixels (2.75×)
+                CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides Dp.Unspecified) {
+                    Row(
+                        Modifier.fillMaxHeight().shadow(4.dp).background(colors.raised),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        items.forEachIndexed { index, action ->
+                            val drawn = look(action)
+                            IconBtn(
+                                drawn.icon, labels[index], { close(); acts.run(action, entry) },
+                                modifier = Modifier.width(ActionWidth),
+                                // a pinned profile's pin is blue here as on the row it covers (the operator, 2026-11-28:
+                                // «users need to know it's pinned or not while slided»)
+                                tint = when {
+                                    drawn.danger -> colors.danger
+                                    drawn.on -> colors.accentText
+                                    else -> colors.text
+                                },
+                                // the size of the mark each of them covers
+                                glyph = MarkSize,
+                            )
+                        }
                     }
                 }
             }

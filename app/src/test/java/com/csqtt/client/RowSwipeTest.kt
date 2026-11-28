@@ -48,6 +48,20 @@ class RowSwipeTest {
         assertEquals(open, rest(start = open + 80f, value = open + 100f, velocity = 0f), 0f)
     }
 
+    @Test fun theEndTheDragBeganAtIsNotAskedAgainAtTheLift() {
+        // dragged slowly from shut to 0.6 of the way: it opens, though the strip is nearer to open when the finger lifts
+        assertEquals(open, rest(start = 0f, value = open * 0.6f, velocity = 0f), 0f)
+        // and from open to 0.4 of the way: it shuts
+        assertEquals(0f, rest(start = open, value = open * 0.4f, velocity = 0f), 0f)
+    }
+
+    @Test fun theNearerEndIsToldAtHalfOfTheWay() {
+        // caught at 0.4 of the way and let go: nearer to shut, and 0.4 from it is past a third — it opens
+        assertEquals(open, rest(start = open * 0.4f, value = open * 0.4f, velocity = 0f), 0f)
+        // caught at 0.6: nearer to open, 0.4 from it — it shuts
+        assertEquals(0f, rest(start = open * 0.6f, value = open * 0.6f, velocity = 0f), 0f)
+    }
+
     @Test fun aRowThatWasNotMovedStaysWhereItWas() {
         assertEquals(0f, rest(start = 0f, value = 0f, velocity = 0f), 0f)
         assertEquals(open, rest(start = open, value = open, velocity = 0f), 0f)

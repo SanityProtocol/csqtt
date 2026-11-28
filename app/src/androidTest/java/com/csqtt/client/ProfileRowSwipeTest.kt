@@ -8,6 +8,7 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onLast
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.swipeLeft
@@ -29,9 +30,10 @@ import org.junit.runner.RunWith
 /**
  * A profile row's swipe on a device (the operator, 2026-11-28, on a recording of their phone: «it needs to slide easier,
  * and when sliding back - it stops not at the end at the right border as it should»). A short flick opens the strip of
- * actions and a short flick shuts it; a slow drag goes on once it has covered a third of the way; the strip is exactly
- * as wide as its way, 44 dp an action (the canvas, F-HomeSwipe), so on the way back it is at the row's end when it goes;
- * and it goes without a tail of frames that move nothing.
+ * actions and a short flick shuts it, and a lift is a flick from 125 dp a second; a slow drag goes on once it has
+ * covered a third of the way from the end it began at; the strip is exactly as wide as its way, 44 dp an action (the
+ * canvas, F-HomeSwipe), so on the way back it is at the row's end when it goes, and it goes without frames that have
+ * nothing of it to show; and a row whose actions change under an open strip keeps the strip in its place.
  */
 @RunWith(AndroidJUnit4::class)
 class ProfileRowSwipeTest {
@@ -57,22 +59,52 @@ class ProfileRowSwipeTest {
 
     private fun link(host: String) = "csqtt://connect?v=2&host=$host.example.net&peer=46000&password=pw&hashes=${"E".repeat(20)}"
     private fun shown(text: String): Boolean = compose.onAllNodes(hasText(text, substring = true)).fetchSemanticsNodes().isNotEmpty()
-    private fun row(): SemanticsNodeInteraction = compose.onAllNodes(hasText("Бета", substring = true) and hasClickAction()).onLast()
-    private fun rowRight(): Float = row().fetchSemanticsNode().boundsInRoot.right
-    private fun actions() = compose.onAllNodes(hasContentDescription(RENAME)).fetchSemanticsNodes()
+    private fun row(name: String = "Бета"): SemanticsNodeInteraction =
+        compose.onAllNodes(hasText(name, substring = true) and hasClickAction()).onLast()
+    private fun rowRight(name: String = "Бета"): Float = row(name).fetchSemanticsNode().boundsInRoot.right
+    private fun actions(description: String = RENAME) = compose.onAllNodes(hasContentDescription(description)).fetchSemanticsNodes()
 
     /** How much of the strip is shown, in px: from its first action's edge to the row's end. Null with no strip. */
-    private fun stripShown(): Float? = actions().lastOrNull()?.let { rowRight() - it.positionInRoot.x }
+    private fun stripShown(name: String = "Бета"): Float? = actions().lastOrNull()?.let { rowRight(name) - it.positionInRoot.x }
 
-    /** The strip's way, in px: 44 dp for each of the row's actions, each laid out in whole pixels. */
-    private fun way(): Float =
-        ProfileMenu.items(runBlocking { store.profileEntries.first() }.first { it.index == beta }).size * Math.round(44 * density).toFloat()
+    /** One action's cell, in px: 44 dp, laid out in whole pixels. */
+    private val cell: Float get() = Math.round(44 * density).toFloat()
+
+    /** The strip's way on a row of [profile], in px: a cell for each of its actions. */
+    private fun way(profile: Int = beta, selected: Boolean = false): Float =
+        ProfileMenu.items(runBlocking { store.profileEntries.first() }.first { it.index == profile }, selected).size * cell
 
     /** A drag of [dx] px past the touch slop, over [millis], from a point on the row's name. */
     private fun drag(dx: Float, millis: Long) = row().performTouchInput {
         val from = centerLeft + Offset(40.dp.toPx(), 0f)
         val slop = if (dx < 0) -viewConfiguration.touchSlop else viewConfiguration.touchSlop
         swipe(if (dx < 0) center else from, (if (dx < 0) center else from) + Offset(dx + slop, 0f), durationMillis = millis)
+    }
+
+    /** A drag of [dx] px past the touch slop at [dpPerSecond], the finger lifted at that speed. */
+    private fun dragAt(dx: Float, dpPerSecond: Int) {
+        val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+        drag(dx, Math.round((Math.abs(dx) + slop) / (dpPerSecond * density) * 1000).toLong())
+    }
+
+    /** Frame by frame after a tap or a lift that shuts the strip: how much of it each frame shows, until it is gone. */
+    private fun framesUntilGone(): List<Float> {
+        val seen = ArrayList<Float>()
+        for (frame in 1..60) {
+            compose.mainClock.advanceTimeByFrame()
+            seen += stripShown() ?: return seen
+        }
+        throw AssertionError("the strip never went: $seen")
+    }
+
+    private fun assertGoesAtTheRowsEnd(seen: List<Float>) {
+        assertTrue("the strip never moved: $seen", seen.isNotEmpty())
+        assertTrue("the strip went back and forth: $seen", seen.zipWithNext().all { (a, b) -> b <= a + 0.5f })
+        // a pixel at most: a way a few pixels short of the strip's width leaves that much of it to the end
+        assertTrue("the strip was taken away with ${seen.last()} px of it still shown: $seen", seen.last() <= 1.5f)
+        // the settle is over half a pixel from its end: the spring's own tail would be six more frames of a strip that
+        // is drawn with nothing of it in the row
+        assertTrue("the strip was drawn with nothing of it to show: $seen", seen.count { it < 0.5f } <= 1)
     }
 
     @Before
@@ -132,6 +164,53 @@ class ProfileRowSwipeTest {
             drag(way * 0.42f, 3_000)
             compose.waitForIdle()
             assertTrue("0.42 of the way back did not shut the strip", actions().isEmpty())
+            // the end the drag began at is not asked again at the lift: 0.6 of the way from shut leaves the strip nearer
+            // to open, and it opens; 0.6 of the way back, and it shuts
+            drag(-way * 0.6f, 3_000)
+            compose.waitForIdle()
+            assertEquals("0.6 of the way did not open the strip", way, stripShown() ?: 0f, 0.5f)
+            drag(way * 0.6f, 3_000)
+            compose.waitForIdle()
+            assertTrue("0.6 of the way back did not shut the strip", actions().isEmpty())
+        }
+    }
+
+    @Test
+    fun aLiftIsAFlickFrom125DpASecond() {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Бета") }
+            // 40 dp is far under a third of the way: only the lift's speed can open the strip
+            dragAt(-40 * density, dpPerSecond = 80)
+            compose.waitForIdle()
+            assertTrue("a lift at 80 dp a second opened the strip", actions().isEmpty())
+            dragAt(-40 * density, dpPerSecond = 190)
+            compose.waitForIdle()
+            assertEquals("a lift at 190 dp a second did not open the strip", way(), stripShown() ?: 0f, 0.5f)
+            dragAt(40 * density, dpPerSecond = 80)
+            compose.waitForIdle()
+            assertEquals("a lift at 80 dp a second shut the strip", way(), stripShown() ?: 0f, 0.5f)
+            dragAt(40 * density, dpPerSecond = 190)
+            compose.waitForIdle()
+            assertTrue("a lift at 190 dp a second did not shut the strip", actions().isEmpty())
+        }
+    }
+
+    @Test
+    fun anOpenStripKeepsItsPlaceWhenTheRowsActionsChange() {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(10_000) { shown("Бета") }
+            // «Альфа» is the open profile: its row is not offered «Скрыть»
+            row("Альфа").performTouchInput { swipeLeft() }
+            compose.waitForIdle()
+            assertTrue("the open profile's row offers «Скрыть»", actions("Скрыть").isEmpty())
+            assertEquals("the open strip is not as wide as its way", way(SLOT, selected = true), stripShown("Альфа") ?: 0f, 0.5f)
+            // another profile is picked: «Альфа» is one of the others now, and its row gains «Скрыть» under the open strip
+            row("Бета").performClick()
+            compose.waitUntil(5_000) { runBlocking { store.activeProfile.first() } == beta && actions("Скрыть").isNotEmpty() }
+            compose.waitForIdle()
+            assertEquals("the strip is not in its place with the new action", way(SLOT), stripShown("Альфа") ?: 0f, 0.5f)
+            val delete = actions("Удалить").last()
+            assertEquals("the strip's last action is not at the row's end", rowRight("Альфа"), delete.positionInRoot.x + delete.size.width, 0.5f)
         }
     }
 
@@ -147,20 +226,15 @@ class ProfileRowSwipeTest {
             // a tap on the row shuts it; frame by frame, how much of the strip is still shown
             compose.mainClock.autoAdvance = false
             row().performTouchInput { click(centerLeft + Offset(40.dp.toPx(), 0f)) }
-            val seen = ArrayList<Float>()
-            var gone = false
-            for (frame in 1..60) {
-                compose.mainClock.advanceTimeByFrame()
-                val shows = stripShown()
-                if (shows == null) { gone = true; break }
-                seen += shows
-            }
-            assertTrue("the strip never went: $seen", gone)
-            assertTrue("the strip never moved: $seen", seen.isNotEmpty())
-            assertTrue("the strip went back and forth: $seen", seen.zipWithNext().all { (a, b) -> b <= a + 0.5f })
-            assertTrue("the strip was taken away with ${seen.last()} px of it still shown: $seen", seen.last() <= density)
-            // 0.25 s for the longest way; the spring's own tail would be a third longer, moving nothing one can see
-            assertTrue("the strip took ${seen.size} frames to go: $seen", seen.size <= 18)
+            assertGoesAtTheRowsEnd(framesUntilGone())
+
+            // and the same after a lift, the way a finger shuts it
+            compose.mainClock.autoAdvance = true
+            row().performTouchInput { swipeLeft() }
+            compose.waitForIdle()
+            compose.mainClock.autoAdvance = false
+            drag(40 * density, 100)
+            assertGoesAtTheRowsEnd(framesUntilGone())
         }
     }
 }
