@@ -155,6 +155,19 @@ class RefusedTokenTest {
         assertEquals(listOf("12345"), VkAccounts.ids(prefs[archive]!!))
     }
 
+    @Test fun aProfileOnAnOlderTokenLosesItAndTheAccountsNewerTokenStaysInTheArchive() {
+        // account 777 was signed in to again from another profile: the archive holds its newer token, this profile the
+        // older one. VK refuses the older: it goes from the profile, and the account is still offered with its newer one
+        val prefs = archived()
+        prefs[held(4)] = enc("token-old")
+        prefs[id(4)] = "777"
+        SettingsStore.dropRefusedVkTokenKeys(prefs, 4, "token-old", ::dec)
+        assertNull(prefs[held(4)])
+        assertNull(prefs[id(4)])
+        assertEquals(listOf("12345", "777"), VkAccounts.ids(prefs[archive]!!))
+        assertEquals(enc("token-b"), VkAccounts.encryptedToken(prefs[archive]!!, "777"))
+    }
+
     @Test fun anotherProfileOnTheSameAccountKeepsTheTokenItHolds() {
         val prefs = archived()
         SettingsStore.selectVkAccountKeys(prefs, 4, "777", ::enc, ::dec)

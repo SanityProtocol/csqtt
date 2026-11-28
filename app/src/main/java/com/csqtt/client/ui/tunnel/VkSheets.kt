@@ -101,11 +101,19 @@ private class PoolRead(val pool: VkPoolState?)
 /**
  * Whether the tunnel is on, or being started, for [profile]: the tab's own rule ([TunnelView.runsHere]). A run keeps the
  * VK account it started with (RunKeeps; the operator, 2026-11-27 and 11-28): an account picked, pasted or signed in to
- * under it is stored for the next connection and says so. A deletion waits for the stop: the run would go on using an
- * account the phone no longer has.
+ * under it is stored for the next connection and says so.
  */
 internal fun vkRunsHere(profile: Int): Boolean =
     (TunnelManager.running.value || TunnelManager.starting.value) && profile == TunnelManager.runTargetProfile()
+
+/**
+ * Whether a deletion waits for the tunnel to stop: while a tunnel is on or being started — on whichever profile, since
+ * the accounts are the phone's and each profile's sheet lists them all, so the tunnel may be on the one to delete. The
+ * run would go on using an account the phone no longer has. Not while it stops: the run is ending, and it ends its
+ * calls with the token it holds.
+ */
+internal fun vkDeleteWaits(): Boolean =
+    (TunnelManager.running.value || TunnelManager.starting.value) && !TunnelManager.stopping.value
 
 /** The square at the head of a row of the pool's calls. An account's row has none: its choice is the row's own tint. */
 @Composable
@@ -116,8 +124,8 @@ private fun RowMark(content: @Composable () -> Unit) {
 /**
  * «Аккаунты VK» (the canvas, F-VkAccounts; M-79, D30): the accounts signed in on this phone, the one this profile is
  * on, and the ways to another — a sign-in, or a permanent token pasted by hand. What is done here is done at once:
- * «Готово» only closes. With the tunnel on for this profile another account is taken for the next connection, and a
- * deletion waits for the stop ([vkRunsHere]).
+ * «Готово» only closes. With the tunnel on for this profile another account is taken for the next connection
+ * ([vkRunsHere]); a deletion waits for the stop of a tunnel on any profile ([vkDeleteWaits]).
  */
 @Composable
 internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
@@ -154,7 +162,7 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
     }
 
     /** Whether an account may be deleted now; says why not. */
-    fun mayDelete(): Boolean = !vkRunsHere(profile).also { on -> if (on) messages.show(context.getString(R.string.vk_delete_running)) }
+    fun mayDelete(): Boolean = !vkDeleteWaits().also { waits -> if (waits) messages.show(context.getString(R.string.vk_delete_running)) }
 
     /** What a change of the account says: under a running tunnel, that it is for the next connection. */
     fun said(done: Int): String = context.getString(if (vkRunsHere(profile)) R.string.vk_account_next else done)

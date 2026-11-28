@@ -32,6 +32,17 @@ internal object VkHashPool {
      */
     fun owed(pool: List<String>, kept: List<String>): Int = (alive(pool, null).size - kept.size).coerceAtLeast(0)
 
+    /** What a fill is asked: the pool it starts from, the dead call to drop from it, and the calls beyond what the streams need. */
+    data class Ask(val pool: List<String>, val dead: String?, val extra: Int)
+
+    /**
+     * What the fill of [pool] with its [dead] call is asked: the pool as it is — or, taken over from a fill VK cut
+     * short ([left]: what that one kept and made), what it left, with nothing more to drop and what the pool is still
+     * [owed].
+     */
+    fun ask(pool: List<String>, dead: String?, left: Fill?): Ask =
+        if (left == null) Ask(pool, dead, 0) else Ask(left.hashes, null, owed(pool, left.hashes))
+
     /**
      * Mints what [pool] lacks of [target] calls after dropping [dead]. A pool larger than the target is kept whole, and
      * its dead hash is replaced too (it never shrinks: every live call serves participants). [mint] makes one call, its

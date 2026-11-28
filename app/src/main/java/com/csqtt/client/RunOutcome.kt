@@ -148,11 +148,47 @@ internal fun recoveryOutcome(
 }
 
 /**
+ * What a call recovery works from ([RunKeeps.recoveryBasis]): [source] is where the run goes on and with which
+ * password, [hashMode] and [workers] what it runs as, [account] the token its calls are made with (null: the one its
+ * profile holds), [forceApi] whether «Авто API» is told to the resolver instead of read from the profile once more.
+ * [own]: all of it is the run's own, and the run never leaves its identity.
+ */
+internal data class RecoveryBasis(
+    val own: Boolean,
+    val source: ConnectionSource,
+    val hashMode: String,
+    val workers: Int,
+    val account: String?,
+    val forceApi: Boolean,
+)
+
+/** What the run's profile holds at a recovery: read only for a run on a link's token, which follows its link. */
+internal class ProfileReading(val source: ConnectionSource?, val hashMode: String, val workers: Int)
+
+/** What the exit of a core that said «the account is refused» comes to ([RunKeeps.atExit]). */
+internal sealed class AccountExit {
+    /** The word was not said, or it is not this exit's to decide: the run is no longer wanted, or another cause ended it. */
+    data object None : AccountExit()
+
+    /** Another account is stored: the run goes on, on [account]. */
+    data class GoOn(val account: String) : AccountExit()
+
+    /** No other account: the core's word is the cause the run stops with, as it always was. */
+    data class Stop(val cause: String) : AccountExit()
+}
+
+/** What an «Авто API» recovery made ([RunKeeps.mint]), and the [account] that is the run's from here: none when VK refused the last one tried. */
+internal class Minted<T>(val made: T, val account: String)
+
+/**
  * Card p3-vk-run-account (the operator, 2026-11-28): a run keeps what it started with. Nothing on «Туннель» is held
  * while the tunnel runs, and what is changed there says «при следующем подключении»: so a call recovery, which makes
  * the run's VK calls again in the middle of a run, takes the VK account, the hash mode, the address, the password and
- * the stream count from the run and not from the store. A run on a link's own token is the exception it always was:
- * its recovery reads the link and the stored mode.
+ * the stream count from the run and not from its profile. The owner's pool of calls, and the panel it is handed to,
+ * are still read where they are kept. A run on a link's own token is the exception it always was: its recovery reads
+ * the link and the stored mode. VK refusing the run's own account, the run goes on with the account its profile holds
+ * by then, when that is another ([next]): in «Авто API» within the recovery ([mint]), in «Авто ВК» at the exit of the
+ * core that said so ([atExit]).
  */
 internal object RunKeeps {
     /** VK's «the account cannot be used» from the core, as its ERROR event names it: `VK_ACCOUNT_5`, `_17`, `_18`. */
@@ -162,11 +198,35 @@ internal object RunKeeps {
     const val NEXT_LOG = "[VK] Аккаунт туннеля отклонён VK · продолжаем с выбранным аккаунтом"
 
     /**
-     * The account a recovery makes the run's calls with: the run's own ([runToken]). Null for a run on a link's token
-     * ([runTokenFromLink]), which its link names, and for a pool that served with no account: the stored one is all
-     * there is then.
+     * What a recovery of [run] works from. A run that did not start on a link's token: its own address, password,
+     * hash mode, stream count and account — with no account of its own (a pool that served without one) the one its
+     * profile holds; [profile] is not read. A run on a link's token: what [profile] holds, as before the card — null
+     * when the profile resolves to nothing, and the recovery gives up.
      */
-    fun account(runToken: String, runTokenFromLink: Boolean): String? = runToken.takeIf { !runTokenFromLink && it.isNotBlank() }
+    fun recoveryBasis(run: TunnelParams, profile: ProfileReading?): RecoveryBasis? {
+        if (!run.vkTokenFromLink) {
+            return RecoveryBasis(
+                own = true,
+                source = ConnectionSource(
+                    peer = run.peer, password = run.connectionPassword, hashes = "", hashesFromLink = false,
+                    vkAccessToken = "", tokenFromLink = false,
+                ),
+                hashMode = run.vkHashMode,
+                workers = run.workersPerHash,
+                account = run.vkAccessToken.takeIf { it.isNotBlank() },
+                forceApi = true,
+            )
+        }
+        val source = profile?.source ?: return null
+        return RecoveryBasis(
+            own = false,
+            source = source,
+            hashMode = profile.hashMode,
+            workers = profile.workers,
+            account = source.vkAccessToken.takeIf { source.tokenFromLink },
+            forceApi = source.tokenFromLink,
+        )
+    }
 
     /**
      * VK refused the run's own account ([refused]) and [stored] is the one its profile holds by now. The operator:
@@ -176,12 +236,45 @@ internal object RunKeeps {
     fun next(refused: String, stored: String): String? = stored.takeIf { it.isNotBlank() && it != refused }
 
     /**
+     * The calls of an «Авто API» recovery. [make] makes them with [first]; when VK refuses that account ([refused]) and
+     * it is the run's own ([own]: not a link's token, and not the stored account of a start), once more with the account
+     * the profile holds by then — [stored] is asked only after the refusal, when the refused token has been cleared
+     * from where it was held, so the same account is never tried twice. The second time [make] is given what the first
+     * left, to go on from it.
+     */
+    suspend fun <T> mint(
+        first: String,
+        own: Boolean,
+        refused: (T) -> Boolean,
+        stored: suspend () -> String,
+        make: suspend (account: String, left: T?) -> T,
+    ): Minted<T> {
+        val made = make(first, null)
+        val other = if (own && refused(made)) next(first, stored()) else null
+        if (other == null) return Minted(made, first.takeUnless { refused(made) }.orEmpty())
+        val again = make(other, made)
+        return Minted(again, other.takeUnless { refused(again) }.orEmpty())
+    }
+
+    /**
      * «Авто ВК»: the core could not start its calls on the account and says so with a fatal [code]. On the user's own
-     * account that word is held until the core has exited, where [next] decides between another account and the stop;
-     * a link's token ([tokenFromLink]) has no other account, and any other fatal word ends the run at once.
+     * account that word is held until the core has exited, where [atExit] decides between another account and the
+     * stop; a link's token ([tokenFromLink]) has no other account, and any other fatal word ends the run at once.
      */
     fun holdsAccountRefusal(code: String, hashMode: String, tokenFromLink: Boolean): Boolean =
         code.startsWith(ACCOUNT_REFUSED) && hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS && !tokenFromLink
+
+    /**
+     * The exit of a core. [refused]: the word it said of its account, null when it said none. [wanted]: the run is
+     * still wanted; [fatal]: another cause has ended it meanwhile — the first cause is the one that counts. With the
+     * word said and the exit its to decide: the run goes on with [stored] when that is another account than
+     * [runAccount], and stops with the word when it is not. After a go-on the stored account is the run's own, so the
+     * same exit a second time stops the run: there is no loop in it.
+     */
+    fun atExit(refused: String?, wanted: Boolean, fatal: Boolean, runAccount: String, stored: String): AccountExit = when {
+        refused == null || !wanted || fatal -> AccountExit.None
+        else -> next(runAccount, stored)?.let { AccountExit.GoOn(it) } ?: AccountExit.Stop(refused)
+    }
 }
 
 /**

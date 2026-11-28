@@ -230,7 +230,8 @@ object TunnelManager {
     private const val STARTUP_DIAGNOSTIC_MS = 30_000L
     private const val CRASH_RESTART_STABLE_MS = 30_000L
     private const val CRASH_RESTART_MAX_DELAY_MS = 60_000L
-    // the core ends itself at once after it says its VK account is refused: this long, and it is stopped with that word
+    // the core ends itself at once after it says its VK account is refused: still alive this long after, it is stopped
+    // with that word
     private const val ACCOUNT_REFUSAL_EXIT_MS = 3_000L
     private const val VPN_START_RETRY_MS = 10_000L
     // M-86: the server's DNS answers on 53 (or its kernel resets: the path works either way); the core gives up after 5 s
@@ -907,7 +908,7 @@ object TunnelManager {
                 if (event.fatal && params != null &&
                     RunKeeps.holdsAccountRefusal(event.code, params.vkHashMode, params.vkTokenFromLink)
                 ) {
-                    holdAccountRefusal(event.code, event.message, identity)
+                    holdAccountRefusal(event.message, identity)
                 } else if (event.fatal) {
                     handleCriticalError(StopCause.deviceLimit(event.message) ?: event.message, identity)
                 } else {
@@ -2047,15 +2048,25 @@ object TunnelManager {
                         // a fatal cause (a dead VK account, a wrong password) ends the run, whichever of this exit and
                         // handleCriticalError's stop takes the lock first (M-47)
                         val restartContext = activeContext()
-                        // card p3-vk-run-account, «Авто ВК»: the core could not start on the run's own VK account
-                        // (holdAccountRefusal). With another account stored by now the run goes on with that one, as
-                        // a restart of the same run; with none its word is the fatal cause it always was. Asked
-                        // before the cause is read, so that the one reading below holds for every branch
-                        val refused = identity.accountRefused?.takeIf { lifecycleWantsRestart && identity.fatal.cause == null }
-                        val nextAccount = if (refused != null) nextRunAccount(restartContext) else null
-                        if (refused != null && nextAccount == null && identity.fatal.record(withoutLogStickers(refused))) {
-                            recordRunFailure(refused)
-                            updateLog("circuit_breaker", "[СТОП] $refused", -1, true)
+                        // card p3-vk-run-account, «Авто ВК»: the core said it could not start on the run's own VK account
+                        // (holdAccountRefusal). With another account stored by now the run goes on with that one, as a
+                        // restart of the same run; with none its word is the fatal cause it always was (RunKeeps.atExit).
+                        // The store is asked before the cause is read, so that the one reading below holds for every
+                        // branch; a cause recorded meanwhile is the one that counts
+                        val runParams = currentParams
+                        val held = identity.accountRefused
+                        val storedAccount = if (held != null && runParams != null && lifecycleWantsRestart && identity.fatal.cause == null) {
+                            storedRunAccount(restartContext)
+                        } else {
+                            ""
+                        }
+                        val accountExit = RunKeeps.atExit(
+                            refused = held, wanted = lifecycleWantsRestart, fatal = identity.fatal.cause != null,
+                            runAccount = runParams?.vkAccessToken.orEmpty(), stored = storedAccount,
+                        )
+                        if (accountExit is AccountExit.Stop && identity.fatal.record(withoutLogStickers(accountExit.cause))) {
+                            recordRunFailure(accountExit.cause)
+                            updateLog("circuit_breaker", "[СТОП] ${accountExit.cause}", -1, true)
                         }
                         val fatalCause = identity.fatal.cause
                         val shouldRestart = shouldRestartProcess(lifecycleWantsRestart, identity.fatal)
@@ -2065,8 +2076,9 @@ object TunnelManager {
                             ?.let { SystemClock.elapsedRealtime() - it }
                             ?: Long.MAX_VALUE
                         // the account the run goes on with is the run's from here: every restart below starts from it
-                        val goesOn = nextAccount != null && fatalCause == null
-                        if (goesOn) currentParams = nextAccount
+                        val nextAccount = (accountExit as? AccountExit.GoOn)?.account?.takeIf { fatalCause == null }
+                        val goesOn = nextAccount != null && runParams != null
+                        if (nextAccount != null && runParams != null) currentParams = runParams.copy(vkAccessToken = nextAccount)
                         val restartParams = if (restartContext == null) {
                             null
                         } else {
@@ -2126,6 +2138,8 @@ object TunnelManager {
                         } else if (shouldRestart && restartParams != null && restartContext != null) {
                             currentParams = restartParams
                             val reason = lastDiagnostic?.let { " Причина: $it" }.orEmpty()
+                            // VK's word about the account the run leaves, then what the run does about it
+                            if (goesOn && held != null) updateLog("vk_account_refused", held, 99, true)
                             updateLog(
                                 "process_restart",
                                 if (goesOn) {
@@ -2140,10 +2154,11 @@ object TunnelManager {
                             val backoffShift = crashRestartStreak.coerceIn(1, 6) - 1
                             // offline the exit does not count, and the restart waits the longest: no restart every
                             // few seconds through an outage (verify N2); back online, it comes within a minute
-                            val restartDelayMs = if (offline) {
-                                CRASH_RESTART_MAX_DELAY_MS
-                            } else {
-                                (2_000L shl backoffShift).coerceAtMost(CRASH_RESTART_MAX_DELAY_MS)
+                            val restartDelayMs = when {
+                                offline -> CRASH_RESTART_MAX_DELAY_MS
+                                // the other account takes over at once: no early exit is backed off from here
+                                goesOn -> 0L
+                                else -> (2_000L shl backoffShift).coerceAtMost(CRASH_RESTART_MAX_DELAY_MS)
                             }
                             scheduleRestartLocked(restartContext, restartParams, identity.ticket.epoch, restartDelayMs)
                             offlineRestart = restartJob?.takeIf { offline }
@@ -2200,29 +2215,26 @@ object TunnelManager {
 
     /**
      * Card p3-vk-run-account, «Авто ВК»: the core could not start its calls on the run's own VK account. It ends itself
-     * right after saying so, and its exit decides ([nextRunAccount]): with another account stored by now the run goes on
-     * with that one, with none it stops with the core's word as it always did. A core that does not end is stopped with
-     * that word.
+     * right after saying so, and its exit decides (RunKeeps.atExit): with another account stored by now the run goes on
+     * with that one, with none it stops with the core's word as it always did. A core that says the word and does not
+     * end is stopped with it; one that has ended is its exit's to decide, also while that exit waits for its turn.
      */
-    private fun holdAccountRefusal(code: String, message: String, identity: ProcessIdentity) {
+    private fun holdAccountRefusal(message: String, identity: ProcessIdentity) {
         identity.accountRefused = message
-        updateProcessLog(identity, "event_error_$code", message, 99, true)
         activeScope.launch {
             delay(ACCOUNT_REFUSAL_EXIT_MS)
-            // a core that has ended is its exit's to decide, also while that exit still waits for its turn
             if (isCurrent(identity) && identity.process.isAlive) handleCriticalError(message, identity)
         }
     }
 
     /**
-     * The run's parameters on the account its profile holds by now, when VK refused the one the run is on and the
-     * stored one is another (RunKeeps.next); null when there is none to go on with.
+     * The account the run's profile holds by now, for the exit of a core whose account VK refused; none when it cannot
+     * be read — also by an exit that is being cancelled, which finishes with what it has, as it does below for the new
+     * session.
      */
-    private suspend fun nextRunAccount(context: Context?): TunnelParams? {
-        val params = currentParams ?: return null
-        val store = activeSettingsStore ?: context?.let { SettingsStore(it, ProfileScope.Run) } ?: return null
-        val stored = runCatching { store.vkAccessToken.first() }.getOrDefault("")
-        return RunKeeps.next(params.vkAccessToken, stored)?.let { params.copy(vkAccessToken = it) }
+    private suspend fun storedRunAccount(context: Context?): String {
+        val store = activeSettingsStore ?: context?.let { SettingsStore(it, ProfileScope.Run) } ?: return ""
+        return runCatching { store.vkAccessToken.first() }.getOrDefault("")
     }
 
     private suspend fun TunnelParams.withNewSession(context: Context): TunnelParams {

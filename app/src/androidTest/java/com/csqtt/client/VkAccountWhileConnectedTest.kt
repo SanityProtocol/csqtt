@@ -27,8 +27,8 @@ import org.junit.runner.RunWith
  * «Аккаунты VK» with the tunnel on (card p3-vk-run-account; the operator, 2026-11-27 «Pick/paste allowed» and 2026-11-28
  * «Allow sign-in, keep deletion guarded»). A run keeps the VK account it started with, so another saved account is
  * picked, a token is pasted and a new sign-in is opened while it runs, each stored for the next connection and saying
- * so. A deletion asks for the tunnel to be stopped: the run would go on using an account the phone no longer has. All
- * of it only for the profile the tunnel is on.
+ * so, for the profile the tunnel is on. A deletion asks for the tunnel to be stopped, on whichever profile it is: the
+ * accounts are the phone's, and the run would go on using an account the phone no longer has. Not while it stops.
  */
 @RunWith(AndroidJUnit4::class)
 class VkAccountWhileConnectedTest {
@@ -71,6 +71,7 @@ class VkAccountWhileConnectedTest {
     @After
     fun restore() = runBlocking {
         TunnelManager.running.value = false
+        TunnelManager.stopping.value = false
         TunnelManager.sourceProfile = profileBefore
         slot.removeVkAccount(FIRST)
         slot.removeVkAccount(SECOND)
@@ -143,13 +144,29 @@ class VkAccountWhileConnectedTest {
             compose.waitUntil(5_000) { !shown(SIGN_IN) }
             assertEquals(token('c'), stored())
 
-            // the tunnel on for another profile: this profile's sheet says nothing of it, and a deletion is asked about
-            tunnelOn(0)
+            // the tunnel on for another profile: this profile's sheet says nothing of a next connection — it is not
+            // this profile's tunnel — but a deletion waits all the same: the accounts are the phone's, and that tunnel
+            // may be on the one to delete. (Off first, as it is between two runs: the screens read which profile a
+            // tunnel is on when it turns on.)
+            TunnelManager.running.value = false
             compose.waitUntil(5_000) { count(NOTE) == 0 }
+            tunnelOn(0)
+            compose.waitForIdle()
+            Thread.sleep(300)
+            assertEquals(0, count(NOTE))
+            compose.waitUntil(8_000) { !shown(STOP_TO_DELETE) }
+            tapTheLastTrash()
+            compose.waitUntil(5_000) { shown(STOP_TO_DELETE) }
+            assertFalse(shown(DELETE_QUESTION))
+            assertEquals(listOf(FIRST, SECOND), accounts())
+
+            // while that tunnel stops it is no longer asked for: the run is ending, and a deletion is asked about
+            TunnelManager.stopping.value = true
             tapTheLastTrash()
             compose.waitUntil(5_000) { shown(DELETE_QUESTION) }
             compose.onNodeWithText("Отмена").performClick()
             compose.waitUntil(5_000) { !shown(DELETE_QUESTION) }
+            TunnelManager.stopping.value = false
 
             // the tunnel off: a pick says nothing of a next connection (the paste's line has had its four seconds first)
             TunnelManager.running.value = false

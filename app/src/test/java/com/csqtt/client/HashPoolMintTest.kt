@@ -88,14 +88,28 @@ class HashPoolMintTest {
 
     /**
      * Card p3-vk-run-account: VK refuses the run's own account in the middle of a recovery's fill and the account
-     * stored by now takes the fill over (TunnelService.resolveAutoHashes): the pool ends at the size an unbroken fill
-     * gives it. [workers] at 20 need two calls.
+     * stored by now takes the fill over. Run through what the service runs (TunnelService.resolveAutoHashes):
+     * RunKeeps.mint for the two attempts and VkHashPool.ask for what each is asked, with VK's answers given and the
+     * fill counted as VkAutoCallsManager.fillPool counts it. The pool ends at the size an unbroken fill gives it.
+     * [workers] at 20 need two calls.
      */
     private suspend fun takenOver(pool: List<String>, dead: String?, refused: FakeVk, next: FakeVk, workers: Int = 20): List<String> {
-        fun target(alive: Int, extra: Int) = VkAutoCallsManager.poolTarget(workers, alive, extra)
-        val first = VkHashPool.fill(pool, dead, target(VkHashPool.alive(pool, dead).size, 0), refused::mint)
-        assertTrue(first.tokenInvalid)
-        return VkHashPool.fill(first.hashes, null, target(first.hashes.size, VkHashPool.owed(pool, first.hashes)), next::mint).hashes
+        val vk = mapOf("refused" to refused, "next" to next)
+        val minted = RunKeeps.mint<VkHashPool.Fill>("refused", own = true, refused = { it.tokenInvalid }, stored = { "next" }) { account, left ->
+            val ask = VkHashPool.ask(pool, dead, left)
+            val target = VkAutoCallsManager.poolTarget(workers, VkHashPool.alive(ask.pool, ask.dead).size, ask.extra)
+            VkHashPool.fill(ask.pool, ask.dead, target, vk.getValue(account)::mint)
+        }
+        assertEquals("the account that filled the pool is the run's from here", "next", minted.account)
+        return minted.made.hashes
+    }
+
+    @Test fun aFillAsksForThePoolAsItIsAndATakeOverForWhatIsLeftAndOwed() {
+        val pool = listOf(hash('A'), hash('B'), hash('C'))
+        assertEquals(VkHashPool.Ask(pool, hash('B'), 0), VkHashPool.ask(pool, hash('B'), left = null))
+        // the refused account dropped the dead call and made nothing: one call is owed, and nothing more is dropped
+        val left = VkHashPool.Fill(listOf(hash('A'), hash('C')), minted = 0, tokenInvalid = true, errors = emptyList())
+        assertEquals(VkHashPool.Ask(listOf(hash('A'), hash('C')), null, 1), VkHashPool.ask(pool, hash('B'), left))
     }
 
     @Test fun theAccountThatTakesAFillOverReplacesTheDeadCallOfAPoolAboveItsTarget() = runTest {
