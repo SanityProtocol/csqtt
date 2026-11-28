@@ -424,7 +424,6 @@
     <string name="vk_account_pasted_title">Аккаунт этого профиля</string>
     <string name="vk_account_pasted">токен вставлен вручную</string>
     <string name="vk_account_unlisted">id %1$s · нет в списке аккаунтов</string>
-    <string name="vk_account_selected">выбран</string>
     <string name="vk_account_delete">Удалить: %1$s</string>
     <string name="vk_accounts_none">На этом телефоне ещё не входили в VK.</string>
     <string name="vk_sign_in_first">Войти в аккаунт VK</string>

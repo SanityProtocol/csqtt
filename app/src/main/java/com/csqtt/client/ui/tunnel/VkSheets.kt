@@ -44,6 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -106,13 +107,10 @@ private class PoolRead(val pool: VkPoolState?)
 internal fun vkRunsHere(profile: Int): Boolean =
     (TunnelManager.running.value || TunnelManager.starting.value) && profile == TunnelManager.runTargetProfile()
 
-/** The square at the head of a row of a list of accounts or calls: a mark, or a tick for the chosen one. */
+/** The square at the head of a row of the pool's calls. An account's row has none: its choice is the row's own tint. */
 @Composable
-private fun RowMark(on: Boolean = false, content: @Composable () -> Unit) {
-    val colors = Csq.colors
-    Box(Modifier.size(32.dp).background(if (on) colors.accent else colors.raised, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
-        if (on) Icon(Icons.check, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.onAccent) else content()
-    }
+private fun RowMark(content: @Composable () -> Unit) {
+    Box(Modifier.size(32.dp).background(Csq.colors.raised, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) { content() }
 }
 
 /**
@@ -197,15 +195,19 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
             Card(flush = true) {
                 if (unlisted) {
                     val name = stringResource(R.string.vk_account_pasted_title)
+                    // The chosen account is the tinted row, with no mark before it and no word after it (the operator,
+                    // 2026-11-28: «just row selection with no first part», and of «выбран»: «only one account is
+                    // allowed to be selected, so if the row is selected - why do we need that word»). This row is not a
+                    // choice to tap, so it says «selected» to TalkBack itself; the rows under it say it as the choices
+                    // they are (Cell)
                     Cell(
                         // a token pasted by hand names no account; one whose account was since taken off the list
                         // (from another profile's sheet) still names its id
                         title = name,
+                        modifier = Modifier.semantics { selected = true },
                         sub = if (userId.isEmpty()) stringResource(R.string.vk_account_pasted) else stringResource(R.string.vk_account_unlisted, userId),
                         selected = true,
-                        leading = { RowMark(on = true) {} },
                         trailing = {
-                            Chip(stringResource(R.string.vk_account_selected), kind = ChipKind.Accent, small = true)
                             IconBtn(Icons.trash, stringResource(R.string.vk_account_delete, name), { if (mayDelete()) deleting = "" }, small = true, tint = colors.muted)
                         },
                     )
@@ -226,9 +228,7 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                                 }
                             }
                         },
-                        leading = { RowMark(on = selected) { Text((index + 1).toString(), style = Type.chipSmall, color = colors.muted) } },
                         trailing = {
-                            if (selected) Chip(stringResource(R.string.vk_account_selected), kind = ChipKind.Accent, small = true)
                             IconBtn(Icons.trash, stringResource(R.string.vk_account_delete, name), { if (mayDelete()) deleting = id }, small = true, tint = colors.muted)
                         },
                     )
