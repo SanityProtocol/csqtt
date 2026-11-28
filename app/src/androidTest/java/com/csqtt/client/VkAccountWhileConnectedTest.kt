@@ -3,6 +3,7 @@ package com.csqtt.client
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isSelected
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
@@ -83,6 +84,10 @@ class VkAccountWhileConnectedTest {
     private fun shown(text: String, substring: Boolean = false): Boolean =
         compose.onAllNodes(hasText(text, substring = substring)).fetchSemanticsNodes().isNotEmpty()
 
+    /** Whether a row with [text] is read to TalkBack as one item that is the selected one. */
+    private fun saidSelected(text: String): Boolean =
+        compose.onAllNodes(hasText(text, substring = true) and isSelected()).fetchSemanticsNodes().isNotEmpty()
+
     private fun account(): String = runBlocking { slot.vkAccessTokenUserId.first() }
     private fun stored(): String = runBlocking { slot.vkAccessToken.first() }
     private fun accounts(): List<String> = runBlocking { slot.vkAccounts.first() }.filter { it == FIRST || it == SECOND }.sorted()
@@ -120,6 +125,9 @@ class VkAccountWhileConnectedTest {
             compose.waitUntil(5_000) { account() == FIRST }
             compose.waitUntil(5_000) { shown(NEXT) }
             assertEquals(token('a'), stored())
+            // the chosen account is its row alone, with no mark and no word: TalkBack hears it from the row
+            compose.waitUntil(5_000) { saidSelected("id $FIRST") }
+            assertFalse(saidSelected("id $SECOND"))
 
             // a deletion would leave the running tunnel on an account the phone no longer has: it waits for the stop,
             // nothing is asked and nothing goes
@@ -135,6 +143,10 @@ class VkAccountWhileConnectedTest {
             compose.onNodeWithText("Подключить").performScrollTo().performClick()
             compose.waitUntil(5_000) { stored() == token('c') }
             compose.waitUntil(5_000) { shown(NEXT) }
+            // a pasted token names no account of the list: its row is the chosen one, and is read as one item that
+            // says so (the row is no choice to tap, so it has to say it itself)
+            compose.waitUntil(5_000) { saidSelected("Аккаунт этого профиля") }
+            assertFalse(saidSelected("id $FIRST"))
 
             // a new sign-in is opened with the tunnel on: the run keeps the account it started with, whatever is signed
             // in to meanwhile

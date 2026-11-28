@@ -205,14 +205,15 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                     val name = stringResource(R.string.vk_account_pasted_title)
                     // The chosen account is the tinted row, with no mark before it and no word after it (the operator,
                     // 2026-11-28: «just row selection with no first part», and of «выбран»: «only one account is
-                    // allowed to be selected, so if the row is selected - why do we need that word»). This row is not a
-                    // choice to tap, so it says «selected» to TalkBack itself; the rows under it say it as the choices
-                    // they are (Cell)
+                    // allowed to be selected, so if the row is selected - why do we need that word»). The rows under
+                    // this one say «selected» to TalkBack as the choices they are (Cell). This row is no choice to
+                    // tap, so it says it itself — as one item with its name: a state on a row that does not gather
+                    // its texts is on nothing TalkBack stops at. Its «Удалить» stays an item of its own
                     Cell(
                         // a token pasted by hand names no account; one whose account was since taken off the list
                         // (from another profile's sheet) still names its id
                         title = name,
-                        modifier = Modifier.semantics { selected = true },
+                        modifier = Modifier.semantics(mergeDescendants = true) { selected = true },
                         sub = if (userId.isEmpty()) stringResource(R.string.vk_account_pasted) else stringResource(R.string.vk_account_unlisted, userId),
                         selected = true,
                         trailing = {
