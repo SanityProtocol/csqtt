@@ -63,6 +63,9 @@ import com.csqtt.client.ProfileModeAction
 import com.csqtt.client.ProfileScope
 import com.csqtt.client.R
 import com.csqtt.client.ReceivedHashes
+import com.csqtt.client.RunKey
+import com.csqtt.client.RunUses
+import com.csqtt.client.RunView
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelIssues
@@ -85,6 +88,7 @@ import com.csqtt.client.ui.components.Chip
 import com.csqtt.client.ui.components.ChipKind
 import com.csqtt.client.ui.components.Field
 import com.csqtt.client.ui.components.IconBtn
+import com.csqtt.client.ui.components.NowLine
 import com.csqtt.client.ui.components.SecretField
 import com.csqtt.client.ui.components.Select
 import com.csqtt.client.ui.components.SettingRow
@@ -101,6 +105,7 @@ import com.csqtt.client.ui.legacy.utils.parseCsqttLink
 import com.csqtt.client.ui.profiles.copiedText
 import com.csqtt.client.ui.shell.LocalNav
 import com.csqtt.client.ui.shell.LocalOwners
+import com.csqtt.client.ui.shell.LocalRun
 import com.csqtt.client.ui.shell.LocalStore
 import com.csqtt.client.ui.shell.NavModel
 import com.csqtt.client.ui.shell.Routes
@@ -175,12 +180,13 @@ internal class TunnelView(
     val results: Map<String, VkHashValidationStatus>,
     val running: Boolean,
     /**
-     * The tunnel is on, or being started, for this profile: what is changed here is read when a run starts, so it is for
-     * the next connection — one line says so at the head of the tab and of «Дополнительно» ([RunNote]), and nothing is
-     * held (the operator, 2026-11-27). A change made for another profile is that profile's own next start, with nothing
-     * to say.
+     * The run, when the tunnel is on for this profile, and null when it is not (card p3-apply-bar). What is changed
+     * here is read when a run starts, so under a running tunnel it is for the next connection: nothing is held (the
+     * operator, 2026-11-27), the bar over the tabs says what applies the changes, and a row whose choice the run has
+     * not taken says what it uses now ([now]). A change made for another profile is that profile's own next start, with
+     * nothing to say.
      */
-    val runsHere: Boolean,
+    val run: RunView?,
     val issues: TunnelIssues,
     val riskAcknowledged: Boolean,
     /** The calls in the owner's pool; null when this profile's run uses none. */
@@ -188,6 +194,15 @@ internal class TunnelView(
 ) {
     val autoHash: Boolean get() = authMode == CsqttConstants.VkAuth.MODE_AUTO_JS || hashMode != CsqttConstants.VkAutoHash.MODE_MANUAL
     val ownerInUse: Int get() = ownerHashes.count { it !in removedOwner }
+
+    /** The tunnel is on for this profile. */
+    val runsHere: Boolean get() = run != null
+
+    /** The run has not taken this profile's [key]: it waits for a reconnect. */
+    fun waits(key: RunKey): Boolean = run?.let { key in it.keys } == true
+
+    /** What the run uses of [key]'s setting, when it has not taken the profile's — to be said as «Сейчас: …» — else null. */
+    fun <T> now(key: RunKey, value: (RunUses) -> T): T? = run?.takeIf { key in it.keys }?.let { value(it.uses) }
 }
 
 /**
@@ -226,8 +241,9 @@ internal fun TunnelTab(
     val riskAcknowledged by store.autoJsRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
     val pool by store.vkPoolState.collectAsStateWithLifecycle(initialValue = null)
     val running by TunnelManager.running.collectAsStateWithLifecycle()
-    // a start being prepared has read its settings too: a change made then is not taken by it
-    val starting by TunnelManager.starting.collectAsStateWithLifecycle()
+    // the run, when it is this profile's: read from the shell's one state of it, so the form follows the run's profile
+    // whenever that changes
+    val run = LocalRun.current?.takeIf { it.profile == profile }
 
     val peer = storedPeer
     val port = storedPort
@@ -303,14 +319,16 @@ internal fun TunnelTab(
         storedAuthMode = savedAuthMode, vkTokenActive = vkTokenActive, vkUserId = vkUserId, ownerHashes = ownerHashes,
         removedOwner = removedOwner, linkTokenActive = linkTokenActive, ownCount = ownCount,
         startHashes = hashesAStartUses(ownerHashes.filterNot { it in removedOwner } + own, results).size, results = results,
-        running = running, runsHere = (running || starting) && profile == TunnelManager.runTargetProfile(),
+        running = running, run = run,
         issues = issues, riskAcknowledged = riskAcknowledged,
         poolSize = pool?.pool?.size,
     )
 
-    // the modes a link pins are stored as they are in force, so the run reads what the screen shows
-    LaunchedEffect(linkMode, ownerHashes.isNotEmpty(), linkTokenActive, savedAuthMode, savedHashMode) {
-        if (!linkMode) return@LaunchedEffect
+    // The modes a link pins are stored as they are in force, so the run reads what the screen shows. Not while the
+    // tunnel is on for this profile: a start corrects them itself, and a correction written under a running tunnel
+    // would read as a change of the user's that waits for a reconnect (card p3-apply-bar)
+    LaunchedEffect(linkMode, ownerHashes.isNotEmpty(), linkTokenActive, savedAuthMode, savedHashMode, run != null) {
+        if (!linkMode || run != null) return@LaunchedEffect
         when {
             ownerHashes.isNotEmpty() && savedAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CALLS)
             linkTokenActive && savedHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL -> store.saveVkHashMode(CsqttConstants.VkAutoHash.MODE_AUTO_API)
@@ -357,8 +375,8 @@ internal fun TunnelTab(
                 modifier = Modifier.padding(start = 4.dp, top = 2.dp).semantics { heading() },
             )
             if (entry != null) ProfileContext(entry)
-            if (view.runsHere) RunNote(Modifier.padding(horizontal = 4.dp))
-            if (required && issues.any) InvalidBanner()
+            // under a running tunnel the marks are a reconnect's: «Переподключить» was refused for what the form holds
+            if (required && issues.any) InvalidBanner(reconnect = view.runsHere)
             if (linkMode) {
                 if (shownLink != null) LinkNoteCard(view)
                 LinkCard(
@@ -498,7 +516,7 @@ private fun ProfileContext(entry: ProfileEntry) {
 
 /** Said over the form once a start was refused for what it holds (the canvas, F-TunnelInvalid). */
 @Composable
-private fun InvalidBanner() {
+private fun InvalidBanner(reconnect: Boolean) {
     val colors = Csq.colors
     Row(
         Modifier.fillMaxWidth().clip(Shape.card).background(colors.dangerSoft).padding(horizontal = 14.dp, vertical = 10.dp),
@@ -506,7 +524,10 @@ private fun InvalidBanner() {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.alert, contentDescription = null, modifier = Modifier.size(22.dp), tint = colors.danger)
-        Text(stringResource(R.string.tunnel_invalid_banner), style = Type.fact, color = colors.text)
+        Text(
+            stringResource(if (reconnect) R.string.tunnel_reconnect_refused else R.string.tunnel_invalid_banner),
+            style = Type.fact, color = colors.text,
+        )
     }
 }
 
@@ -541,6 +562,7 @@ private fun OwnCard(
                     null -> null
                 },
                 keyboard = done.copy(keyboardType = KeyboardType.Uri), onDone = { focus.clearFocus() },
+                now = view.now(RunKey.ADDRESS) { it.address },
             )
             Field(
                 stringResource(R.string.tunnel_port), port, onPort,
@@ -548,6 +570,7 @@ private fun OwnCard(
                 placeholder = CsqttConstants.Network.DEFAULT_SERVER_PEER_PORT.toString(),
                 error = if (view.issues.port) stringResource(R.string.tunnel_port_wrong) else null,
                 keyboard = done.copy(keyboardType = KeyboardType.Number), onDone = { focus.clearFocus() },
+                now = view.now(RunKey.PORT) { it.port.toString() },
             )
         }
         SecretField(
@@ -576,6 +599,8 @@ private fun OwnCard(
             onDone = { focus.clearFocus() },
             // the password holds no space: a pasted one's stray space or line end is dropped, as the address's is
             accept = { it.filterNot(Char::isWhitespace) },
+            // a password is never shown: the tunnel is on the one before
+            now = if (view.waits(RunKey.PASSWORD)) stringResource(R.string.now_password) else null,
         )
         Hairline()
         HashControls(view)
@@ -634,6 +659,8 @@ private fun LinkCard(
             },
             keyboard = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri),
             onDone = { focus.clearFocus() },
+            // a link holds the password: it is named, not shown
+            now = if (view.waits(RunKey.LINK)) stringResource(R.string.now_link) else null,
             trailing = {
                 Row {
                     IconBtn(Icons.clipboard, stringResource(R.string.action_paste), {
@@ -663,6 +690,7 @@ private fun LinkCard(
                 stringResource(R.string.tunnel_owner_hashes),
                 stringResource(R.string.tunnel_owner_hashes_sub, view.ownerInUse, view.ownCount),
                 danger = view.issues.hashes,
+                now = view.hashesNow(),
             ) { nav.open(Routes.hashes(profile)) }
         } else if (!view.linkTokenActive && shown != null) {
             Hairline()
@@ -684,6 +712,7 @@ private fun LinkCard(
                     else -> stringResource(R.string.tunnel_accept_wait)
                 },
             )
+            view.now(RunKey.ACCEPT_HASHES) { it.acceptServerHashes }?.let { NowLine(stringResource(if (it) R.string.now_on else R.string.now_off)) }
             Text(stringResource(R.string.tunnel_accept_hint), style = Type.sub, color = colors.muted)
         }
         if (modeAction == ProfileModeAction.ENTER_SERVER) ModeAction(view, R.string.tunnel_enter_server, linkMode = false)
@@ -751,6 +780,8 @@ private fun HashControls(view: TunnelView) {
             description = stringResource(R.string.tunnel_hash_mode),
         )
     }
+    // the mode the run is in, where the mode in force here is another
+    view.now(RunKey.HASH_MODE) { it.hashMode }?.takeIf { it != view.hashMode }?.let { NowLine(hashModeName(it), end = true) }
     if (!view.autoHash) {
         Btn(
             if (view.ownCount > 0) stringResource(R.string.tunnel_hashes_button, view.ownCount, OWN_HASH_FIELDS)
@@ -759,6 +790,7 @@ private fun HashControls(view: TunnelView) {
             modifier = Modifier.fillMaxWidth(), icon = Icons.link, kind = if (view.issues.hashes) BtnKind.Danger else BtnKind.Plain,
         )
         if (view.issues.hashes) Text(stringResource(R.string.tunnel_hashes_missing), style = Type.sub, color = colors.danger)
+        view.hashesNow()?.let { NowLine(it) }
     } else {
         NavRow(
             stringResource(R.string.tunnel_account),
@@ -769,6 +801,7 @@ private fun HashControls(view: TunnelView) {
                 else -> stringResource(R.string.tunnel_account_on_plain)
             },
             danger = view.issues.hashes,
+            now = view.now(RunKey.ACCOUNT) { it }?.let { runAccountName(it) },
         ) { nav.open(Routes.vkAccounts(view.profile)) }
         if (view.poolSize != null && view.hashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API) {
             Btn(
@@ -801,9 +834,12 @@ internal fun Hairline() {
     Box(Modifier.fillMaxWidth().height(1.dp).background(Csq.colors.lineSoft))
 }
 
-/** A row that leads on: what it opens, a line about it, a chevron. [danger] marks what a refused start asked for. */
+/**
+ * A row that leads on: what it opens, a line about it, a chevron. [danger] marks what a refused start asked for. [now]:
+ * what the running tunnel uses of what the row leads to, where that is not what the row says.
+ */
 @Composable
-internal fun NavRow(title: String, sub: String?, danger: Boolean = false, onClick: () -> Unit) {
+internal fun NavRow(title: String, sub: String?, danger: Boolean = false, now: String? = null, onClick: () -> Unit) {
     val colors = Csq.colors
     Row(
         Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp).clickable(role = Role.Button, onClick = onClick),
@@ -813,19 +849,37 @@ internal fun NavRow(title: String, sub: String?, danger: Boolean = false, onClic
         Column(Modifier.weight(1f)) {
             Text(title, style = Type.body, color = colors.text)
             if (sub != null) Text(sub, style = Type.sub, color = if (danger) colors.danger else colors.muted)
+            if (now != null) NowLine(now)
         }
         Icon(Icons.chevronRight, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.muted)
     }
 }
 
+/** A hash mode's name, as its row's choices name it. */
+@Composable
+internal fun hashModeName(mode: String): String = stringResource(
+    when (mode) {
+        CsqttConstants.VkAutoHash.MODE_AUTO_API -> R.string.tunnel_hash_auto_api
+        CsqttConstants.VkAutoHash.MODE_AUTO_JS -> R.string.tunnel_hash_auto_vk
+        else -> R.string.tunnel_hash_manual
+    },
+)
+
 /**
- * Said while the tunnel is on for the open profile ([TunnelView.runsHere]), once for all that is under it: nothing on
- * this tab is taken by a running tunnel but the MTU, which says so itself.
+ * The VK account the run is on, for «Сейчас: …»: its id when it is one of the signed-in accounts; a token pasted by
+ * hand names none; a pool can serve with no account at all.
  */
 @Composable
-internal fun RunNote(modifier: Modifier = Modifier) {
-    Text(stringResource(R.string.tunnel_next_connection), style = Type.sub, color = Csq.colors.muted, modifier = modifier)
+internal fun runAccountName(uses: RunUses): String = when {
+    !uses.hasAccount -> stringResource(R.string.now_account_none)
+    uses.accountId.isEmpty() -> stringResource(R.string.now_account_old)
+    else -> stringResource(R.string.now_account_id, uses.accountId)
 }
+
+/** «Сейчас: прежние хеши», where the profile's own hashes or the owner's taken out are not the ones the run started with. */
+@Composable
+private fun TunnelView.hashesNow(): String? =
+    if (waits(RunKey.OWN_HASHES) || waits(RunKey.OWNER_HASHES)) stringResource(R.string.now_hashes) else null
 
 /**
  * Opens the VK sign-in for [profile]; the last session's cookies go first, so that the sign-in can be to another

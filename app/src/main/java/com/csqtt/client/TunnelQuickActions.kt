@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.widget.Toast
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapLatest
 
 internal object QuickTunnelAction {
     const val START = "START"
@@ -22,6 +26,8 @@ internal suspend fun buildTunnelStartIntent(
     sessionSalt: String = "",
 ): Intent? {
     val source = resolveConnectionSource(store) ?: return null
+    // what the start takes of the profile is what the run keeps of it (RunRead): one reading for both
+    val read = store.runRead()
     return Intent(context, TunnelService::class.java).apply {
         action = QuickTunnelAction.START
         putExtra("peer", source.peer)
@@ -30,9 +36,8 @@ internal suspend fun buildTunnelStartIntent(
         putExtra("vk_access_token", source.vkAccessToken)
         putExtra("vk_token_from_link", source.tokenFromLink)
         putExtra("connection_password", source.password)
-        putTunnelSettings(store.tunnelStartSettings())
+        putRunRead(read)
         putExtra("port", 0)
-        putExtra(CsqttConstants.General.EXTRA_RUN_PROFILE, store.selectedProfileIndex.first())
         if (generationId > 0L) putExtra("generation_id", generationId)
         if (sessionSalt.isNotEmpty()) putExtra("session_salt", sessionSalt)
     }
@@ -73,6 +78,33 @@ internal suspend fun SettingsStore.tunnelStartSettings(): TunnelStartSettings = 
     customTurnIps = customTurnIps.first(),
 )
 
+/**
+ * A profile as a start reads it (RunRead): its connection as the user set it, the settings, the hash mode. The same
+ * reading is made by a START, by a restore, and — made now — by the screens that say what waits for a reconnect.
+ */
+internal suspend fun SettingsStore.runRead(): RunRead = RunRead(
+    profile = selectedProfileIndex.first(),
+    source = SourceRead(
+        linkMode = csqttLinkMode.first(),
+        address = peer.first(),
+        port = serverPeerPort.first(),
+        password = connectionPassword.first(),
+        link = csqttLink.first(),
+        ownHashes = vkHashes.first().split(Regex("[,\\s\\n]+")).map(String::trim).filter(String::isNotEmpty).distinct(),
+        removedOwner = linkHashesRemoved.first(),
+        acceptServerHashes = acceptServerHashes.first(),
+    ),
+    settings = tunnelStartSettings(),
+    hashMode = vkHashMode.first(),
+    turnSubnet = selectedTurnSubnet.first(),
+    turnLimit = turnSubnetIpLimit.first(),
+)
+
+/** The profile's reading and its VK account, now and after every write of the store: what a run's record is compared with. */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+internal fun SettingsStore.runReadNow(): Flow<Pair<RunRead, String>> =
+    writes.conflate().mapLatest { runRead() to vkAccessToken.first() }.distinctUntilChanged()
+
 internal fun Intent.putTunnelSettings(settings: TunnelStartSettings): Intent = apply {
     putExtra("secondary_vk_hash", settings.secondaryVkHash)
     putExtra("workers_per_hash", settings.workersPerHash)
@@ -89,6 +121,24 @@ internal fun Intent.putTunnelSettings(settings: TunnelStartSettings): Intent = a
     putExtra("srtp_mode", settings.srtpMode)
     putExtra("custom_turn_ips", settings.customTurnIps)
 }
+
+/** The settings a START carries, as [putTunnelSettings] put them; the store's own defaults for one that carries none. */
+internal fun Intent.tunnelSettings(): TunnelStartSettings = TunnelStartSettings(
+    secondaryVkHash = getStringExtra("secondary_vk_hash").orEmpty(),
+    workersPerHash = getIntExtra("workers_per_hash", CsqttConstants.Tunnel.DEFAULT_WORKERS),
+    sni = getStringExtra("sni").orEmpty(),
+    protocol = getStringExtra("protocol") ?: "udp",
+    vkAuthMode = getStringExtra("vk_auth_mode") ?: CsqttConstants.VkAuth.MODE_CALLS,
+    captchaMode = getStringExtra("captcha_mode") ?: "auto",
+    captchaSolveMethod = getStringExtra("captcha_solve_method") ?: "auto",
+    fingerprint = getStringExtra("fingerprint") ?: CsqttConstants.Tunnel.DEFAULT_FINGERPRINT,
+    clientIds = getStringExtra("client_ids") ?: CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS,
+    obfsMode = getStringExtra("obfs_mode") ?: CsqttConstants.Tunnel.DEFAULT_OBFS_MODE,
+    turnTransport = getStringExtra("turn_transport") ?: CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT,
+    dpiSplit = DpiSplitMode.fromStored(getStringExtra(DpiSplitMode.EXTRA)),
+    srtpMode = getStringExtra("srtp_mode") ?: CsqttConstants.SrtpMode.DEFAULT,
+    customTurnIps = getStringExtra("custom_turn_ips").orEmpty(),
+)
 
 /** What a tap on the tile or the widget does (M-44). */
 internal enum class QuickTap { IGNORE, STOP, OPEN_CAPTCHA, START }

@@ -18,6 +18,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.BeforeClass
 import org.junit.Rule
@@ -27,9 +28,12 @@ import org.junit.runner.RunWith
 /**
  * «Аккаунты VK» with the tunnel on (card p3-vk-run-account; the operator, 2026-11-27 «Pick/paste allowed» and 2026-11-28
  * «Allow sign-in, keep deletion guarded»). A run keeps the VK account it started with, so another saved account is
- * picked, a token is pasted and a new sign-in is opened while it runs, each stored for the next connection and saying
- * so, for the profile the tunnel is on. A deletion asks for the tunnel to be stopped, on whichever profile it is: the
- * accounts are the phone's, and the run would go on using an account the phone no longer has. Not while it stops.
+ * picked, a token is pasted and a new sign-in is opened while it runs, each stored for the next connection. What says
+ * so is the apply bar, on the sheet's own foot since the sheet covers the tabs, and the line under the list that names
+ * the account the tunnel is on now (card p3-apply-bar; the operator, 2026-11-28: «The same bar on the sheet») — not a
+ * message that goes after four seconds, and not a line that stood there before anything was touched. A deletion asks
+ * for the tunnel to be stopped, on whichever profile it is: the accounts are the phone's, and the run would go on using
+ * an account the phone no longer has. Not while it stops.
  */
 @RunWith(AndroidJUnit4::class)
 class VkAccountWhileConnectedTest {
@@ -41,8 +45,9 @@ class VkAccountWhileConnectedTest {
         private const val SLOT = 21
         private const val FIRST = "910000001"
         private const val SECOND = "910000002"
-        private const val NOTE = "Туннель включён: изменения применятся при следующем подключении."
+        private const val STANDING = "Туннель включён: изменения применятся при следующем подключении."
         private const val NEXT = "Аккаунт применится при следующем подключении"
+        private const val NOW_SECOND = "Сейчас: Аккаунт 2 · id $SECOND"
         private const val STOP_TO_DELETE = "Чтобы удалить аккаунт, остановите туннель"
         private const val DELETE_QUESTION = "Удалить аккаунт VK?"
         private const val SIGN_IN = "Войдите в аккаунт VK"
@@ -55,12 +60,10 @@ class VkAccountWhileConnectedTest {
     private val store by lazy { SettingsStore(context) }
     private val slot by lazy { SettingsStore(context, ProfileScope.Fixed(SLOT)) }
     private fun token(tail: Char) = "vk1.a." + tail.toString().repeat(40)
-    private var profileBefore = -1
 
     // an owner in «Авто API» with two accounts signed in on the phone, on the second of them
     @Before
     fun twoAccounts() = runBlocking {
-        profileBefore = TunnelManager.sourceProfile
         store.clearProfile(SLOT)
         store.saveActiveProfile(SLOT)
         store.saveCsqttLinkMode(false)
@@ -71,9 +74,7 @@ class VkAccountWhileConnectedTest {
 
     @After
     fun restore() = runBlocking {
-        TunnelManager.running.value = false
-        TunnelManager.stopping.value = false
-        TunnelManager.sourceProfile = profileBefore
+        ShellTestKit.tunnelOff()
         slot.removeVkAccount(FIRST)
         slot.removeVkAccount(SECOND)
         store.saveActiveProfile(0)
@@ -92,11 +93,11 @@ class VkAccountWhileConnectedTest {
     private fun stored(): String = runBlocking { slot.vkAccessToken.first() }
     private fun accounts(): List<String> = runBlocking { slot.vkAccounts.first() }.filter { it == FIRST || it == SECOND }.sorted()
 
-    /** The tunnel as the manager would say it, with no tunnel: the screens read nothing else. */
-    private fun tunnelOn(profile: Int) {
-        TunnelManager.sourceProfile = profile
-        TunnelManager.running.value = true
-    }
+    /** An account's row in the list, by its own line: «Сейчас: … id …» names an account too, and is no row. */
+    private fun row(id: String) = compose.onNodeWithText("id $id · постоянный токен", substring = true)
+
+    /** The apply bars on screen: the one over the tabs, and with a sheet open the one on its foot too. */
+    private fun bars(): Int = count(ShellTestKit.BAR)
 
     private fun tapTheLastTrash() =
         compose.onAllNodes(hasContentDescription("Удалить", substring = true)).onLast().performScrollTo().performClick()
@@ -107,24 +108,26 @@ class VkAccountWhileConnectedTest {
             compose.waitUntil(10_000) { shown("Туннель") }
             compose.onNodeWithText("Туннель").performClick()
             compose.waitUntil(10_000) { shown("Аккаунт VK") }
-            assertEquals(0, count(NOTE))
 
-            // the tunnel on for this profile: the tab says what a change is for (once, and once more in «Дополнительно»
-            // where that is open), and the sheet, which covers the tab, says it too
-            tunnelOn(SLOT)
-            compose.waitUntil(5_000) { count(NOTE) > 0 }
+            // the tunnel on for this profile, on the account the profile holds: nothing waits, and nothing is said of
+            // a change that was not made — on the tab or on the sheet
+            ShellTestKit.tunnelOn(SLOT, account = token('b'))
             compose.waitForIdle()
-            val onTheTab = count(NOTE)
             compose.onNodeWithText("Аккаунт VK").performScrollTo().performClick()
             compose.waitUntil(5_000) { shown("Аккаунты VK") && shown("id $FIRST", substring = true) }
-            compose.waitUntil(5_000) { count(NOTE) == onTheTab + 1 }
+            assertEquals(0, bars())
+            assertFalse(shown(STANDING))
+            assertFalse(shown("Сейчас", substring = true))
             assertEquals(SECOND, account())
 
-            // the other account, saved on this phone: taken, for the next connection
-            compose.onNodeWithText("id $FIRST", substring = true).performScrollTo().performClick()
+            // the other account, saved on this phone: taken, for the next connection. The sheet says which account the
+            // tunnel is on, and carries the bar on its own foot (the tab's is under it); the tab's row says it too
+            row(FIRST).performScrollTo().performClick()
             compose.waitUntil(5_000) { account() == FIRST }
-            compose.waitUntil(5_000) { shown(NEXT) }
+            compose.waitUntil(5_000) { shown(NOW_SECOND) && bars() == 2 }
+            compose.waitUntil(5_000) { shown("Сейчас: id $SECOND") }
             assertEquals(token('a'), stored())
+            assertFalse("the message that went after four seconds", shown(NEXT))
             // the chosen account is its row alone, with no mark and no word: TalkBack hears it from the row
             compose.waitUntil(5_000) { saidSelected("id $FIRST") }
             assertFalse(saidSelected("id $SECOND"))
@@ -137,12 +140,14 @@ class VkAccountWhileConnectedTest {
             assertEquals(listOf(FIRST, SECOND), accounts())
             assertEquals(FIRST, account())
 
-            // a token pasted by hand: stored, for the next connection (the line above was the deletion's, so this one
-            // is the paste's own)
+            // a token pasted by hand: stored, for the next connection — the tunnel is still on the second account
             compose.onAllNodes(hasSetTextAction()).onLast().performScrollTo().performTextReplacement(token('c'))
             compose.onNodeWithText("Подключить").performScrollTo().performClick()
             compose.waitUntil(5_000) { stored() == token('c') }
-            compose.waitUntil(5_000) { shown(NEXT) }
+            compose.waitUntil(5_000) { shown("Аккаунт VK подключён") }
+            assertFalse(shown(NEXT))
+            assertEquals(2, bars())
+            assertTrue(shown(NOW_SECOND))
             // a pasted token names no account of the list: its row is the chosen one, and is read as one item that
             // says so (the row is no choice to tap, so it has to say it itself)
             compose.waitUntil(5_000) { saidSelected("Аккаунт этого профиля") }
@@ -156,16 +161,22 @@ class VkAccountWhileConnectedTest {
             compose.waitUntil(5_000) { !shown(SIGN_IN) }
             assertEquals(token('c'), stored())
 
-            // the tunnel on for another profile: this profile's sheet says nothing of a next connection — it is not
-            // this profile's tunnel — but a deletion waits all the same: the accounts are the phone's, and that tunnel
-            // may be on the one to delete. (Off first, as it is between two runs: the screens read which profile a
-            // tunnel is on when it turns on.)
-            TunnelManager.running.value = false
-            compose.waitUntil(5_000) { count(NOTE) == 0 }
-            tunnelOn(0)
+            // the account the tunnel is on, picked back: nothing waits any more, and both bars and the line go
+            row(SECOND).performScrollTo().performClick()
+            compose.waitUntil(5_000) { account() == SECOND }
+            compose.waitUntil(5_000) { bars() == 0 && !shown("Сейчас", substring = true) }
+
+            // the tunnel on for another profile: an account taken here is this profile's own next start, with nothing
+            // to say — but a deletion waits all the same: the accounts are the phone's, and that tunnel may be on the
+            // one to delete
+            ShellTestKit.tunnelOff()
+            ShellTestKit.tunnelOn(0)
+            row(FIRST).performScrollTo().performClick()
+            compose.waitUntil(5_000) { account() == FIRST }
             compose.waitForIdle()
             Thread.sleep(300)
-            assertEquals(0, count(NOTE))
+            assertEquals(0, bars())
+            assertFalse(shown("Сейчас", substring = true))
             compose.waitUntil(8_000) { !shown(STOP_TO_DELETE) }
             tapTheLastTrash()
             compose.waitUntil(5_000) { shown(STOP_TO_DELETE) }
@@ -180,14 +191,13 @@ class VkAccountWhileConnectedTest {
             compose.waitUntil(5_000) { !shown(DELETE_QUESTION) }
             TunnelManager.stopping.value = false
 
-            // the tunnel off: a pick says nothing of a next connection (the paste's line has had its four seconds first)
-            TunnelManager.running.value = false
-            compose.waitUntil(8_000) { !shown(NEXT) }
-            compose.onNodeWithText("id $SECOND", substring = true).performScrollTo().performClick()
+            // the tunnel off: a pick is a pick
+            ShellTestKit.tunnelOff()
+            row(SECOND).performScrollTo().performClick()
             compose.waitUntil(5_000) { account() == SECOND }
             compose.waitForIdle()
             Thread.sleep(300)
-            assertFalse(shown(NEXT))
+            assertEquals(0, bars())
             assertEquals(token('b'), stored())
         }
     }

@@ -108,4 +108,14 @@ internal object TunnelStart {
             true,
         )
     }
+
+    /** «Переподключить» was refused for what the run's profile holds: «Логи» say why, as they do of a start. */
+    fun logReconnectBlocked(blocker: ConnectionStartBlocker) {
+        TunnelManager.updateLog(
+            "reconnect_configuration_${blocker.name}",
+            "[ПОДКЛЮЧЕНИЕ] Переподключение не начато: ${blocker.message}",
+            99,
+            true,
+        )
+    }
 }

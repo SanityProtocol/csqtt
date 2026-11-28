@@ -158,6 +158,20 @@ internal fun coreBaseCommand(
     add(params.captchaMode)
 }
 
+/** The hashes a run's core is given: one reading for its environment and for the count of its streams. */
+internal fun coreHashes(params: TunnelParams): List<String> = params.vkHashes
+    .split(Regex("[,\\s\\n]+"))
+    .map { it.trim() }
+    .filter { it.isNotEmpty() }
+    .take(CsqttConstants.Tunnel.MAX_VK_HASHES)
+
+/** The streams a run's core is asked for (`-n`): what its command line carries and what «Логи» say the run started with. */
+internal fun coreStreams(params: TunnelParams, hashes: List<String> = coreHashes(params)): Int = WorkerCountPolicy.normalizeForHashValues(
+    params.workersPerHash,
+    hashes,
+    params.allowHashRedistribution || params.vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS,
+)
+
 /** The core's secrets, for its environment (the core reads CSQTT_PASSWORD, CSQTT_VK_HASHES and, B6, CSQTT_DEVICE_KEY). */
 internal fun coreSecretEnv(password: String, hashes: List<String>, deviceKey: String = ""): Map<String, String> = buildMap {
     if (password.isNotEmpty()) put("CSQTT_PASSWORD", password)
@@ -276,6 +290,42 @@ object TunnelManager {
     var processStartedAtMs = 0L
     @Volatile
     private var currentParams: TunnelParams? = null
+        set(value) {
+            field = value
+            publishTaken()
+        }
+
+    // Card p3-apply-bar: what the run's start read of its profile (RunRead), beside the parameters made from it. Set
+    // where a run's parameters are first set (a start, a switch), kept by every restart the run makes itself, moved by
+    // a subscription's refresh of the run's node, gone with the run
+    @Volatile
+    private var currentRead: RunRead? = null
+    private val takenState = MutableStateFlow<RunTaken?>(null)
+
+    /**
+     * The run and what it took, for the screens that say what waits for a reconnect; null with no run, and for a run
+     * whose start gave no record. Published with every change of the run's parameters: its account moves with them.
+     */
+    internal val taken: StateFlow<RunTaken?> = takenState
+
+    private fun publishTaken() {
+        val params = currentParams
+        val read = currentRead
+        takenState.value = if (params != null && read != null) RunTaken.of(read, params) else null
+    }
+
+    /** «Переподключить» was tapped and the run has not yet started again on what the store holds (reconnectRun). */
+    internal val reconnecting = MutableStateFlow(false)
+
+    /**
+     * For the instrumented tests: a run as the manager would hold it, with no core behind it — what its start read and
+     * the parameters made from it; nulls for no run. The screens read nothing else of a run's settings.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun fakeRun(read: RunRead?, params: TunnelParams?) {
+        currentRead = read
+        currentParams = params
+    }
     @Volatile
     private var strongAppContext: Context? = null
     @Volatile
@@ -1399,7 +1449,8 @@ object TunnelManager {
             processGeneration == identity.generation &&
             lifecycleState.accepts(identity.ticket)
 
-    fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
+    /** [read]: what this start read of its profile, for a new run; a restart of the same run ([isSwitching]) keeps its own. */
+    internal fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false, read: RunRead? = null) {
         val command = lifecycleCommand.incrementAndGet()
         autoPausedForWifi.value = false
         stopping.value = false
@@ -1426,7 +1477,9 @@ object TunnelManager {
                     wrapAuthTimeoutCount = 0
                     crashRestartStreak = 0
                     processStartedAtMs = 0L
+                    currentRead = read
                     currentParams = params
+                    logRunStart(params)
                     strongAppContext = appContext.applicationContext
                     lastContext = WeakReference(appContext)
                     activeSettingsStore = SettingsStore(appContext, ProfileScope.Run)
@@ -1458,7 +1511,7 @@ object TunnelManager {
      * the new one (profile-switch review F4, F5, F7, H2). Decided under the lock: with no run desired any more it is a
      * plain start (review H1).
      */
-    internal fun switchProfile(context: Context, params: TunnelParams, identity: RunIdentity) {
+    internal fun switchProfile(context: Context, params: TunnelParams, identity: RunIdentity, read: RunRead? = null) {
         val command = lifecycleCommand.incrementAndGet()
         autoPausedForWifi.value = false
         stopping.value = false
@@ -1480,7 +1533,12 @@ object TunnelManager {
                 wrapAuthTimeoutCount = 0
                 crashRestartStreak = 0
                 processStartedAtMs = 0L
+                // the new connection's record takes the old one's place with its parameters: until here the screens
+                // compared the store with what the old run took
+                currentRead = read
                 currentParams = params
+                reconnecting.value = false
+                logRunStart(params)
                 strongAppContext = appContext
                 lastContext = WeakReference(appContext)
                 activeSettingsStore = SettingsStore(appContext, ProfileScope.Run)
@@ -1545,19 +1603,10 @@ object TunnelManager {
             processIdentity = null
             nativeProcessPid = null
         }
-        val hashList = params.vkHashes
-            .split(Regex("[,\\s\\n]+"))
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .take(CsqttConstants.Tunnel.MAX_VK_HASHES)
+        val hashList = coreHashes(params)
 
         val jsHashMode = params.vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS
-        val jsAuthMode = params.vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
-        val effectiveAuthMode = if (jsAuthMode && !jsHashMode) {
-            CsqttConstants.VkAuth.MODE_CALLS
-        } else {
-            params.vkAuthMode
-        }
+        val effectiveAuthMode = coreAuthMode(params)
         if (hashList.isEmpty() && !jsHashMode) {
             failStartLocked("hash_error", "Ошибка: Хеш не указан")
             return
@@ -1573,11 +1622,7 @@ object TunnelManager {
             return
         }
 
-        val totalWorkers = WorkerCountPolicy.normalizeForHashValues(
-            params.workersPerHash,
-            hashList,
-            params.allowHashRedistribution || jsHashMode,
-        )
+        val totalWorkers = coreStreams(params, hashList)
         val cmd = coreBaseCommand(binaryPath, params, totalWorkers, effectiveAuthMode).toMutableList()
         val isDomainRoutingActive = params.domainRoutingEnabled || params.excludeRuZones || params.templateDomains || params.directDomains.isNotBlank()
         if (isDomainRoutingActive) {
@@ -2413,7 +2458,9 @@ object TunnelManager {
         stopping.value = false
         activeWorkers.value = 0
         nativeProcessPid = null
+        currentRead = null
         currentParams = null
+        reconnecting.value = false
         activeSettingsStore = null
         lastAppliedDns = null
         probeState.value = null
@@ -2447,6 +2494,36 @@ object TunnelManager {
                     try { startTunVpnService(ctx, vpnIntent) } catch (_: Exception) {}
                 }
             }
+        }
+    }
+
+    /** «Логи»: what this connection started with (runStartLine), once under its «Подключение #N». */
+    private fun logRunStart(params: TunnelParams) {
+        updateLog("run_start", runStartLine(params, coreStreams(params)), 30, level = LogLevel.LOG)
+    }
+
+    /**
+     * A subscription's refresh is about to write [profiles]: the run's profile as the store holds it now ([read]), when
+     * the tunnel is on one of them — what [subscriptionWrote] tells the refresh's own writes from; null otherwise.
+     */
+    internal suspend fun beforeSubscriptionWrite(profiles: Collection<Int>, read: suspend (profile: Int) -> RunRead): RunRead? {
+        val profile = currentRead?.profile?.takeIf { it in profiles } ?: return null
+        return read(profile)
+    }
+
+    /**
+     * A subscription's refresh rewrote the run's profile ([before]: as stored before it, from [beforeSubscriptionWrite];
+     * [read] reads it as stored now): the run's record follows what the refresh wrote — the link as served and the
+     * streams the node's power allows are the subscription's doing, not a change the user made, and raise no bar
+     * (RunRead.following).
+     */
+    internal suspend fun subscriptionWrote(before: RunRead?, read: suspend (profile: Int) -> RunRead) {
+        before ?: return
+        val stored = read(before.profile)
+        // the run may have ended or moved while the store was read: only the record it was read for is moved
+        currentRead?.takeIf { it.profile == before.profile }?.let {
+            currentRead = it.following(before, stored)
+            publishTaken()
         }
     }
 

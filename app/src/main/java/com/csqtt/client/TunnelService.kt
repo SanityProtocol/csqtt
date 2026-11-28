@@ -205,6 +205,10 @@ class TunnelService : Service() {
                             newTunnelSessionId()
                         }
 
+                        // card p3-apply-bar: what this start read of its profile, as its intent carries it — the run
+                        // keeps it beside its parameters, and the screens compare the store with it (RunRead). An
+                        // intent with none is read here, from the same store
+                        var read = intent.runRead() ?: store.runRead()
                         val requestedWorkers = intent.getIntExtra("workers_per_hash", CsqttConstants.Tunnel.DEFAULT_WORKERS)
                         val requestedVkAuthMode = sanitizeVkAuthMode(intent.getStringExtra("vk_auth_mode"))
                         val intentHashes = intent.getStringExtra("vk_hashes") ?: ""
@@ -212,7 +216,9 @@ class TunnelService : Service() {
                         val linkAccessToken = intent.getStringExtra("vk_access_token")
                             .orEmpty()
                             .takeIf { intent.getBooleanExtra("vk_token_from_link", false) && it.isNotBlank() }
-                        val configuredHashMode = store.vkHashMode.first()
+                        // the hash mode is read once, with the rest: it was read again after the wait for a network,
+                        // and one changed meanwhile ran with the creds mode read before it
+                        val configuredHashMode = read.hashMode
                         val vkAuthMode = when {
                             hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
                             linkAccessToken != null -> {
@@ -227,10 +233,16 @@ class TunnelService : Service() {
                         val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
                         val maxWorkers = WorkerCountPolicy.maximum(accountAutoJs)
                         val workersPerHash = WorkerCountPolicy.normalize(requestedWorkers, maximum = maxWorkers)
-                        if (accountAutoJs) {
-                            store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_AUTO_JS)
-                        } else if (hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) {
-                            store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CALLS)
+                        val corrected = when {
+                            accountAutoJs -> CsqttConstants.VkAuth.MODE_AUTO_JS
+                            hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
+                            else -> null
+                        }
+                        if (corrected != null) {
+                            store.saveVkAuthMode(corrected)
+                            // the start's own correction of the modes is no change of the user's: the record says
+                            // what the store says after it
+                            read = read.withModes(store.vkAuthMode.first(), store.vkHashMode.first())
                         }
                         awaitVkNetwork()
                         if (!isCurrentStart(requestGeneration)) return@launch
@@ -244,7 +256,7 @@ class TunnelService : Service() {
                                 when {
                                     accountAutoJs -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
                                     linkAccessToken != null -> CsqttConstants.VkAutoHash.MODE_AUTO_API
-                                    else -> null
+                                    else -> configuredHashMode
                                 },
                                 linkAccessToken,
                                 tokenFromLink = linkAccessToken != null,
@@ -309,8 +321,9 @@ class TunnelService : Service() {
                             ipIsWhitelist = routing.ipIsWhitelist,
                             directIps = routing.activeIps,
                         )
+                        val taken = read
                         launch(Dispatchers.Main) {
-                            if (isCurrentStart(requestGeneration)) startTunnel(params)
+                            if (isCurrentStart(requestGeneration)) startTunnel(params, read = taken)
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -407,8 +420,12 @@ class TunnelService : Service() {
      */
     private fun switchProfile() {
         // a stop already under way keeps its cause (review H5)
-        if (isStopping || autoPausedForWifi || TunnelManager.stopping.value) return
-        if (!TunnelManager.running.value && !TunnelManager.starting.value) return
+        val ending = isStopping || autoPausedForWifi || TunnelManager.stopping.value
+        if (ending || (!TunnelManager.running.value && !TunnelManager.starting.value)) {
+            // a «Переподключить» that reached a run on its way out is not made: the bar does not wait for it
+            TunnelManager.reconnecting.value = false
+            return
+        }
         VkAutoCallsManager.finishActiveCalls()
         // B5g: nothing is cleared; restoreTunnel opens the new connection's heading before its calls and pool are logged
         if (!restoreTunnel(switching = true)) stopTunnel()
@@ -422,7 +439,9 @@ class TunnelService : Service() {
         isStopping = false
         resourcesReleased = false
         TunnelManager.beginStartRequest(applicationContext)
-        val notification = createNotification(if (switching) "Переключение профиля..." else "Восстановление соединения...")
+        val notification = createNotification(
+            if (switching) ProfileSwitch.notice(TunnelManager.switchTarget, TunnelManager.sourceProfile) else "Восстановление соединения...",
+        )
         if (!tryStartPersistentForeground(notification, "восстановление VPN")) {
             TunnelManager.starting.value = false
             TunnelManager.recordRunFailure(StopCause.FOREGROUND_REFUSED, applicationContext)
@@ -494,8 +513,13 @@ class TunnelService : Service() {
                 }
                 val genId = store.reserveConnectionGeneration()
                 val salt = newTunnelSessionId()
-                val requestedVkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
-                val configuredHashMode = store.vkHashMode.first()
+                // card p3-apply-bar: the profile is read once, here, as a START's is read at its tap (RunRead): what
+                // the run takes of it and what it keeps as its record are the same reading. The settings were read
+                // one by one after the wait for a network, and the hash mode a second time there
+                val read = store.runRead()
+                val settings = read.settings
+                val requestedVkAuthMode = sanitizeVkAuthMode(settings.vkAuthMode)
+                val configuredHashMode = read.hashMode
                 val vkAuthMode = when {
                     source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
                     source.tokenFromLink -> {
@@ -509,7 +533,7 @@ class TunnelService : Service() {
                 }
                 val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
                 val workersPerHash = WorkerCountPolicy.normalize(
-                    store.workersPerHash.first(),
+                    settings.workersPerHash,
                     maximum = WorkerCountPolicy.maximum(accountAutoJs),
                 )
                 awaitVkNetwork()
@@ -524,7 +548,7 @@ class TunnelService : Service() {
                         when {
                             accountAutoJs -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
                             source.tokenFromLink -> CsqttConstants.VkAutoHash.MODE_AUTO_API
-                            else -> null
+                            else -> configuredHashMode
                         },
                         source.vkAccessToken.takeIf { source.tokenFromLink },
                         tokenFromLink = source.tokenFromLink,
@@ -536,21 +560,21 @@ class TunnelService : Service() {
                 val params = TunnelParams(
                     peer = source.peer,
                     vkHashes = restoredHashes?.value ?: "",
-                    secondaryVkHash = store.secondaryVkHash.first(),
+                    secondaryVkHash = settings.secondaryVkHash,
                     workersPerHash = workersPerHash,
                     port = 0,
-                    sni = store.sni.first(),
+                    sni = settings.sni,
                     connectionPassword = source.password,
-                    obfsMode = store.obfsMode.first(),
-                    turnTransport = store.turnTransport.first(),
-                    dpiSplit = store.dpiSplit.first(),
-                    srtpMode = sanitizeSrtpMode(store.srtpMode.first()),
-                    customTurnIps = store.customTurnIps.first(),
+                    obfsMode = settings.obfsMode,
+                    turnTransport = settings.turnTransport,
+                    dpiSplit = settings.dpiSplit,
+                    srtpMode = sanitizeSrtpMode(settings.srtpMode),
+                    customTurnIps = settings.customTurnIps,
                     vkAuthMode = vkAuthMode,
-                    captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
-                    captchaSolveMethod = store.captchaSolveMethod.first(),
-                    fingerprint = store.selectedFingerprint.first(),
-                    clientIds = store.activeClientIds.first(),
+                    captchaMode = sanitizeCaptchaMode(settings.captchaMode),
+                    captchaSolveMethod = settings.captchaSolveMethod,
+                    fingerprint = settings.fingerprint,
+                    clientIds = settings.clientIds,
                     generationId = genId,
                     sessionSalt = salt,
                     allowHashRedistribution = restoredHashes?.allowWorkerRedistribution == true,
@@ -574,7 +598,7 @@ class TunnelService : Service() {
                     )
                 ) {
                     launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) startTunnel(params, if (switching) pickedIdentity else null)
+                        if (isCurrentStart(requestGeneration)) startTunnel(params, if (switching) pickedIdentity else null, read)
                     }
                 } else {
                     TunnelManager.updateLog(
@@ -911,8 +935,11 @@ class TunnelService : Service() {
     private fun isCurrentStart(generation: Long): Boolean =
         generation == startGeneration && !isStopping && serviceJob.isActive
 
-    /** [switchTo]: a profile switch of a run that is on — the core is replaced in place and takes this identity. */
-    private fun startTunnel(params: TunnelParams, switchTo: TunnelManager.RunIdentity? = null) {
+    /**
+     * [switchTo]: a profile switch of a run that is on — the core is replaced in place and takes this identity. [read]:
+     * what the start read of its profile, the run's record from here (RunRead).
+     */
+    private fun startTunnel(params: TunnelParams, switchTo: TunnelManager.RunIdentity? = null, read: RunRead? = null) {
         if (isStopping || !serviceJob.isActive) return
         autoPauseRequested = true
         if (autoPauseOnWifiEnabled && shouldPauseOnWifi()) {
@@ -930,9 +957,9 @@ class TunnelService : Service() {
 
         if (switchTo != null) {
             serviceScope.launch { runCatching { SettingsStore(applicationContext).saveRunProfile(switchTo.profile) } }
-            TunnelManager.switchProfile(this, params, switchTo)
+            TunnelManager.switchProfile(this, params, switchTo, read)
         } else {
-            TunnelManager.start(this, params)
+            TunnelManager.start(this, params, read = read)
         }
         if (!physicalNetworks.hasUsableNetwork()) {
             TunnelManager.suspendForNoNetwork(physicalNetworkPauseReason(isAirplaneModeOn()))

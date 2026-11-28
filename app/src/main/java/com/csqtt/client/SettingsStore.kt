@@ -2578,6 +2578,24 @@ class SettingsStore internal constructor(context: Context, private val scope: Pr
     /** M-79: the VK accounts signed in on this phone, by user id; their tokens stay encrypted in the store. */
     val vkAccounts: Flow<List<String>> = dataStore.data.map { prefs -> VkAccounts.ids(prefs[VK_ACCOUNTS].orEmpty()) }
 
+    /**
+     * The id of the signed-in account whose token is [token]; "" when none holds it — a token pasted by hand names no
+     * account. For a screen that says which account a running tunnel is on (card p3-apply-bar).
+     */
+    internal suspend fun vkAccountIdOf(token: String): String = withContext(Dispatchers.IO) {
+        if (token.isBlank()) return@withContext ""
+        val archive = dataStore.data.first()[VK_ACCOUNTS].orEmpty()
+        VkAccounts.ids(archive).firstOrNull { id ->
+            runCatching { secureStore.decrypt(VkAccounts.encryptedToken(archive, id)) }.getOrNull() == token
+        }.orEmpty()
+    }
+
+    /**
+     * Every write of the store, whatever it wrote. For a reader that takes several values in one reading and takes
+     * them again when the store changed (the run's record against what is stored now: runReadNow).
+     */
+    internal val writes: Flow<Unit> = dataStore.data.map { }
+
     /** The selected profile takes the archived account [userId] (selectVkAccountKeys); false when it could not. */
     suspend fun selectVkAccount(userId: String): Boolean {
         var selected = false

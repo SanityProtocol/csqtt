@@ -164,6 +164,8 @@ class ProfilesSheetTest {
             // and the name it came with is one tap away
             awaitRenamedRow("Дельта")
             menuOf("Дельта").performClick()
+            // the menu is a window of its own: its items are there a frame after the tap, not with it
+            compose.waitUntil(5_000) { shown("Переименовать") }
             last("Переименовать").performClick()
             compose.waitUntil(5_000) { shown("Вернуть исходное имя") }
             last("Вернуть исходное имя").performClick()

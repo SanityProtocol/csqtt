@@ -7,7 +7,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -21,6 +20,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -32,28 +32,47 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.offset
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.csqtt.client.AppOwners
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.HomeLayout
 import com.csqtt.client.LogBook
+import com.csqtt.client.ProfileScope
 import com.csqtt.client.QuestionPlace
 import com.csqtt.client.R
+import com.csqtt.client.ReconnectTap
+import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.TunnelStart
+import com.csqtt.client.pickProfile
+import com.csqtt.client.reconnectRun
+import com.csqtt.client.reconnectTap
+import com.csqtt.client.runViewFlow
+import com.csqtt.client.startBlocker
 import com.csqtt.client.ui.components.BarItem
 import com.csqtt.client.ui.components.BottomBar
 import com.csqtt.client.ui.components.Header
+import com.csqtt.client.ui.components.LocalSheetFoot
 import com.csqtt.client.ui.components.MessageHost
 import com.csqtt.client.ui.components.TabBadge
 import com.csqtt.client.ui.design.Csq
 import com.csqtt.client.ui.design.Icons
 import com.csqtt.client.ui.design.pluralText
 import kotlin.math.abs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /**
  * What the first frame needs before the store has answered (M-94): the theme mode, whether «Сервер» is in the bar and
@@ -109,11 +128,15 @@ internal fun Shell(
 ) {
     val nav = LocalNav.current
     val owners = LocalOwners.current
-    val density = LocalDensity.current
+    val store = LocalStore.current
+    val context = LocalContext.current.applicationContext
     val holder = rememberSaveableStateHolder()
     val screens = nav.stack.filter { it.layer == Layer.Screen }
     val screen = screens.lastOrNull()
-    var barHeight by remember { mutableIntStateOf(0) }
+    val bars = remember { BarInsets() }
+    // card p3-apply-bar: the run as the screens see it, collected once here for the bar, the sheets and the rows
+    val run by remember(context) { runViewFlow(context) }.collectAsStateWithLifecycle(initialValue = null)
+    val reconnect = remember(context, nav, owners, store) { { applyBarTap(context, nav, owners, store) } }
 
     // a screen that was closed starts fresh the next time it is opened
     val drawn = remember { mutableSetOf<String>() }
@@ -128,44 +151,93 @@ internal fun Shell(
 
     BackHandler(enabled = nav.canGoBack) { nav.back() }
 
-    Box(Modifier.fillMaxSize().background(Csq.colors.bg)) {
-        if (screen == null) {
-            holder.SaveableStateProvider(TABS) { TabsPage(hasServer, headerActions, tabContent, barHeight) { barHeight = it } }
-        } else {
-            holder.SaveableStateProvider(screen.stateKey) { Routes.find(screen.route)?.invoke(screen) { nav.close(screen) } }
-        }
-        // 16 dp over the bar, or over a keyboard taller than it; over a screen, which has no bar, over the system's edge
-        val bar = with(density) { (if (screen == null) barHeight else 0).toDp() }
-        MessageHost(
-            owners.messages,
-            Modifier.align(Alignment.BottomCenter)
-                .padding(bottom = bar)
-                .consumeWindowInsets(PaddingValues(bottom = bar))
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
-                .padding(bottom = 16.dp),
-        )
-        // each sheet and dialog is its own keyed group, so one stays itself, with its drafts, when the stack under or
-        // around it changes (a key inside an `if` would be matched by position and rebuilt), and after a process death
-        // (its key is strings: Dest.stateKey)
-        for (dest in nav.stack.filter { it.layer != Layer.Screen }) {
-            key(dest.stateKey) { Routes.find(dest.route)?.invoke(dest) { nav.close(dest) } }
+    CompositionLocalProvider(
+        LocalRun provides run,
+        LocalReconnect provides reconnect,
+        // a sheet covers the tab bar: the apply bar is on its foot there
+        LocalSheetFoot provides SheetFoot,
+    ) {
+        Box(Modifier.fillMaxSize().background(Csq.colors.bg)) {
+            if (screen == null) {
+                holder.SaveableStateProvider(TABS) { TabsPage(hasServer, headerActions, tabContent, bars) }
+            } else {
+                holder.SaveableStateProvider(screen.stateKey) { Routes.find(screen.route)?.invoke(screen) { nav.close(screen) } }
+            }
+            // 16 dp over the bars, or over a keyboard taller than them; over a screen, which has none, over the system's edge
+            MessageHost(
+                owners.messages,
+                Modifier.align(Alignment.BottomCenter)
+                    .then(if (screen == null) Modifier.aboveBars(bars) else Modifier)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+                    .padding(bottom = 16.dp),
+            )
+            // each sheet and dialog is its own keyed group, so one stays itself, with its drafts, when the stack under or
+            // around it changes (a key inside an `if` would be matched by position and rebuilt), and after a process death
+            // (its key is strings: Dest.stateKey)
+            for (dest in nav.stack.filter { it.layer != Layer.Screen }) {
+                key(dest.stateKey) { Routes.find(dest.route)?.invoke(dest) { nav.close(dest) } }
+            }
         }
     }
 }
 
+private val SheetFoot: @Composable () -> Unit = { ApplyBar() }
+
+/**
+ * «Переподключить» (card p3-apply-bar): the run reconnects with what its profile holds — unless a start would be
+ * refused for it. Then the tunnel is left as it is (the operator, 2026-11-28: «Keep the tunnel, show what is missing»):
+ * the run's profile becomes the open one, the sheets over the form close, and «Туннель» marks what its form lacks, as
+ * after a start Home refused. On the app's scope: asked for, it is done whatever becomes of the screen.
+ */
+internal fun applyBarTap(context: Context, nav: NavModel, owners: AppOwners, store: SettingsStore) {
+    TunnelManager.scope.launch(Dispatchers.Main) {
+        val tap = reconnectTap(
+            TunnelManager.taken.value,
+            blocker = { profile -> SettingsStore(context, ProfileScope.Fixed(profile)).startBlocker() },
+            reconnect = { reconnectRun(context) },
+        )
+        if (tap !is ReconnectTap.Blocked) return@launch
+        TunnelStart.logReconnectBlocked(tap.blocker)
+        // picking the run's own profile reconnects nothing: it only opens it
+        pickProfile(context, store, tap.profile, store.activeProfile.first())
+        nav.stack.filter { it.layer == Layer.Sheet }.forEach(nav::close)
+        nav.select(Tab.Tunnel)
+        owners.refusals.refuse(tap.profile)
+    }
+}
+
 private const val TABS = "tabs"
+
+/**
+ * The height of the bars at the bottom of the tabs' page — the tab bar and, docked on it, the apply bar — as window
+ * insets: read where a page is measured, never where one is composed. While the apply bar opens or closes the height
+ * changes with every frame, and a height read in a composition composes the shell, the page and the tab bar again for
+ * each of them (card p3-apply-bar: measured, the frames of the bar's motion cost twice Home's own).
+ */
+private class BarInsets : WindowInsets {
+    var height by mutableIntStateOf(0)
+    override fun getLeft(density: Density, layoutDirection: LayoutDirection) = 0
+    override fun getTop(density: Density) = 0
+    override fun getRight(density: Density, layoutDirection: LayoutDirection) = 0
+    override fun getBottom(density: Density) = height
+}
+
+/** Over the bars: padded by their height at the bottom, and that much of the bottom taken as used (a keyboard's rest lifts). */
+private fun Modifier.aboveBars(bars: BarInsets): Modifier = layout { measurable, constraints ->
+    val bottom = bars.height
+    val placeable = measurable.measure(constraints.offset(vertical = -bottom))
+    layout(placeable.width, constraints.constrainHeight(placeable.height + bottom)) { placeable.place(0, 0) }
+}.consumeWindowInsets(bars)
 
 @Composable
 private fun TabsPage(
     hasServer: Boolean,
     headerActions: @Composable RowScope.() -> Unit,
     tabContent: @Composable (Tab) -> Unit,
-    barHeight: Int,
-    onBarHeight: (Int) -> Unit,
+    bars: BarInsets,
 ) {
     val nav = LocalNav.current
     val view = LocalView.current
-    val density = LocalDensity.current
     val tabs = tabsFor(hasServer, nav.tab)
     val badges = tabBadges()
     val select = { tab: Tab ->
@@ -181,8 +253,8 @@ private fun TabsPage(
                 .weight(1f)
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                // the bar holds the bottom of the screen: only a keyboard taller than it lifts the page (M-95)
-                .consumeWindowInsets(PaddingValues(bottom = with(density) { barHeight.toDp() }))
+                // the bars hold the bottom of the screen: only a keyboard taller than them lifts the page (M-95)
+                .consumeWindowInsets(bars)
                 .imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -206,12 +278,16 @@ private fun TabsPage(
                 tabContent(nav.tab)
             }
         }
-        BottomBar(
-            items = tabs.map { tab -> BarItem(tabLabel(tab), tabIcon(tab), badges[tab]) },
-            selected = tabs.indexOf(nav.tab),
-            onSelect = { index -> select(tabs[index]) },
-            modifier = Modifier.onSizeChanged { onBarHeight(it.height) },
-        )
+        // the tab bar and, docked on it while a change waits for a reconnect, the apply bar: one block at the bottom of
+        // the screen, measured as one — the page's keyboard handling and the messages' place follow its height
+        Column(Modifier.onSizeChanged { bars.height = it.height }) {
+            ApplyBar(sideInsets = true)
+            BottomBar(
+                items = tabs.map { tab -> BarItem(tabLabel(tab), tabIcon(tab), badges[tab]) },
+                selected = tabs.indexOf(nav.tab),
+                onSelect = { index -> select(tabs[index]) },
+            )
+        }
     }
 }
 

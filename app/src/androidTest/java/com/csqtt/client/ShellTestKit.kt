@@ -104,6 +104,43 @@ internal object ShellTestKit {
         return (0..bytes.size - needle.size).any { at -> needle.indices.all { bytes[at + it] == needle[it] } }
     }
 
+    /**
+     * The tunnel on for [profile] as the manager would say it, with no tunnel: a run that took the profile as it is
+     * stored now, on the VK account [account]. The screens read nothing else of a run.
+     */
+    fun tunnelOn(profile: Int, account: String = "") {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val read = kotlinx.coroutines.runBlocking { SettingsStore(context, ProfileScope.Fixed(profile)).runRead() }
+        val settings = read.settings
+        TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(profile, null, emptyList()))
+        TunnelManager.fakeRun(
+            read,
+            TunnelParams(
+                peer = "${read.source.address}:${read.source.port}", vkHashes = read.source.ownHashes.joinToString(","),
+                workersPerHash = settings.workersPerHash, port = 0, connectionPassword = read.source.password,
+                vkAuthMode = settings.vkAuthMode, captchaMode = settings.captchaMode, captchaSolveMethod = settings.captchaSolveMethod,
+                fingerprint = settings.fingerprint, turnTransport = settings.turnTransport, dpiSplit = settings.dpiSplit,
+                srtpMode = settings.srtpMode, vkHashMode = read.hashMode, vkAccessToken = account, customTurnIps = settings.customTurnIps,
+            ),
+        )
+        TunnelManager.running.value = true
+    }
+
+    /** No tunnel again, whatever a test left of one. */
+    fun tunnelOff() {
+        TunnelManager.running.value = false
+        TunnelManager.starting.value = false
+        TunnelManager.stopping.value = false
+        TunnelManager.reconnecting.value = false
+        TunnelManager.switchTarget = null
+        TunnelManager.fakeRun(null, null)
+        TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(-1, null, emptyList()))
+    }
+
+    const val BAR = "Изменения применятся после переподключения"
+    const val RECONNECT = "Переподключить"
+    const val RECONNECTING = "Переподключение…"
+
     /** A store with one link profile and no server, or with an own-server profile beside it. */
     fun backup(withServer: Boolean): String {
         val server = if (withServer) """, {"index": 4, "peer": "203.0.113.40", "csqtt_link_mode": false}""" else ""

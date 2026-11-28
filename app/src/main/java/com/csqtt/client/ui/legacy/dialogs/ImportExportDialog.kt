@@ -41,6 +41,7 @@ import com.csqtt.client.ui.legacy.appSectionCardColor
 import com.csqtt.client.ui.legacy.components.CsqttSegmentedControl
 import com.csqtt.client.ui.legacy.design.CsqttShapes
 import com.csqtt.client.ui.legacy.design.CsqttSizes
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -101,6 +102,7 @@ fun ImportExportDialog(
             scope.launch {
                 isProcessing = true
                 try {
+                    val vpnBefore = settingsStore.vpnSettings.first()
                     val ok = settingsStore.importConfigJson(
                         jsonString = jsonText,
                         includeTunnel = includeTunnel,
@@ -109,6 +111,15 @@ fun ImportExportDialog(
                         includeSettings = includeSettings
                     )
                     if (ok) {
+                        // the file is taken with the tunnel on. What it wrote of the VPN interface's own settings (the
+                        // apps, the local network, the DNS, the IP list, the MTU) reaches a tunnel that runs on this
+                        // profile as an edit on the screens does, by one rebuild — it was stored and applied at the
+                        // next connection only (card p3-apply-bar). The core's part waits for a reconnect, under the
+                        // apply bar; the domains and IPs go to the core by the routing observer's push
+                        val vpnDiffers = com.csqtt.client.VpnPlan.settingsDiffer(vpnBefore, settingsStore.vpnSettings.first(), Build.VERSION.SDK_INT)
+                        if (vpnDiffers && settingsStore.selectedProfileIndex.first() == com.csqtt.client.TunnelManager.runTargetProfile()) {
+                            com.csqtt.client.TunnelManager.reloadVpn()
+                        }
                         context.showRaisedToast("Конфигурация успешно импортирована ✓", Toast.LENGTH_LONG)
                         onDismissRequest()
                     } else {

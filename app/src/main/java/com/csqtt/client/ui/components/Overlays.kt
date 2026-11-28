@@ -32,6 +32,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -62,9 +63,16 @@ import com.csqtt.client.ui.design.Type
 import kotlinx.coroutines.delay
 
 /**
+ * What the shell docks on the foot of every sheet: a sheet covers the tab bar, and what is docked on that — the apply
+ * bar — must be seen where a change is made.
+ */
+internal val LocalSheetFoot = compositionLocalOf<(@Composable () -> Unit)?> { null }
+
+/**
  * A sheet from the bottom edge: a list to pick from, a form. Back, the scrim, a drag down and ✕ all call [onDismiss].
  * A sheet is a window over the activity's, where the app's short messages are drawn: with [messages] given, the sheet
- * on top shows them itself, at its foot (an «Отменить» must be within reach of the list it undoes).
+ * on top shows them itself, at its foot (an «Отменить» must be within reach of the list it undoes). Under its content
+ * it carries the shell's foot ([LocalSheetFoot]).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,7 +96,9 @@ internal fun Sheet(
             Box(Modifier.padding(top = 8.dp, bottom = 4.dp).size(36.dp, 4.dp).background(colors.line, RoundedCornerShape(2.dp)))
         },
     ) {
-        Box(contentAlignment = Alignment.BottomCenter) {
+        val foot = LocalSheetFoot.current
+        // the content takes what room it needs, and scrolls in what is left over the foot
+        Box(Modifier.weight(1f, fill = false), contentAlignment = Alignment.BottomCenter) {
             Column(
                 Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -106,6 +116,7 @@ internal fun Sheet(
             }
             if (messages != null) MessageHost(messages, Modifier.padding(bottom = 16.dp))
         }
+        foot?.invoke()
     }
 }
 

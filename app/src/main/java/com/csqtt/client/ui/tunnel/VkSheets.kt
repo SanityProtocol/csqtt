@@ -58,6 +58,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.PanelApi
 import com.csqtt.client.R
+import com.csqtt.client.RunKey
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.VkAuthPayload
 import com.csqtt.client.VkAuthPhase
@@ -79,6 +80,7 @@ import com.csqtt.client.ui.components.ChipKind
 import com.csqtt.client.ui.components.DialogFrame
 import com.csqtt.client.ui.components.Field
 import com.csqtt.client.ui.components.IconBtn
+import com.csqtt.client.ui.components.NowLine
 import com.csqtt.client.ui.components.Sheet
 import com.csqtt.client.ui.components.TextBtn
 import com.csqtt.client.ui.design.Csq
@@ -88,6 +90,7 @@ import com.csqtt.client.ui.design.Type
 import com.csqtt.client.ui.profiles.copiedText
 import com.csqtt.client.ui.shell.LocalNav
 import com.csqtt.client.ui.shell.LocalOwners
+import com.csqtt.client.ui.shell.LocalRun
 import com.csqtt.client.ui.shell.SecretDrafts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
@@ -97,14 +100,6 @@ private fun tokenDraftKey(profile: Int) = "vk:$profile:token"
 
 /** The pool as read from the store: null inside means the profile's run uses none; no [PoolRead] yet, not read yet. */
 private class PoolRead(val pool: VkPoolState?)
-
-/**
- * Whether the tunnel is on, or being started, for [profile]: the tab's own rule ([TunnelView.runsHere]). A run keeps the
- * VK account it started with (RunKeeps; the operator, 2026-11-27 and 11-28): an account picked, pasted or signed in to
- * under it is stored for the next connection and says so.
- */
-internal fun vkRunsHere(profile: Int): Boolean =
-    (TunnelManager.running.value || TunnelManager.starting.value) && profile == TunnelManager.runTargetProfile()
 
 /**
  * Whether a deletion waits for the tunnel to stop: while a tunnel is on or being started — on whichever profile, since
@@ -124,8 +119,10 @@ private fun RowMark(content: @Composable () -> Unit) {
 /**
  * «Аккаунты VK» (the canvas, F-VkAccounts; M-79, D30): the accounts signed in on this phone, the one this profile is
  * on, and the ways to another — a sign-in, or a permanent token pasted by hand. What is done here is done at once:
- * «Готово» only closes. With the tunnel on for this profile another account is taken for the next connection
- * ([vkRunsHere]); a deletion waits for the stop of a tunnel on any profile ([vkDeleteWaits]).
+ * «Готово» only closes. With the tunnel on for this profile the run keeps the account it started with (RunKeeps), so
+ * another one taken here is for the next connection: the sheet says which account the tunnel is on now, under the
+ * list, and the bar on its foot offers the reconnect (card p3-apply-bar). A deletion waits for the stop of a tunnel on
+ * any profile ([vkDeleteWaits]).
  */
 @Composable
 internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
@@ -143,11 +140,9 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
     val storedAccounts by store.vkAccounts.collectAsStateWithLifecycle(initialValue = null)
     val storedToken by store.vkAccessToken.collectAsStateWithLifecycle(initialValue = null)
     val storedUserId by store.vkAccessTokenUserId.collectAsStateWithLifecycle(initialValue = "")
-    val running by TunnelManager.running.collectAsStateWithLifecycle()
-    val starting by TunnelManager.starting.collectAsStateWithLifecycle()
     val userId = storedUserId
-    // read from the two flows, so that the line under the field comes and goes with the tunnel
-    val runsHere = (running || starting) && profile == TunnelManager.runTargetProfile()
+    // the account the run is on, while it is not the one this profile holds: null when nothing of it waits
+    val runAccount = LocalRun.current?.takeIf { it.waits(profile, RunKey.ACCOUNT) }?.uses
     val key = tokenDraftKey(profile)
     val typed = SecretDrafts[key]
     var tokenError by rememberSaveable { mutableStateOf<String?>(null) }
@@ -164,9 +159,6 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
     /** Whether an account may be deleted now; says why not. */
     fun mayDelete(): Boolean = !vkDeleteWaits().also { waits -> if (waits) messages.show(context.getString(R.string.vk_delete_running)) }
 
-    /** What a change of the account says: under a running tunnel, that it is for the next connection. */
-    fun said(done: Int): String = context.getString(if (vkRunsHere(profile)) R.string.vk_account_next else done)
-
     fun useToken(text: String) {
         val parsed = VkTokenParse.parse(text)
         when {
@@ -178,7 +170,7 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                 SecretDrafts.clear(key)
                 TunnelManager.scope.launch(Dispatchers.Main) {
                     store.saveVkAccessToken(parsed.token, parsed.userId, 0L)
-                    messages.show(said(R.string.vk_token_saved))
+                    messages.show(context.getString(R.string.vk_token_saved))
                 }
             }
         }
@@ -229,11 +221,7 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                         onClick = {
                             if (!selected) {
                                 TunnelManager.scope.launch(Dispatchers.Main) {
-                                    when {
-                                        !store.selectVkAccount(id) -> messages.show(context.getString(R.string.vk_account_unreadable))
-                                        // the tunnel keeps the account it started with
-                                        vkRunsHere(profile) -> messages.show(context.getString(R.string.vk_account_next))
-                                    }
+                                    if (!store.selectVkAccount(id)) messages.show(context.getString(R.string.vk_account_unreadable))
                                 }
                             }
                         },
@@ -243,6 +231,11 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
                     )
                 }
             }
+        }
+        // the tunnel keeps the account it started with: which one that is, while this profile holds another
+        runAccount?.let { used ->
+            val listed = accounts.indexOf(used.accountId)
+            NowLine(if (listed >= 0) stringResource(R.string.now_account_n, listed + 1, used.accountId) else runAccountName(used))
         }
         Btn(
             stringResource(if (accounts.isEmpty() && !unlisted) R.string.vk_sign_in_first else R.string.vk_sign_in_other),
@@ -264,8 +257,6 @@ internal fun VkAccountsSheet(profileArg: String, close: () -> Unit) {
             },
         )
         if (typed.isNotEmpty()) Btn(stringResource(R.string.vk_token_use), { useToken(typed) }, kind = BtnKind.Tonal, modifier = Modifier.fillMaxWidth())
-        // the tab's own line, said here too: the sheet covers it
-        if (runsHere) RunNote(Modifier.fillMaxWidth())
         Hairline()
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Btn(stringResource(R.string.action_done), leave, kind = BtnKind.Primary, modifier = Modifier.widthIn(min = 140.dp))
@@ -332,9 +323,10 @@ internal fun VkSignInDialog(profileArg: String, close: () -> Unit) {
                 // on the app's scope: the token VK gave is stored whatever becomes of the window
                 TunnelManager.scope.launch(Dispatchers.Main) {
                     // only a permanent token reaches here (M-82 / D30: an expiring one is refused at sign-in). Under a
-                    // running tunnel it is stored for the next connection: the run keeps the account it started with
+                    // running tunnel it is stored for the next connection: the run keeps the account it started with,
+                    // and the bar says what waits
                     store.saveVkAccessToken(payload.token, payload.userId, payload.expiresIn)
-                    messages.show(app.getString(if (vkRunsHere(profile)) R.string.vk_account_next else R.string.vk_token_saved))
+                    messages.show(app.getString(R.string.vk_token_saved))
                 }
             },
             onError = { error = it },

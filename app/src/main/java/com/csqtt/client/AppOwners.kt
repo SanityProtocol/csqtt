@@ -13,6 +13,25 @@ import kotlinx.coroutines.flow.update
 internal class AppOwners {
     val questions = Questions()
     val messages = Messages()
+    val refusals = Refusals()
+}
+
+/** A profile's settings refused something asked of them: «Туннель» marks what [profile]'s form lacks. */
+internal data class Refusal(val profile: Int, val id: Long)
+
+/**
+ * Where a refusal that was not asked from a tab is kept until «Туннель» has taken it: «Переподключить» sits in the
+ * shell, and with settings a start would refuse it opens the form on what is missing (the operator, 2026-11-28: «Keep
+ * the tunnel, show what is missing»). [Refusal.id] tells one refusal from the next, of the same profile too, and from
+ * one a screen made again has already taken.
+ */
+internal class Refusals(private val id: () -> Long = { System.nanoTime() }) {
+    private val last = MutableStateFlow<Refusal?>(null)
+    val current: StateFlow<Refusal?> = last.asStateFlow()
+
+    fun refuse(profile: Int) {
+        last.value = Refusal(profile, id())
+    }
 }
 
 /** Where a question is answered: the tab its badge sits on. */

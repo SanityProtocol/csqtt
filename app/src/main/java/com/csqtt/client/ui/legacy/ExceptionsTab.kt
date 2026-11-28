@@ -1,6 +1,7 @@
 package com.csqtt.client.ui.legacy
 
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -99,6 +100,7 @@ import com.csqtt.client.ui.legacy.design.CsqttSpacing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1364,7 +1366,13 @@ fun ExceptionsTab(
                 val formattedBlack = parseIpsFromText(ipInputTextBlack).joinToString(",")
                 val formattedWhite = parseIpsFromText(ipInputTextWhite).joinToString(",")
                 appPersistenceScope.launch {
+                    // the core takes both lists by the routing observer's push; the VPN interface leaves the black
+                    // list's addresses out of the tunnel (Android 13+), so a running one is made again when they
+                    // changed, as the apps' dialog does at its close — it kept the old routes until a reconnect
+                    // (card p3-apply-bar). Stored first: the service reads the store
+                    val before = settingsStore.vpnSettings.first()
                     settingsStore.saveIpRules(ipIsWhiteMode, formattedBlack, formattedWhite)
+                    if (VpnPlan.settingsDiffer(before, settingsStore.vpnSettings.first(), Build.VERSION.SDK_INT)) reloadIfRunsHere()
                 }
                 showIpsDialog = false
             }

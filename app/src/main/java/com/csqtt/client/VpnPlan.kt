@@ -142,6 +142,43 @@ internal data class VpnPlan(
             return subtract(low, cut) + subtract(high, cut)
         }
 
+        /** The local app rules as the interface takes them: the mode, and that mode's list — none under «Все с VPN». */
+        private fun localApps(settings: VpnSettings): Pair<Boolean, Set<String>> = when {
+            settings.allApps -> false to emptySet()
+            settings.appsWhitelist -> true to settings.whitelistApps
+            else -> false to settings.excludedApps
+        }
+
+        /** The local IP rules as the interface takes them: the black list's prefixes, and nothing from a white list. */
+        private fun localIpExclusions(settings: VpnSettings): List<Ipv4Prefix> =
+            if (settings.ipsWhitelist) emptyList()
+            else settings.ips.split(",", " ", "\n", "\t").map(String::trim).filter(String::isNotEmpty).mapNotNull(Ipv4Prefix::parse)
+
+        /**
+         * [settings] with everything the interface does not take from them left out: the app list of the other mode
+         * (both under «Все с VPN»), a white IP list, and either IP list before Android 13 — the interface takes the
+         * black one alone, as routes left out of the tunnel, and the core routes by both.
+         */
+        private fun asTaken(settings: VpnSettings, sdk: Int): VpnSettings {
+            val (whitelist, selected) = localApps(settings)
+            return settings.copy(
+                appsWhitelist = whitelist,
+                whitelistApps = if (whitelist) selected else emptySet(),
+                excludedApps = if (whitelist) emptySet() else selected,
+                allApps = false,
+                ipsWhitelist = false,
+                ips = if (sdk >= TIRAMISU) localIpExclusions(settings).map(Ipv4Prefix::toString).distinct().sorted().joinToString(",") else "",
+            )
+        }
+
+        /**
+         * Whether an edit of a profile's settings changes the interface built from them, so that a tunnel running on
+         * that profile has its interface made again (card p3-apply-bar: the IP list's dialog and a config file's
+         * import, which stored and made nothing again). An edit of what the interface does not take ([asTaken]) builds
+         * the same interface and makes nothing again: the core takes its own part by the routing observer's push.
+         */
+        fun settingsDiffer(before: VpnSettings, after: VpnSettings, sdk: Int): Boolean = asTaken(before, sdk) != asTaken(after, sdk)
+
         fun of(
             sdk: Int,
             ownPackage: String,
@@ -167,30 +204,20 @@ internal data class VpnPlan(
             if (settings.lanBypass) excluded += LAN_PREFIXES
             // a local IP blacklist (no server rule) or the server's: excluded routes, API 33+ only, as before
             val ipBlacklist = when {
-                serverRule != null -> if (!serverRule.ipIsWhite) serverRule.ips else emptyList()
-                !settings.ipsWhitelist -> settings.ips.split(",", " ", "\n", "\t").map(String::trim).filter(String::isNotEmpty)
-                else -> emptyList()
+                serverRule != null -> if (!serverRule.ipIsWhite) serverRule.ips.mapNotNull(Ipv4Prefix::parse) else emptyList()
+                else -> localIpExclusions(settings)
             }
             val routes: List<Ipv4Prefix>
             val excludedRoutes: List<Ipv4Prefix>
             if (sdk >= TIRAMISU) {
                 routes = listOf(Ipv4Prefix("0.0.0.0", 0))
-                excludedRoutes = (excluded + ipBlacklist.mapNotNull(Ipv4Prefix::parse)).distinct()
+                excludedRoutes = (excluded + ipBlacklist).distinct()
             } else {
                 routes = if (settings.lanBypass) complement(LAN_PREFIXES) else listOf(Ipv4Prefix("0.0.0.0", 0))
                 excludedRoutes = emptyList()
             }
 
-            val whitelist: Boolean
-            val selected: Set<String>
-            when {
-                serverRule != null -> { whitelist = serverRule.isWhite; selected = serverRule.packages.toSet() }
-                settings.allApps -> { whitelist = false; selected = emptySet() }
-                else -> {
-                    whitelist = settings.appsWhitelist
-                    selected = if (whitelist) settings.whitelistApps else settings.excludedApps
-                }
-            }
+            val (whitelist, selected) = if (serverRule != null) serverRule.isWhite to serverRule.packages.toSet() else localApps(settings)
             fun plan(allowed: List<String> = emptyList(), disallowed: List<String> = emptyList(), failure: String? = null) = VpnPlan(
                 clientIp = clientIp,
                 routes = routes,

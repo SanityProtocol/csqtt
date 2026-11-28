@@ -52,6 +52,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -122,6 +123,7 @@ internal fun Field(
     onDone: (() -> Unit)? = null,
     labelEnd: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
+    now: String? = null,
 ) {
     val colors = Csq.colors
     Column(modifier.alpha(if (enabled) 1f else 0.5f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -165,7 +167,22 @@ internal fun Field(
         )
         if (error != null) Text(error, style = Type.sub, color = colors.danger, modifier = Modifier.padding(start = 2.dp))
         if (hint != null) Text(hint, style = Type.sub, color = colors.muted, modifier = Modifier.padding(start = 2.dp))
+        if (now != null) NowLine(now, Modifier.padding(start = 2.dp))
     }
+}
+
+/**
+ * «Сейчас: …» — what the running tunnel uses, under a control whose value it has not taken yet (card p3-apply-bar; the
+ * operator, 2026-11-28: the changed row says what the tunnel uses now). In the accent's colour: it is what works now.
+ * [end]: under a choice at a row's end.
+ */
+@Composable
+internal fun NowLine(value: String, modifier: Modifier = Modifier, end: Boolean = false) {
+    Text(
+        stringResource(R.string.now_value, value), style = Type.sub.copy(fontWeight = FontWeight.Medium), color = Csq.colors.accentText,
+        textAlign = if (end) TextAlign.End else TextAlign.Start,
+        modifier = if (end) modifier.fillMaxWidth() else modifier,
+    )
 }
 
 /**
@@ -186,6 +203,7 @@ internal fun SecretField(
     stored: String? = null,
     onDone: (() -> Unit)? = null,
     accept: (String) -> String = { it },
+    now: String? = null,
 ) {
     var shown by remember { mutableStateOf(false) }
     // a secret left shown is hidden again when the app is left: it is not on the screen for whoever picks the phone up
@@ -210,6 +228,7 @@ internal fun SecretField(
         ),
         visual = if (shown) VisualTransformation.None else PasswordVisualTransformation(),
         onDone = onDone,
+        now = now,
         trailing = {
             IconBtn(
                 icon = if (shown) Icons.eyeOff else Icons.eye,

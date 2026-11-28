@@ -16,6 +16,42 @@ internal object ProfileSwitch {
 
     /** A pick reconnects only onto a profile the run is not on: picking the run's own profile back just selects it. */
     fun pickReconnects(runOn: Boolean, picked: Int, runProfile: Int): Boolean = runOn && picked != runProfile
+
+    /**
+     * The notification while the service builds the next connection of a run that is on: onto another profile, or —
+     * «Переподключить» — onto its own ([target] is where the run goes, null for a switch with no pick).
+     */
+    fun notice(target: Int?, runProfile: Int): String = if (target != null && target == runProfile) "Переподключение…" else "Переключение профиля..."
+}
+
+/** How a reconnect reaches the service; an instrumented test puts a recorder here (there is no tunnel to reconnect). */
+@Volatile
+internal var reconnectSend: (Context, Intent) -> Unit = { context, intent -> context.startService(intent) }
+
+/**
+ * «Переподключить» (card p3-apply-bar; the operator, 2026-11-28): a run that is on reconnects in place with what its
+ * profile holds now. It is the switch a pick of another profile makes, onto the run's own profile: the store is read
+ * anew, new VK calls are made, the core is replaced — and the VPN interface is never closed, so nothing goes past the
+ * tunnel meanwhile, as it would between a stop and a start. A pick still under way keeps its target: the run reconnects
+ * onto where it is going. False when no run is on to reconnect (off, stopping, paused on Wi-Fi: its resume reads the
+ * store by itself).
+ */
+internal fun reconnectRun(context: Context, send: (Intent) -> Unit = { reconnectSend(context, it) }): Boolean {
+    val runOn = ProfileSwitch.runIsOn(
+        TunnelManager.running.value, TunnelManager.starting.value,
+        TunnelManager.stopping.value, TunnelManager.autoPausedForWifi.value,
+    )
+    if (!runOn) return false
+    TunnelManager.switchTarget = TunnelManager.runTargetProfile()
+    TunnelManager.reconnecting.value = true
+    val sent = runCatching {
+        send(Intent(context, TunnelService::class.java).setAction(CsqttConstants.General.ACTION_SWITCH_PROFILE))
+    }.isSuccess
+    if (!sent) {
+        TunnelManager.switchTarget = null
+        TunnelManager.reconnecting.value = false
+    }
+    return sent
 }
 
 /**

@@ -32,7 +32,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import com.csqtt.client.ConnectionStartBlocker
-import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.ConnectionState
 import com.csqtt.client.ConnectionVisuals
 import com.csqtt.client.CsqttConstants
@@ -41,17 +40,17 @@ import com.csqtt.client.HomeNotice
 import com.csqtt.client.ManlCaptchaWebViewManager
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
+import com.csqtt.client.StartCheck
 import com.csqtt.client.StartStage
 import com.csqtt.client.StoredSecretState
 import com.csqtt.client.Tap
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelStart
-import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.WifiRule
 import com.csqtt.client.connectionVisuals
 import com.csqtt.client.homeNotices
-import com.csqtt.client.peerIsLocal
+import com.csqtt.client.startBlocker
 import com.csqtt.client.startStage
 import com.csqtt.client.ui.components.IconBtn
 import com.csqtt.client.ui.design.Icons
@@ -276,35 +275,35 @@ private fun rememberHomeStart(auth: TunnelAuthSnapshot, onInvalidConfiguration: 
     val linkHashesRemoved by store.linkHashesRemoved.collectAsStateWithLifecycle(initialValue = emptySet())
 
     val link = remember(auth.csqttLink) { parseCsqttLink(auth.csqttLink) }
-    // the owner's hashes still in use: the ones the participant took out do not count
-    val linkHashes = link?.hashes.orEmpty().filterNot { it in linkHashesRemoved }
-    val typedHashes = remember(vkHashes) {
-        vkHashes.split(Regex("[,\\s\\n]+")).map(String::trim).filter { it.length >= 16 }.distinct()
-    }
-    val liveHashes = remember(vkHashes, checkResults) {
-        VkHashValidationCodec.active(typedHashes, VkHashValidationCodec.decode(checkResults))
-    }
     val hashSettingsLoaded = hashMode != null && vkToken != null
-    val autoHashes = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS ||
-        (hashMode != null && hashMode != CsqttConstants.VkAutoHash.MODE_MANUAL)
-    val hashesReady = hashSettingsLoaded && ConnectionStartPolicy.hasReadyVkCredentials(
-        linkMode = auth.csqttLinkMode,
-        linkHashCount = linkHashes.size,
-        linkTokenPresent = auth.csqttLinkMode && link?.vkAccessToken?.isNotEmpty() == true,
-        autoHashMode = autoHashes,
-        storedTokenPresent = vkToken?.isNotBlank() == true,
-        manualHashCount = liveHashes.ifEmpty { typedHashes }.size,
-    )
-    val peer = storedPeer.orEmpty().trim()
-    val blocker = ConnectionStartPolicy.blocker(
-        linkMode = auth.csqttLinkMode,
-        linkValid = link != null,
-        peerValid = peer.isNotBlank() && !peer.contains(":") && !peerIsLocal(peer),
-        peerPortValid = !manualPorts || peerPort in 1..65535,
-        connectionPasswordSet = auth.connectionPassword.isNotBlank(),
-        connectionPasswordReadable = auth.connectionPasswordState != StoredSecretState.Unreadable,
-        hashesReady = hashesReady,
-    )
+    // What a start checks of the profile's settings: one function, which «Переподключить» asks too (startBlocker). Until
+    // the hash settings are read the hashes are not ready
+    val blocker = remember(
+        auth.csqttLinkMode, auth.csqttLink, auth.connectionPassword, auth.connectionPasswordState, storedPeer, manualPorts,
+        peerPort, vkHashes, checkResults, vkAuthMode, hashMode, vkToken, linkHashesRemoved,
+    ) {
+        if (!hashSettingsLoaded) {
+            ConnectionStartBlocker.Hashes
+        } else {
+            startBlocker(
+                StartCheck(
+                    linkMode = auth.csqttLinkMode,
+                    link = auth.csqttLink,
+                    peer = storedPeer.orEmpty(),
+                    manualPorts = manualPorts,
+                    peerPort = peerPort,
+                    password = auth.connectionPassword,
+                    passwordReadable = auth.connectionPasswordState != StoredSecretState.Unreadable,
+                    ownHashes = vkHashes,
+                    hashChecks = checkResults,
+                    authMode = vkAuthMode,
+                    hashMode = hashMode.orEmpty(),
+                    tokenPresent = vkToken?.isNotBlank() == true,
+                    removedOwner = linkHashesRemoved,
+                ),
+            )
+        }
+    }
     val loaded = storedPeer != null && hashSettingsLoaded && auth.isLoaded
 
     val fillSettings = stringResource(R.string.home_fill_settings)

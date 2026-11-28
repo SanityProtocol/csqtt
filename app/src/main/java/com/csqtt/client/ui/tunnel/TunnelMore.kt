@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.DpiSplitMode
 import com.csqtt.client.R
+import com.csqtt.client.RunKey
 import com.csqtt.client.StreamZone
 import com.csqtt.client.StreamsPlan
 import com.csqtt.client.StreamsSlider
@@ -60,6 +61,7 @@ import com.csqtt.client.shouldConfirmAutoJsMode
 import com.csqtt.client.ui.components.Card
 import com.csqtt.client.ui.components.Field
 import com.csqtt.client.ui.components.IconBtn
+import com.csqtt.client.ui.components.NowLine
 import com.csqtt.client.ui.components.Seg
 import com.csqtt.client.ui.components.Select
 import com.csqtt.client.ui.components.SettingRow
@@ -81,8 +83,9 @@ private val Inset = RoundedCornerShape(14.dp)
  * «Дополнительно» (the canvas, F-TunnelMore, F-TunnelMoreTcp): how the tunnel is made — where the access to VK's
  * servers comes from, the transport, the streams, the MTU. Folded until asked for; open, it stays open on every
  * profile. Nothing is held while the tunnel runs (the operator, 2026-11-27). All but one of the rows are read when a run
- * starts, so a change is for the next connection: the card says it once, under its title ([RunNote]). The MTU is the
- * VPN interface's, which is made again while the tunnel runs: it is changed at once, and says so.
+ * starts, so a change is for the next connection: the row then says what the tunnel uses now, under its choice, and the
+ * bar over the tabs offers the reconnect (card p3-apply-bar; the operator, 2026-11-28). The MTU is the VPN
+ * interface's, which is made again while the tunnel runs: it is changed at once, and says so.
  */
 @Composable
 internal fun MoreCard(view: TunnelView, open: Boolean, onOpen: (Boolean) -> Unit) {
@@ -101,7 +104,6 @@ internal fun MoreCard(view: TunnelView, open: Boolean, onOpen: (Boolean) -> Unit
             Icon(if (open) Icons.chevronUp else Icons.chevronDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = colors.muted)
         }
         if (open) {
-            if (view.runsHere) RunNote()
             More(view)
         } else {
             Text(
@@ -152,6 +154,8 @@ private fun More(view: TunnelView) {
             description = stringResource(R.string.tunnel_work_mode),
         )
     }
+    // the mode the run is in, where the mode in force here is another
+    view.now(RunKey.AUTH_MODE) { it.authMode }?.takeIf { it != view.authMode }?.let { NowLine(authModeName(it), end = true) }
     if (view.authMode == CsqttConstants.VkAuth.MODE_CAPTCHA) Captcha(view)
 
     SettingRow(stringResource(R.string.tunnel_srtp), onInfo = { nav.open(Routes.info(InfoTopic.SRTP)) }) {
@@ -165,6 +169,7 @@ private fun More(view: TunnelView) {
             description = stringResource(R.string.tunnel_srtp),
         )
     }
+    view.now(RunKey.SRTP) { it.srtp }?.let { NowLine(srtpName(it), end = true) }
 
     SettingRow(stringResource(R.string.tunnel_transport), onInfo = { nav.open(Routes.info(InfoTopic.TRANSPORT)) }) {
         Select(
@@ -174,6 +179,7 @@ private fun More(view: TunnelView) {
             description = stringResource(R.string.tunnel_transport),
         )
     }
+    view.now(RunKey.TRANSPORT) { it.transport }?.let { NowLine(if (DpiSplitMode.isAvailable(it)) TCP else UDP, end = true) }
     if (DpiSplitMode.isAvailable(transport)) {
         Column(
             Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp).background(colors.raised, Inset).padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 12.dp),
@@ -183,6 +189,8 @@ private fun More(view: TunnelView) {
             Seg(DpiSplitMode.entries.map { stringResource(it.text()) }, DpiSplitMode.entries.indexOf(dpi), { index ->
                 scope.launch { store.saveDpiSplit(DpiSplitMode.entries[index]) }
             })
+            // the level the run splits with — none while it is on UDP
+            view.now(RunKey.DPI) { it.dpi }?.let { NowLine(stringResource(it.text())) }
             // what the picked level does, and what it costs: the levels' names alone say neither
             Text(stringResource(dpi.says()), style = Type.sub, color = colors.muted)
         }
@@ -194,18 +202,43 @@ private fun More(view: TunnelView) {
     SettingRow(stringResource(R.string.tunnel_fingerprint)) {
         Select(fingerprint, Fingerprints, { scope.launch { store.saveFingerprint(it) } }, stringResource(R.string.tunnel_fingerprint))
     }
+    view.now(RunKey.FINGERPRINT) { it.fingerprint }?.let { used -> NowLine(Fingerprints.firstOrNull { it.first == used }?.second ?: used, end = true) }
     // which of VK's servers carry the tunnel is the choice of whoever runs the server
     if (!view.linkMode) {
-        val title = TurnSubnetRegistry.getSubnet(subnet)?.title
         NavRow(
             stringResource(R.string.tunnel_turn),
-            when {
-                title == null -> stringResource(R.string.tunnel_turn_all)
-                ipLimit.toIntOrNull() == null -> stringResource(R.string.tunnel_turn_all_ips, title)
-                else -> stringResource(R.string.tunnel_turn_ips, title, ipLimit)
-            },
+            turnName(subnet, ipLimit),
+            now = view.now(RunKey.TURN) { it }?.let { turnName(it.turnSubnet, it.turnLimit) },
         ) { nav.open(Routes.turnSubnets(view.profile)) }
     }
+}
+
+/** A choice of TURN subnets in words: all of VK's, or one subnet and how many of its addresses. */
+@Composable
+private fun turnName(subnet: String, ipLimit: String): String {
+    val title = TurnSubnetRegistry.getSubnet(subnet)?.title
+    return when {
+        title == null -> stringResource(R.string.tunnel_turn_all)
+        ipLimit.toIntOrNull() == null -> stringResource(R.string.tunnel_turn_all_ips, title)
+        else -> stringResource(R.string.tunnel_turn_ips, title, ipLimit)
+    }
+}
+
+/** A creds mode's name, as its row's choices name it. */
+@Composable
+private fun authModeName(mode: String): String = stringResource(
+    when (mode) {
+        CsqttConstants.VkAuth.MODE_CAPTCHA -> R.string.tunnel_work_captcha
+        CsqttConstants.VkAuth.MODE_AUTO_JS -> R.string.tunnel_work_auto_vk
+        else -> R.string.tunnel_work_auto
+    },
+)
+
+@Composable
+private fun srtpName(mode: String): String = when (mode) {
+    CsqttConstants.SrtpMode.WRAP -> SRTP_WRAP
+    CsqttConstants.SrtpMode.DTLS -> SRTP_DTLS
+    else -> stringResource(R.string.tunnel_work_auto)
 }
 
 private fun DpiSplitMode.says(): Int = when (this) {
@@ -243,6 +276,9 @@ private fun Captcha(view: TunnelView) {
     val auto = mode == "auto"
     val webView = mode != "rjs"
     val wbvManual = wbvMethod != "auto"
+    // the run's own choices, where one of them is not the profile's any more: said under the control it differs in
+    val used = view.run?.takeIf { RunKey.CAPTCHA_MODE in it.keys || RunKey.CAPTCHA_SOLVE in it.keys }?.uses
+    val usedAuto = used?.let { it.captchaMode == "auto" }
     Column(
         Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp).background(colors.raised, Inset)
             .padding(start = 12.dp, top = 4.dp, end = 12.dp, bottom = 12.dp),
@@ -262,6 +298,9 @@ private fun Captcha(view: TunnelView) {
                 }
             },
         )
+        if (usedAuto != null && usedAuto != auto) {
+            NowLine(stringResource(if (usedAuto) R.string.now_captcha_on else R.string.now_captcha_off))
+        }
         if (!auto) {
             Text(stringResource(R.string.tunnel_captcha_method), style = Type.label, color = colors.muted)
             Seg(listOf(WBV, RJS), if (webView) 0 else 1, { index ->
@@ -275,6 +314,8 @@ private fun Captcha(view: TunnelView) {
                     }
                 }
             })
+            // a run that solves by itself («Авто капча») is on neither method: the switch above says so
+            if (used != null && usedAuto == false && (used.captchaMode != "rjs") != webView) NowLine(if (used.captchaMode == "rjs") RJS else WBV)
             // RJS solves by itself: only the web view has a manual mode
             if (webView) {
                 Text(stringResource(R.string.tunnel_captcha_mode), style = Type.label, color = colors.muted)
@@ -282,6 +323,9 @@ private fun Captcha(view: TunnelView) {
                     listOf(stringResource(R.string.tunnel_captcha_manual), stringResource(R.string.tunnel_work_auto)), if (wbvManual) 0 else 1,
                     { index -> scope.launch { store.saveWbvCaptchaSolveMethod(if (index == 0) "manual" else "auto") } },
                 )
+                if (used != null && (used.captchaSolve != "auto") != wbvManual) {
+                    NowLine(stringResource(if (used.captchaSolve != "auto") R.string.tunnel_captcha_manual else R.string.tunnel_work_auto))
+                }
             }
         }
     }
@@ -371,6 +415,8 @@ private fun Streams(view: TunnelView) {
             }
         },
     )
+    // the count the run asked for, while the one picked here waits for a reconnect
+    view.now(RunKey.STREAMS) { it.streams }?.let { NowLine(it.toString()) }
     // what is recommended, said while the line has a part above it; in that part, and above it, what the count is
     val recommended = StreamsPlan.totalWithin(StreamsPlan.RECOMMENDED_PER_HASH, calls, maximum)
     when {

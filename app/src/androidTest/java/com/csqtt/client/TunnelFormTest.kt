@@ -444,13 +444,14 @@ class TunnelFormTest {
     }
 
     /**
-     * The operator's note of 2026-11-27: nothing is held while the tunnel runs. With the tunnel on, or being started, for
-     * the open profile the tab says once, and «Дополнительно» once more, that changes are for the next connection — and
-     * each setting is changed all the same; the MTU, which a running tunnel takes at once, says that instead. A tunnel
-     * on for another profile says nothing here.
+     * The operator's notes of 2026-11-27 and 2026-11-28: nothing is held while the tunnel runs, and a setting changed
+     * under it answers at once (card p3-apply-bar). With the tunnel on for the open profile each setting is changed all
+     * the same; the row then says what the tunnel uses now, and the bar over the tabs offers the reconnect — both gone
+     * once the value is put back. The MTU, which a running tunnel takes at once, says that instead and raises no bar. A
+     * tunnel on for another profile says nothing here. The standing line of 11-27 is gone: it was not seen.
      */
     @Test
-    fun withTheTunnelOnNothingIsHeldAndTheTabSaysWhatAChangeIsFor() {
+    fun withTheTunnelOnNothingIsHeldAndAChangedRowSaysWhatTheTunnelUses() {
         runBlocking {
             slot.saveFormAddress("203.0.113.1", null, store.profileEpoch.first())
             slot.saveVkHashesOnly("H".repeat(20))
@@ -458,54 +459,63 @@ class TunnelFormTest {
             slot.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CAPTCHA)
             slot.saveCaptchaMode("wv")
         }
-        val note = "Туннель включён: изменения применятся при следующем подключении."
+        val standing = "Туннель включён: изменения применятся при следующем подключении."
         val atOnce = "Меняется сразу, без переподключения."
-        fun notes() = compose.onAllNodes(hasText(note)).fetchSemanticsNodes().size
+        fun bars() = compose.onAllNodes(hasText(ShellTestKit.BAR)).fetchSemanticsNodes().size
         val track = hasContentDescription("Потоки")
-        val runBefore = TunnelManager.runIdentity()
+        fun tapStreams(count: Int) = compose.onNode(track).performScrollTo().performTouchInput {
+            val inset = 10.dp.toPx()
+            click(Offset(inset + (width - 2 * inset) * (count - 5) / 95f, centerY))
+        }
         ActivityScenario.launch(MainActivity::class.java).use {
             openTunnel()
             compose.onNodeWithText("Дополнительно").performScrollTo().performClick()
             compose.waitUntil(5_000) { shown("MTU") }
-            assertEquals("said with no tunnel on", 0, notes())
+            assertEquals("the bar with no tunnel on", 0, bars())
             assertFalse(shown(atOnce))
-            // the tunnel as the manager would say it, with no tunnel: the screen reads nothing else
             try {
                 // on for another profile: this one's changes are its own next start, with nothing to say
-                TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(SLOT + 1, null, emptyList()))
-                TunnelManager.running.value = true
+                ShellTestKit.tunnelOn(SLOT + 1)
                 compose.waitForIdle()
-                assertEquals("said of another profile's tunnel", 0, notes())
-                assertFalse("the MTU's line too", shown(atOnce))
-                TunnelManager.running.value = false
+                assertFalse("the MTU's line, for another profile's tunnel", shown(atOnce))
+                ShellTestKit.tunnelOff()
                 compose.waitForIdle()
-                // a start being prepared for this profile has read its settings already
-                TunnelManager.applyRunIdentity(TunnelManager.RunIdentity(SLOT, null, emptyList()))
-                TunnelManager.starting.value = true
-                compose.waitUntil(5_000) { notes() == 2 }
-                TunnelManager.running.value = true
-                TunnelManager.starting.value = false
-                compose.waitForIdle()
-                assertEquals("once at the head of the tab, once in «Дополнительно»", 2, notes())
-                assertTrue(shown(atOnce))
-                // «Авто капча», of the block that was held
+
+                // on for this profile, with what the profile holds: nothing waits, and nothing is said in advance
+                ShellTestKit.tunnelOn(SLOT)
+                compose.waitUntil(5_000) { shown(atOnce) }
+                assertEquals(0, bars())
+                assertFalse("the standing line is gone", shown(standing))
+                assertFalse(shown("Сейчас", substring = true))
+
+                // «Авто капча», of the block that was held: taken, and the row says what the tunnel is on
                 compose.onNodeWithText("Авто капча").performScrollTo().performClick()
                 compose.waitUntil(5_000) { runBlocking { slot.captchaMode.first() } == "auto" }
+                compose.waitUntil(5_000) { bars() == 1 && shown("Сейчас: выключена") }
                 // the count of streams, by a finger on the line at 30
-                compose.onNode(track).performScrollTo().performTouchInput {
-                    val inset = 10.dp.toPx()
-                    click(Offset(inset + (width - 2 * inset) * (30 - 5) / 95f, centerY))
-                }
+                tapStreams(30)
                 compose.waitUntil(5_000) { runBlocking { slot.workersPerHash.first() } == 30 }
-                // the MTU
+                compose.waitUntil(5_000) { shown("Сейчас: 20") }
+                // the MTU: taken by the running tunnel at once, so nothing of it waits
                 compose.onNodeWithText("1500").performScrollTo().performClick()
                 compose.waitUntil(5_000) { shown("1280") }
                 compose.onAllNodes(hasText("1280")).onLast().performClick()
                 compose.waitUntil(5_000) { runBlocking { slot.vpnMtu.first() } == 1280 }
+                compose.waitForIdle()
+                assertFalse("the MTU waits for nothing", shown("Сейчас: 1500"))
+                assertEquals(1, bars())
+
+                // put back, one by one: the row's line goes with its value, the bar with the last of them
+                tapStreams(20)
+                compose.waitUntil(5_000) { runBlocking { slot.workersPerHash.first() } == 20 }
+                compose.waitUntil(5_000) { !shown("Сейчас: 20") }
+                assertEquals("the captcha's choice still waits", 1, bars())
+                compose.onNodeWithText("Авто капча").performScrollTo().performClick()
+                compose.waitUntil(5_000) { runBlocking { slot.captchaMode.first() } == "wv" }
+                compose.waitUntil(5_000) { bars() == 0 }
+                assertFalse(shown("Сейчас", substring = true))
             } finally {
-                TunnelManager.running.value = false
-                TunnelManager.starting.value = false
-                TunnelManager.applyRunIdentity(runBefore)
+                ShellTestKit.tunnelOff()
             }
         }
     }

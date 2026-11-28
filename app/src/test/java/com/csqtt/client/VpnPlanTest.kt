@@ -242,3 +242,81 @@ class AppRoutingPresetsTest {
         )
     }
 }
+
+/**
+ * Card p3-apply-bar: the IP list's dialog and a config file's import make a running tunnel's interface again when what
+ * it is built from changed, and only then (the operator, 2026-11-28: «Two direct fixes, no watcher»).
+ */
+class VpnSettingsDifferTest {
+    private val base = VpnSettings(excludedApps = setOf("org.telegram.messenger"), ips = "203.0.113.7,198.51.100.0/24")
+
+    private fun differ(after: VpnSettings, before: VpnSettings = base, sdk: Int = 34) = VpnPlan.settingsDiffer(before, after, sdk)
+
+    @Test fun nothingChangedBuildsTheSameInterface() {
+        assertFalse(differ(base))
+        assertFalse(differ(base.copy()))
+    }
+
+    @Test fun theInterfacesOwnSettingsEachMakeItAgain() {
+        for (after in listOf(
+            base.copy(appsWhitelist = true, whitelistApps = setOf("com.android.chrome")),
+            base.copy(excludedApps = emptySet()),
+            base.copy(excludedApps = setOf("org.telegram.messenger", "com.android.chrome")),
+            base.copy(allApps = true),
+            base.copy(lanBypass = true),
+            base.copy(dnsOverride = "1.1.1.1"),
+            base.copy(mtu = 1280),
+        )) {
+            assertTrue("$after", differ(after))
+            assertTrue("on an older Android too: $after", differ(after, sdk = 30))
+            assertNotEquals("the plans differ: $after", plan(base), plan(after))
+        }
+    }
+
+    @Test fun anAppListTheModeDoesNotUseBuildsTheSameInterface() {
+        val white = base.copy(appsWhitelist = true, whitelistApps = setOf("com.android.chrome"))
+        val all = base.copy(allApps = true)
+        for ((before, after) in listOf(
+            // the other mode's list, edited
+            base to base.copy(whitelistApps = setOf("com.android.chrome")),
+            white to white.copy(excludedApps = emptySet()),
+            // «Все с VPN» keeps both lists and uses neither
+            all to all.copy(excludedApps = emptySet(), whitelistApps = setOf("com.android.chrome"), appsWhitelist = true),
+            // and with nothing in the black list it is the black mode itself
+            VpnSettings() to VpnSettings(allApps = true),
+        )) {
+            assertFalse("$before → $after", differ(after, before))
+            assertEquals("$before → $after", plan(before), plan(after))
+        }
+    }
+
+    @Test fun aBlackListEditMakesItAgainOnAndroid13AndLater() {
+        val edited = base.copy(ips = "203.0.113.7")
+        assertTrue(differ(edited))
+        assertNotEquals(plan(base), plan(edited))
+        // an older Android has no excluded routes: the interface takes nothing from the list, the core routes by it
+        assertFalse(differ(edited, sdk = 32))
+        assertEquals(plan(base, sdk = 32), plan(edited, sdk = 32))
+    }
+
+    @Test fun theSameAddressesWrittenAnotherWayBuildTheSameInterface() {
+        for (same in listOf("198.51.100.0/24,203.0.113.7", "203.0.113.7/32 198.51.100.9/24", "203.0.113.7\n198.51.100.0/24\nnot-an-address")) {
+            assertFalse(same, differ(base.copy(ips = same)))
+            assertEquals(same, plan(base).excludedRoutes.toSet(), plan(base.copy(ips = same)).excludedRoutes.toSet())
+        }
+    }
+
+    @Test fun aWhiteListIsTheCoresAlone() {
+        val white = VpnSettings(ipsWhitelist = true, ips = "203.0.113.7")
+        // a white list edited: the interface takes nothing from it
+        assertFalse(differ(white.copy(ips = "203.0.113.7,203.0.113.8"), before = white))
+        assertEquals(plan(white), plan(white.copy(ips = "203.0.113.7,203.0.113.8")))
+        // the mode changed with a black list that held addresses: its routes go from the interface, or come to it
+        assertTrue(differ(white, before = base))
+        assertTrue(differ(base, before = white))
+        assertNotEquals(plan(base), plan(white))
+        // with nothing in the black list the mode alone changes nothing the interface takes
+        assertFalse(differ(white, before = VpnSettings(ips = "")))
+        assertEquals(plan(VpnSettings(ips = "")), plan(white))
+    }
+}

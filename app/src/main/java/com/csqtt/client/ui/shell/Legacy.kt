@@ -121,6 +121,21 @@ internal fun LegacyTab(tab: Tab, homeLayout: HomeLayout) {
             }
         }
     }
+    // A refusal that was not asked from Home: «Переподключить», in the shell, with settings a start would refuse (card
+    // p3-apply-bar). It marks the open profile's form as Home's refused start does, once that profile is the one it
+    // names; one this screen has taken already — before it was made again — is not taken twice
+    val refusal by LocalOwners.current.refusals.current.collectAsStateWithLifecycle()
+    var refusalTaken by rememberSaveable { mutableLongStateOf(0L) }
+    LaunchedEffect(refusal, auth.isLoaded, auth.profile) {
+        val asked = refusal ?: return@LaunchedEffect
+        if (asked.id == refusalTaken || !auth.isLoaded || auth.profile != asked.profile) return@LaunchedEffect
+        refusalTaken = asked.id
+        tunnelValidationProfile = auth.profile
+        tunnelValidationAdded = auth.addedAt
+        tunnelValidationInUse = auth.inUse
+        tunnelValidationEpoch = auth.epoch
+        tunnelValidationRequest += 1
+    }
     // «Дополнительно» of «Туннель» stays open from one profile to the next: it is how the screen is read, not a profile's
     var tunnelMoreOpen by rememberSaveable { mutableStateOf(false) }
 

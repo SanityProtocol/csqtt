@@ -435,7 +435,12 @@ internal object SubscriptionImporter {
             globalEndpoints[endpoint] = slot
         }
 
+        // the node the tunnel is on, rewritten by its subscription: no change of the user's, and no bar for it — the
+        // run's record follows what this write changes, and nothing the user had changed before it
+        val runRead: suspend (Int) -> RunRead = { profile -> SettingsStore(store.appContext, ProfileScope.Fixed(profile)).runRead() }
+        val runBefore = TunnelManager.beforeSubscriptionWrite(writes.map { it.profile }, runRead)
         store.applySubscriptionImport(writes)
+        TunnelManager.subscriptionWrote(runBefore, runRead)
         store.recordSubscriptionImport(
             url = url,
             title = preview.title,
